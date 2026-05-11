@@ -1,0 +1,119 @@
+# InduVista — Phase 0–2 Compose stack.
+#
+# Default `docker compose up` brings up the rigid foundation only:
+#   - postgres (TimescaleDB)
+#   - migrate (runs `alembic upgrade head`, then exits)
+#   - backend (FastAPI)
+#
+# Optional profiles:
+#   --profile workers  → modbus_worker + replay_worker
+#   --profile sim      → modbus_simulator (Phase 1 dev only)
+#
+# Example:
+#   docker compose --profile sim --profile workers up
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: svj_postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      # Bind to localhost only — never expose Postgres on the LAN by default.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - svj_postgres_data:/var/lib/postgresql/data
+      # Init scripts run only on first boot (empty data dir). Use Alembic for
+      # schema changes after that.
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h localhost forces a TCP check. Without it, pg_isready uses the Unix
+      # socket, which is up during Postgres's internal init phase before TCP
+      # is actually listening — causing dependents to start too early.
+      test: ["CMD-SHELL", "pg_isready -h localhost -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  migrate:
+    build: ./backend
+    container_name: svj_migrate
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    working_dir: /app
+    command: ["alembic", "upgrade", "head"]
+    # Run-once: not a long-lived service.
+    restart: "no"
+
+  backend:
+    build: ./backend
+    container_name: svj_backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      # Mounted read-only so `docker compose run backend python -m app.seed`
+      # can read the canonical tag config. The seeder NEVER writes here.
+      - ./config:/app/config:ro
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  modbus_simulator:
+    build: ./simulators
+    container_name: svj_modbus_simulator
+    restart: unless-stopped
+    profiles: ["sim"]
+    ports:
+      - "127.0.0.1:5020:5020"
+    volumes:
+      # The simulator reads tag definitions from this JSON. Mounted read-only
+      # so the container can never mutate the canonical config.
+      - ./config:/app/config:ro
+    environment:
+      CONFIG_ROOT: /app/config
+      SIM_DEVICE: FLOWCOMP_001
+
+  modbus_worker:
+    build: ./backend
+    container_name: svj_modbus_worker
+    restart: unless-stopped
+    profiles: ["workers"]
+    env_file:
+      - .env
+    environment:
+      SF_BUFFER_PATH: /data/sf_buffer.db
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - ./backend/app:/app/app
+      # Durable local buffer for store-and-forward. Survives container
+      # restart so a Postgres outage that outlasts the worker doesn't
+      # cost samples.
+      - ./storage:/data
+    command: ["python", "-m", "app.workers.modbus_supervisor"]
+
+  # NOTE: A separate replay_worker service was originally planned. Phase 2
+  # folded the replay loop into modbus_supervisor so we have one process,
+  # one SQLite writer, and no multi-writer dance on the local buffer. If
+  # polling and replay ever need independent scaling, split them back out
+  # by reading from ./storage:/data in a dedicated container.
+
+volumes:
+  svj_postgres_data:

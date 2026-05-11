@@ -1,0 +1,12 @@
+# Phase 0 dependencies. Pinned for reproducibility.
+# Phase 1 will add pymodbus; later phases will add anyio test helpers,
+# prometheus-client, etc.
+
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+sqlalchemy==2.0.36
+alembic==1.13.3
+psycopg2-binary==2.9.10
+pydantic==2.10.0
+pydantic-settings==2.6.0
+pymodbus==3.7.4

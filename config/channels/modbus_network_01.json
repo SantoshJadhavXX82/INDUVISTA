@@ -1,0 +1,10 @@
+{
+  "name": "MODBUS_NETWORK_01",
+  "description": "Primary Modbus network",
+  "protocol_connector": "modbus",
+  "transport": "tcp",
+  "partner_channel": null,
+  "gap_tolerance": null,
+  "network_priority": 1,
+  "failback_delay_sec": null
+}

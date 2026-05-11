@@ -1,0 +1,18 @@
+{
+  "name": "FLOWCOMP_001",
+  "description": "Gas flow computer simulator",
+  "channel": "MODBUS_NETWORK_01",
+  "template": "gas_flow_computer",
+  "protocol": "modbus_tcp",
+  "host": "modbus_simulator",
+  "port": 5020,
+  "unit_id": 1,
+  "duty_role": "primary",
+  "stale_after_sec": 30,
+  "scan_interval_ms": 1000,
+  "enabled": true,
+  "secondary_host": null,
+  "secondary_port": null,
+  "secondary_unit_id": null,
+  "redundant_device": null
+}
