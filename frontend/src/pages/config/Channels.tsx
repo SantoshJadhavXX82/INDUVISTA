@@ -15,6 +15,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 import {
   Table,
   TableBody,
@@ -188,7 +190,10 @@ function ChannelForm({
       className="space-y-4"
     >
       <div className="space-y-1.5">
-        <Label htmlFor="name">Name {!isNew && <span className="normal-case text-muted-foreground">(immutable)</span>}</Label>
+        <Label htmlFor="name">
+          Name <HelpTip entry={help.channel.name} />
+          {!isNew && <span className="normal-case text-muted-foreground"> (immutable)</span>}
+        </Label>
         <Input
           id="name"
           required
@@ -209,7 +214,10 @@ function ChannelForm({
 
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="protocol">Protocol {!isNew && <span className="normal-case text-muted-foreground">(immutable)</span>}</Label>
+          <Label htmlFor="protocol">
+            Protocol
+            {!isNew && <span className="normal-case text-muted-foreground"> (immutable)</span>}
+          </Label>
           <select
             id="protocol"
             disabled={!isNew}
@@ -228,7 +236,9 @@ function ChannelForm({
         </div>
 
         <div className="space-y-1.5">
-          <Label htmlFor="transport">Transport</Label>
+          <Label htmlFor="transport">
+            Transport <HelpTip entry={help.channel.transport} />
+          </Label>
           <select
             id="transport"
             value={form.transport}
@@ -244,7 +254,9 @@ function ChannelForm({
 
       {!isNew && (
         <div className="space-y-1.5">
-          <Label htmlFor="enabled">Status</Label>
+          <Label htmlFor="enabled">
+            Status <HelpTip entry={help.channel.enabled} />
+          </Label>
           <label className="flex items-center gap-2 h-9 text-sm">
             <input
               id="enabled"

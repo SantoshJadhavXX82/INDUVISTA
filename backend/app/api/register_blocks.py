@@ -25,6 +25,9 @@ class RegisterBlockCreate(BaseModel):
     # phase offset" — same defaults the seeder writes for every block.
     scan_interval_ms: int = Field(1000, ge=10)
     phase_ms: int = Field(0, ge=0)
+    # Phase 8.5.1 — engineering policy: is this block RW-capable?
+    # Only meaningful for FC 1 (Coil) and FC 3 (HR). DB CHECK enforces this.
+    writable: bool = Field(False, description="Allow writes to tags in this block")
 
 
 class RegisterBlockUpdate(BaseModel):
@@ -33,6 +36,7 @@ class RegisterBlockUpdate(BaseModel):
     scan_interval_ms: int | None = Field(None, ge=10)
     phase_ms: int | None = Field(None, ge=0)
     enabled: bool | None = None
+    writable: bool | None = None
 
 
 class RegisterBlockResponse(BaseModel):
@@ -46,12 +50,13 @@ class RegisterBlockResponse(BaseModel):
     scan_interval_ms: int | None
     phase_ms: int | None
     enabled: bool
+    writable: bool
 
 
 _BLOCK_SELECT = """
     SELECT b.id, b.device_id, d.name AS device_name, b.name,
            b.function_code, b.start_address, b.count,
-           b.scan_interval_ms, b.phase_ms, b.enabled
+           b.scan_interval_ms, b.phase_ms, b.enabled, b.writable
     FROM register_blocks b
     JOIN devices d ON d.id = b.device_id
 """
@@ -106,11 +111,11 @@ def create_register_block(
             text("""
                 INSERT INTO register_blocks (
                     device_id, name, function_code, start_address, count,
-                    scan_interval_ms, phase_ms
+                    scan_interval_ms, phase_ms, writable
                 )
                 VALUES (
                     :device_id, :name, :function_code, :start_address, :count,
-                    :scan_interval_ms, :phase_ms
+                    :scan_interval_ms, :phase_ms, :writable
                 )
                 RETURNING id
             """),
@@ -208,11 +213,11 @@ def bulk_create_register_blocks(
                         INSERT INTO register_blocks (
                             device_id, name, function_code,
                             start_address, count,
-                            scan_interval_ms, phase_ms
+                            scan_interval_ms, phase_ms, writable
                         ) VALUES (
                             :device_id, :name, :function_code,
                             :start_address, :count,
-                            :scan_interval_ms, :phase_ms
+                            :scan_interval_ms, :phase_ms, :writable
                         )
                         RETURNING id
                     """),

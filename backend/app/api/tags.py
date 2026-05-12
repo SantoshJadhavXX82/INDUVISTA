@@ -35,11 +35,33 @@ class TagCreate(BaseModel):
     function_code: int = Field(..., ge=1, le=4)
     address: int = Field(..., ge=0, le=65535)
     register_count: int = Field(..., ge=1, le=4)
-    engineering_unit: str | None = None
+    # Phase 8.1: engineering unit has two paths — pick from master (preferred)
+    # or override with free text. Mutual exclusion is enforced by a CHECK
+    # constraint in the DB and a validator below.
+    engineering_unit_id: int | None = Field(
+        None, description="FK to engineering_units master (preferred)"
+    )
+    engineering_unit: str | None = Field(
+        None, max_length=64,
+        description="Free-text override — use only when master doesn't have what you need",
+    )
     scale: float = 1.0
     offset: float = 0.0
     min_value: float | None = None
     max_value: float | None = None
+    is_heartbeat: bool = False
+    heartbeat_max_stale_sec: int | None = Field(None, gt=0)
+    # Phase 8.3 — optional reference to a named_set for value→label translation.
+    # Only meaningful for integer/boolean data types; the API doesn't enforce
+    # this (data_type can change) but the UI does.
+    named_set_id: int | None = None
+    # Phase 8.5.1 — explicit write opt-in. Defaults FALSE — every tag is
+    # read-only until the engineer says otherwise. DB CHECK forbids
+    # writable=true on FC 2 (DI) and FC 4 (IR).
+    writable: bool = Field(False, description="Allow writes to this tag")
+
+    def model_post_init(self, _ctx):
+        _validate_unit_mutual_exclusion(self.engineering_unit_id, self.engineering_unit)
 
 
 class TagUpdate(BaseModel):
@@ -50,12 +72,21 @@ class TagUpdate(BaseModel):
     function_code: int | None = Field(None, ge=1, le=4)
     address: int | None = Field(None, ge=0, le=65535)
     register_count: int | None = Field(None, ge=1, le=4)
-    engineering_unit: str | None = None
+    engineering_unit_id: int | None = None
+    engineering_unit: str | None = Field(None, max_length=64)
     scale: float | None = None
     offset: float | None = None
     min_value: float | None = None
     max_value: float | None = None
     enabled: bool | None = None
+    is_heartbeat: bool | None = None
+    heartbeat_max_stale_sec: int | None = Field(None, gt=0)
+    named_set_id: int | None = None
+    # Phase 8.5.1 — writability toggle
+    writable: bool | None = None
+    # Note: no model_post_init validator here — PATCH may pass only ONE of the
+    # two fields (e.g. switching from FK to override clears one), so the
+    # DB CHECK constraint is the right gate, not the Pydantic model.
 
 
 class TagResponse(BaseModel):
@@ -71,12 +102,39 @@ class TagResponse(BaseModel):
     function_code: int
     address: int
     register_count: int
+    # Both unit fields — exactly one is non-null (or both null for unitless tags)
+    engineering_unit_id: int | None
     engineering_unit: str | None
+    # Resolved fields from the master, included for display — saves the
+    # frontend from doing a separate lookup. NULL when the tag uses an
+    # override (or has no unit at all).
+    unit_code: str | None
+    unit_label: str | None
+    unit_quantity_kind: str | None
     scale: float
     offset: float
     min_value: float | None
     max_value: float | None
     enabled: bool
+    is_heartbeat: bool
+    heartbeat_max_stale_sec: int | None
+    # Phase 8.3 — named_set FK + resolved name (NULL when no set assigned)
+    named_set_id: int | None
+    named_set_name: str | None
+    # Phase 8.5.1 — write opt-in (false for read-only tags)
+    writable: bool
+
+
+def _validate_unit_mutual_exclusion(unit_id: int | None, unit_text: str | None) -> None:
+    """Enforce: at most one of (engineering_unit_id, engineering_unit) set.
+
+    Empty string in the text field counts as not-set, matching the DB CHECK.
+    """
+    if unit_id is not None and unit_text is not None and unit_text.strip():
+        raise ValueError(
+            "Cannot set both engineering_unit_id (master FK) and "
+            "engineering_unit (override text). Pick one — leave the other null."
+        )
 
 
 _TAG_SELECT = """
@@ -84,11 +142,20 @@ _TAG_SELECT = """
            t.register_block_id, b.name AS register_block_name,
            t.name, t.description, t.data_type, t.byte_order,
            t.function_code, t.address, t.register_count,
-           t.engineering_unit, t.scale, t."offset",
-           t.min_value, t.max_value, t.enabled
+           t.engineering_unit_id, t.engineering_unit,
+           eu.code  AS unit_code,
+           eu.label AS unit_label,
+           eu.quantity_kind AS unit_quantity_kind,
+           t.scale, t."offset",
+           t.min_value, t.max_value, t.enabled,
+           t.is_heartbeat, t.heartbeat_max_stale_sec,
+           t.named_set_id, ns.name AS named_set_name,
+           t.writable
     FROM tags t
     JOIN devices d ON d.id = t.device_id
     LEFT JOIN register_blocks b ON b.id = t.register_block_id
+    LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
+    LEFT JOIN named_sets ns ON ns.id = t.named_set_id
 """
 
 
@@ -205,15 +272,19 @@ def create_tag(body: TagCreate, db: Annotated[Session, Depends(get_session)]):
                     device_id, register_block_id, name, description,
                     data_type, byte_order, function_code,
                     address, register_count,
-                    engineering_unit, scale, "offset",
-                    min_value, max_value
+                    engineering_unit_id, engineering_unit, scale, "offset",
+                    min_value, max_value,
+                    is_heartbeat, heartbeat_max_stale_sec,
+                    named_set_id, writable
                 )
                 VALUES (
                     :device_id, :register_block_id, :name, :description,
                     :data_type, :byte_order, :function_code,
                     :address, :register_count,
-                    :engineering_unit, :scale, :offset,
-                    :min_value, :max_value
+                    :engineering_unit_id, :engineering_unit, :scale, :offset,
+                    :min_value, :max_value,
+                    :is_heartbeat, :heartbeat_max_stale_sec,
+                    :named_set_id, :writable
                 )
                 RETURNING id
             """),
@@ -343,14 +414,14 @@ def bulk_create_tags(
                             device_id, register_block_id, name, description,
                             data_type, byte_order, function_code,
                             address, register_count,
-                            engineering_unit, scale, "offset",
-                            min_value, max_value
+                            engineering_unit_id, engineering_unit, scale, "offset",
+                            min_value, max_value, named_set_id
                         ) VALUES (
                             :device_id, :register_block_id, :name, :description,
                             :data_type, :byte_order, :function_code,
                             :address, :register_count,
-                            :engineering_unit, :scale, :offset,
-                            :min_value, :max_value
+                            :engineering_unit_id, :engineering_unit, :scale, :offset,
+                            :min_value, :max_value, :named_set_id
                         )
                         RETURNING id
                     """),
@@ -426,3 +497,91 @@ def bulk_delete_tags(
             ))
     db.commit()
     return results
+
+# ---------------------------------------------------------------------------
+# Phase 8.2 — per-tag group membership management
+#
+# Groups are orthogonal: a tag can belong to many groups. These endpoints
+# manage the tag_group_memberships join table from the tag's side. The
+# /api/groups endpoints handle group CRUD; this is the "which groups is
+# this tag in?" side.
+# ---------------------------------------------------------------------------
+
+
+class TagGroupsRequest(BaseModel):
+    """Replace the full set of groups for a tag.
+
+    Idempotent: calling with the same group_ids twice is a no-op. Pass an
+    empty list to remove all memberships.
+    """
+    group_ids: list[int]
+
+
+@router.put("/tags/{tag_id}/groups", response_model=list[int])
+def set_tag_groups(
+    tag_id: int,
+    body: TagGroupsRequest,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Replace this tag's group memberships with the provided set.
+
+    Returns the resulting list of group_ids. Validates that the tag and
+    all referenced groups exist; any unknown group_id raises 400 with the
+    list of missing ids.
+    """
+    # Verify the tag exists
+    tag_exists = db.execute(
+        text("SELECT 1 FROM tags WHERE id = :id"),
+        {"id": tag_id},
+    ).scalar()
+    if not tag_exists:
+        raise HTTPException(404, f"Tag {tag_id} not found")
+
+    # Verify all requested groups exist (single query, returns the set actually present)
+    if body.group_ids:
+        found = set(db.execute(
+            text("SELECT id FROM groups WHERE id = ANY(:ids)"),
+            {"ids": body.group_ids},
+        ).scalars().all())
+        missing = [g for g in body.group_ids if g not in found]
+        if missing:
+            raise HTTPException(400, f"Unknown group_id(s): {missing}")
+
+    # Replace memberships atomically — delete all, insert new set.
+    db.execute(
+        text("DELETE FROM tag_group_memberships WHERE tag_id = :tag_id"),
+        {"tag_id": tag_id},
+    )
+    if body.group_ids:
+        db.execute(
+            text("""
+                INSERT INTO tag_group_memberships (tag_id, group_id)
+                SELECT :tag_id, unnest(:group_ids)
+                ON CONFLICT DO NOTHING
+            """),
+            {"tag_id": tag_id, "group_ids": body.group_ids},
+        )
+    db.commit()
+
+    # Return the resulting set
+    return list(db.execute(
+        text("SELECT group_id FROM tag_group_memberships WHERE tag_id = :tag_id "
+             "ORDER BY group_id"),
+        {"tag_id": tag_id},
+    ).scalars().all())
+
+
+@router.get("/tags/{tag_id}/groups", response_model=list[int])
+def get_tag_groups(tag_id: int, db: Annotated[Session, Depends(get_session)]):
+    """Return the list of group_ids this tag is a member of."""
+    tag_exists = db.execute(
+        text("SELECT 1 FROM tags WHERE id = :id"),
+        {"id": tag_id},
+    ).scalar()
+    if not tag_exists:
+        raise HTTPException(404, f"Tag {tag_id} not found")
+    return list(db.execute(
+        text("SELECT group_id FROM tag_group_memberships WHERE tag_id = :tag_id "
+             "ORDER BY group_id"),
+        {"tag_id": tag_id},
+    ).scalars().all())

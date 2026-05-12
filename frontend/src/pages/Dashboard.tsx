@@ -22,6 +22,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { useNamedSetMap, resolveNamedSet, type NamedSetMap } from "@/lib/named-set-resolve";
 
 const REFRESH_MS = 2_000;
 const SPARK_REFRESH_MS = 10_000;
@@ -68,6 +69,9 @@ export default function Dashboard() {
     sparklines.data?.forEach((s) => { m[s.tag_id] = s.points; });
     return m;
   }, [sparklines.data]);
+
+  // Phase 8.3 — named-set resolver, shared across both card and table views
+  const { map: namedSetMap } = useNamedSetMap();
 
   // Count tags per device for the DeviceTabs counts badge
   const countsByDevice = useMemo(() => {
@@ -192,9 +196,9 @@ export default function Dashboard() {
           No tags match the current filter.
         </p>
       ) : viewMode === "cards" ? (
-        <CardGrid tags={filtered} sparkByTag={sparkByTag} />
+        <CardGrid tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
       ) : (
-        <TagsTable tags={filtered} sparkByTag={sparkByTag} />
+        <TagsTable tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
       )}
     </div>
   );
@@ -205,41 +209,82 @@ export default function Dashboard() {
 // --------------------------------------------------------------------------
 
 function CardGrid({
-  tags, sparkByTag,
+  tags, sparkByTag, namedSetMap,
 }: {
   tags: LiveTag[];
   sparkByTag: Record<number, { time: string; value: number }[]>;
+  namedSetMap: NamedSetMap;
 }) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
       {tags.map((tag) => (
-        <TagCard key={tag.tag_id} tag={tag} points={sparkByTag[tag.tag_id] ?? []} />
+        <TagCard
+          key={tag.tag_id}
+          tag={tag}
+          points={sparkByTag[tag.tag_id] ?? []}
+          namedSetMap={namedSetMap}
+        />
       ))}
     </div>
   );
 }
 
 function TagCard({
-  tag, points,
+  tag, points, namedSetMap,
 }: {
   tag: LiveTag;
   points: { time: string; value: number }[];
+  namedSetMap: NamedSetMap;
 }) {
   const hasData = tag.time !== null;
   return (
     <Card className={cn(!hasData && "opacity-60")}>
       <CardContent className="p-3 space-y-2">
-        <div className="text-xs text-muted-foreground truncate font-medium" title={tag.tag_name}>
-          {tag.tag_name}
+        <div className="text-xs text-muted-foreground truncate font-medium flex items-center gap-1" title={tag.tag_name}>
+          <span className="truncate">{tag.tag_name}</span>
+          {tag.is_heartbeat && (
+            <span
+              className="text-rose-500 shrink-0"
+              title={`Heartbeat watch · stale after ${tag.heartbeat_max_stale_sec ?? "?"}s`}
+            >
+              ♥
+            </span>
+          )}
         </div>
 
         <div className="flex items-baseline gap-1">
-          <span className="text-xl font-bold tabular-nums">
-            {formatValue(tag.value_double, tag.value_text, tag.data_type)}
-          </span>
-          {tag.engineering_unit && (
-            <span className="text-xs text-muted-foreground">{tag.engineering_unit}</span>
-          )}
+          {(() => {
+            const resolved = resolveNamedSet(
+              namedSetMap,
+              tag.named_set_id,
+              tag.value_double === null ? null : Math.round(tag.value_double),
+            );
+            if (resolved) {
+              return (
+                <>
+                  <span
+                    className="text-lg font-semibold"
+                    style={resolved.color ? { color: resolved.color } : undefined}
+                  >
+                    {resolved.text}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground tabular-nums">
+                    ({formatValue(tag.value_double, tag.value_text, tag.data_type)})
+                  </span>
+                </>
+              );
+            }
+            return (
+              <>
+                <span className="text-xl font-bold tabular-nums">
+                  {formatValue(tag.value_double, tag.value_text, tag.data_type)}
+                </span>
+                {tag.engineering_unit && (
+                  <span className="text-xs text-muted-foreground">{tag.engineering_unit}</span>
+                )}
+              </>
+            );
+          })()}
         </div>
 
         {points.length > 0 && (
@@ -275,10 +320,11 @@ function TagCard({
 // --------------------------------------------------------------------------
 
 function TagsTable({
-  tags, sparkByTag,
+  tags, sparkByTag, namedSetMap,
 }: {
   tags: LiveTag[];
   sparkByTag: Record<number, { time: string; value: number }[]>;
+  namedSetMap: NamedSetMap;
 }) {
   return (
     <Card>
@@ -299,14 +345,48 @@ function TagsTable({
           <TableBody>
             {tags.map((tag) => (
               <TableRow key={tag.tag_id}>
-                <TableCell className="font-medium">{tag.tag_name}</TableCell>
+                <TableCell className="font-medium">
+                  <span className="inline-flex items-center gap-1.5">
+                    {tag.tag_name}
+                    {tag.is_heartbeat && (
+                      <span
+                        className="text-rose-500"
+                        title={`Heartbeat watch · stale after ${tag.heartbeat_max_stale_sec ?? "?"}s`}
+                      >
+                        ♥
+                      </span>
+                    )}
+                  </span>
+                </TableCell>
                 <TableCell className="text-xs text-muted-foreground">{tag.device_name}</TableCell>
                 <TableCell className="text-xs">
                   {tag.groups.slice(0, 2).join(", ")}
                   {tag.groups.length > 2 && ` +${tag.groups.length - 2}`}
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {formatValue(tag.value_double, tag.value_text, tag.data_type)}
+                  {(() => {
+                    const resolved = resolveNamedSet(
+                      namedSetMap,
+                      tag.named_set_id,
+                      tag.value_double === null ? null : Math.round(tag.value_double),
+                    );
+                    if (resolved) {
+                      return (
+                        <span className="inline-flex items-center gap-1.5 justify-end">
+                          <span
+                            className="text-xs font-medium"
+                            style={resolved.color ? { color: resolved.color } : undefined}
+                          >
+                            {resolved.text}
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">
+                            ({formatValue(tag.value_double, tag.value_text, tag.data_type)})
+                          </span>
+                        </span>
+                      );
+                    }
+                    return formatValue(tag.value_double, tag.value_text, tag.data_type);
+                  })()}
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
                   {tag.engineering_unit ?? "—"}

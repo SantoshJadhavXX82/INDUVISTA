@@ -2,6 +2,9 @@
  * Configuration editor layout — shared tab bar across Channels / Devices /
  * Register Blocks. The actual content for each tab is a nested route
  * rendered into the <Outlet />. /config redirects to /config/channels.
+ *
+ * Phase 8.5: Engineering Units, Groups, and Named Sets moved to /global —
+ * they're cross-cutting reference data, not protocol-level setup.
  */
 import { NavLink, Outlet } from "react-router";
 import { cn } from "@/lib/utils";

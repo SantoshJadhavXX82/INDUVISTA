@@ -62,9 +62,15 @@ export default function DataGaps() {
   const filteredTags = useMemo(() => {
     if (!tags.data) return [];
     const q = tagQuery.toLowerCase();
-    if (!q) return tags.data.slice(0, 30);
-    return tags.data.filter((t) => t.tag_name.toLowerCase().includes(q)).slice(0, 30);
+    // Cap at 200 — far more than the typical install needs, and the
+    // container is `max-h-40 overflow-auto` so it scrolls cleanly.
+    // The earlier 30-cap silently hid the rest, which was confusing.
+    if (!q) return tags.data.slice(0, 200);
+    return tags.data.filter((t) => t.tag_name.toLowerCase().includes(q)).slice(0, 200);
   }, [tags.data, tagQuery]);
+
+  const totalTags = tags.data?.length ?? 0;
+  const shownCount = filteredTags.length;
 
   const selectedTag = useMemo(
     () => tags.data?.find((t) => t.tag_id === selectedTagId) ?? null,
@@ -107,7 +113,14 @@ export default function DataGaps() {
       <Card>
         <CardContent className="p-4 space-y-3">
           <div className="space-y-1.5">
-            <Label htmlFor="tag-search">Tag</Label>
+            <div className="flex items-center justify-between">
+              <Label htmlFor="tag-search">Tag</Label>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {tagQuery
+                  ? `${shownCount} match${shownCount === 1 ? "" : "es"}`
+                  : `${shownCount} of ${totalTags}${shownCount < totalTags ? " (refine search to narrow)" : ""}`}
+              </span>
+            </div>
             <div className="relative max-w-md">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
@@ -119,7 +132,7 @@ export default function DataGaps() {
                 className="pl-8"
               />
             </div>
-            <div className="border rounded-md max-h-40 overflow-auto">
+            <div className="border rounded-md max-h-72 overflow-auto">
               {filteredTags.map((t) => (
                 <button
                   key={t.tag_id}

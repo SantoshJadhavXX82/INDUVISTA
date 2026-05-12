@@ -30,8 +30,24 @@ class LiveTag(BaseModel):
     tag_id: int
     tag_name: str
     description: str | None
-    engineering_unit: str | None
+    # Phase 8.1: dual-source unit. Either the FK to master or a free-text override.
+    # `engineering_unit` here returns the *resolved display string* — code from the
+    # master if engineering_unit_id is set, else the override text, else null.
+    # The raw FK and override are also exposed for editing in Tag Explorer.
+    engineering_unit: str | None      # resolved display (preferred for read)
+    engineering_unit_id: int | None   # raw FK
+    engineering_unit_override: str | None  # raw text override
+    unit_label: str | None            # human-readable name from master
+    unit_quantity_kind: str | None    # for filtering / grouping in UI
     groups: list[str]
+    # Phase 8.2 — raw group ids for membership editing in the tag drawer.
+    # `groups` (names) is for display/filtering; `group_ids` is for editing.
+    group_ids: list[int]
+    # Phase 8.3 — named set FK + resolved name; display_text for the
+    # current value is resolved client-side from the cached values list
+    # to keep the LIVE query simple (no per-row JOIN with named_set_values).
+    named_set_id: int | None
+    named_set_name: str | None
     data_type: str
     device_id: int
     device_name: str
@@ -48,6 +64,15 @@ class LiveTag(BaseModel):
     min_value: float | None
     max_value: float | None
     enabled: bool
+    # Phase 7 E1a — heartbeat metadata. UI uses these to render the ♥ chip
+    # and show stale freezes in red.
+    is_heartbeat: bool
+    heartbeat_max_stale_sec: int | None
+    # Phase 8.5.1 — write opt-in flags. tag.writable is per-tag; block_writable
+    # is the parent block's flag (null for unblocked writable tags). The
+    # Write Console filters on (writable AND (block_writable IS NULL OR block_writable)).
+    writable: bool
+    block_writable: bool | None
     # All four nullable: a writable tag with no register_block has no
     # latest_tag_values row, so these come back as NULL via the LEFT JOIN.
     value_double: float | None
@@ -63,7 +88,14 @@ _LIVE_SELECT = """
         t.id              AS tag_id,
         t.name            AS tag_name,
         t.description,
-        t.engineering_unit,
+        -- Resolved unit display: master code → override text → NULL
+        COALESCE(eu.code, t.engineering_unit)  AS engineering_unit,
+        t.engineering_unit_id,
+        t.engineering_unit AS engineering_unit_override,
+        eu.label          AS unit_label,
+        eu.quantity_kind  AS unit_quantity_kind,
+        t.named_set_id,
+        ns.name           AS named_set_name,
         t.data_type,
         t.device_id,
         d.name            AS device_name,
@@ -78,6 +110,10 @@ _LIVE_SELECT = """
         t.min_value,
         t.max_value,
         t.enabled,
+        t.is_heartbeat,
+        t.heartbeat_max_stale_sec,
+        t.writable,
+        rb.writable        AS block_writable,
         lv.value_double,
         lv.value_text,
         lv.st,
@@ -95,10 +131,21 @@ _LIVE_SELECT = """
                 WHERE m.tag_id = t.id AND g.enabled = true
             ),
             ARRAY[]::text[]
-        ) AS groups
+        ) AS groups,
+        COALESCE(
+            (
+                SELECT array_agg(g.id ORDER BY g.display_order, g.name)
+                FROM tag_group_memberships m
+                JOIN groups g ON g.id = m.group_id
+                WHERE m.tag_id = t.id
+            ),
+            ARRAY[]::bigint[]
+        ) AS group_ids
     FROM tags t
     JOIN devices d ON d.id = t.device_id
     LEFT JOIN register_blocks rb ON rb.id = t.register_block_id
+    LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
+    LEFT JOIN named_sets ns ON ns.id = t.named_set_id
     LEFT JOIN latest_tag_values lv ON lv.tag_id = t.id
     WHERE t.enabled = true
 """

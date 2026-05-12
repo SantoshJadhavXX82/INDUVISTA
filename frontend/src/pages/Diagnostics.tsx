@@ -34,6 +34,8 @@ import {
   TableCell,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 
 const REFRESH_MS = 5_000;
 
@@ -109,10 +111,18 @@ export default function Diagnostics() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Device</TableHead>
-                  <TableHead>Connection</TableHead>
-                  <TableHead className="text-right">Last cycle (s ago)</TableHead>
+                  <TableHead>
+                    Connection <HelpTip entry={help.diagnostics.worker_status} />
+                  </TableHead>
+                  <TableHead className="text-right">
+                    Last cycle (s ago) <HelpTip entry={help.diagnostics.last_seen} />
+                  </TableHead>
                   <TableHead className="text-right">Samples</TableHead>
-                  <TableHead className="text-right">Consec. failures</TableHead>
+                  <TableHead className="text-right">Good %</TableHead>
+                  <TableHead className="text-right">Total (since restart)</TableHead>
+                  <TableHead className="text-right">
+                    Consec. failures <HelpTip entry={help.diagnostics.error_rate} />
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -129,6 +139,33 @@ export default function Diagnostics() {
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       {w.last_cycle_samples_good ?? 0} / {w.last_cycle_samples_total ?? 0}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {(() => {
+                        const total = w.last_cycle_samples_total ?? 0;
+                        if (total === 0) return <span className="text-muted-foreground">—</span>;
+                        const pct = ((w.last_cycle_samples_good ?? 0) / total) * 100;
+                        return (
+                          <span className={cn(
+                            pct < 100 && "text-amber-700",
+                            pct < 50 && "text-red-700 font-semibold",
+                          )}>
+                            {pct.toFixed(1)}%
+                          </span>
+                        );
+                      })()}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-xs"
+                               title="Cumulative since worker startup; resets when the modbus_worker container restarts.">
+                      <div className="font-medium">
+                        {w.cumulative_samples_total.toLocaleString()}
+                      </div>
+                      <div className="text-[10px] text-muted-foreground">
+                        {w.cumulative_samples_good.toLocaleString()} good
+                        {w.cumulative_samples_total > 0 && (
+                          <> · {((w.cumulative_samples_good / w.cumulative_samples_total) * 100).toFixed(2)}%</>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
                       <span className={cn(w.consecutive_failures > 0 && "text-red-700 font-semibold")}>
@@ -376,8 +413,12 @@ function StaleTagsCard({ tags }: { tags: StaleTag[] }) {
             <TableRow>
               <TableHead>Tag</TableHead>
               <TableHead>Device</TableHead>
-              <TableHead className="text-right">Age (s)</TableHead>
-              <TableHead>ST</TableHead>
+              <TableHead className="text-right">
+                Age (s) <HelpTip entry={help.diagnostics.last_seen} />
+              </TableHead>
+              <TableHead>
+                ST <HelpTip entry={help.diagnostics.st_status} />
+              </TableHead>
               <TableHead>Reason</TableHead>
             </TableRow>
           </TableHeader>

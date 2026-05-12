@@ -16,30 +16,63 @@ tier, so workers can use the same numeric tier with different reasons.
 NOTE: We REPURPOSE OPC DA's reserved 0x80-0xBF range as the VALID tier.
 This is intentional and means InduVista st bytes are NOT OPC-DA-compatible
 on the wire. Don't mix them with OPC DA quality bytes; convert at boundaries.
+
+Phase 8.5 (Modbus hardening):
+  Refined the INVALID tier into distinct numeric constants so the
+  Diagnostics page can distinguish transport-level failures from
+  slave-side errors from wire-level corruption. All four still fall under
+  st_class='INVALID' for reports; the discriminator lives in st_reason
+  and (for those who care) in the exact numeric st.
 """
 
 # ---- VALID (128-191) ---------------------------------------------------------
-# Phase 1's default for a fresh successful read. Picked at the tier floor so
-# VALID_EXTENDED stays available for "good with extras" (Phase 4+ limit
-# tagging, manual overrides, etc.).
 ST_READ_OK = 128
 
 # ---- SUSPECT (64-127) --------------------------------------------------------
-# The most recent good read for this tag is older than device.stale_after_sec.
-# The value can still be useful (it was good when last polled), but the
-# dashboard / report engine should flag it.
 ST_STALE = 64
 
 # ---- INVALID (0-63) ----------------------------------------------------------
-# Device unreachable: connection refused, request timeout, or Modbus
-# exception response from the slave (function code error, etc.).
-ST_COMM_TIMEOUT = 0
+
+# The worker has never successfully read this tag.
+ST_NEVER_READ = 0
+
+# Transport-level failures: connection refused, request timeout, TCP RST.
+# The device IS NOT REACHABLE.
+ST_COMM_TIMEOUT = 4
 
 # Read succeeded but raw bytes could not be decoded to the configured
-# data_type (e.g., struct.error, length mismatch). Distinct from
-# COMM_TIMEOUT because the device IS reachable — config is suspect.
+# data_type. Distinct from COMM_TIMEOUT because the device IS reachable —
+# config is suspect.
 ST_DECODE_FAIL = 8
 
-# The worker has never successfully read this tag. Used to pre-populate
-# latest_tag_values on first run, or after a tag's register_block_id changes.
-ST_NEVER_READ = 0
+# Phase 8.5 — slave returned a Modbus exception response (FC + 0x80).
+# Device IS reachable and ALIVE; it's refusing the request.
+# st_reason carries the exception code (ILLEGAL_FUNCTION, etc.).
+# Almost always indicates a config bug rather than a hardware fault.
+ST_MODBUS_EXCEPTION = 12
+
+# Phase 8.5 — wire-level corruption. CRC error, malformed response framing,
+# unexpected MBAP transaction ID. Cabling/EMI issues or misconfigured serial.
+ST_MODBUS_IO_ERROR = 16
+
+# Phase 8.5 — channel.transport is rtu/serial but the worker is TCP-only.
+# Fail loudly rather than silently trying TCP. CONFIG ERROR, not runtime.
+ST_TRANSPORT_UNSUPPORTED = 20
+
+# Phase 8.5 — retries were attempted and all failed. Distinguishes
+# "single transient blip" from "device is consistently down".
+ST_RETRY_EXHAUSTED = 24
+
+# ---- Modbus exception code → reason string ---------------------------------
+MODBUS_EXCEPTION_NAMES: dict[int, str] = {
+    1:  "ILLEGAL_FUNCTION",
+    2:  "ILLEGAL_DATA_ADDRESS",
+    3:  "ILLEGAL_DATA_VALUE",
+    4:  "SLAVE_DEVICE_FAILURE",
+    5:  "ACKNOWLEDGE",
+    6:  "SLAVE_DEVICE_BUSY",
+    7:  "NEGATIVE_ACKNOWLEDGE",
+    8:  "MEMORY_PARITY_ERROR",
+    10: "GATEWAY_PATH_UNAVAILABLE",
+    11: "GATEWAY_TARGET_NO_RESPONSE",
+}

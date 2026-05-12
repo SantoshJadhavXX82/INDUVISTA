@@ -92,6 +92,8 @@ class WorkerDeviceStatus(BaseModel):
     last_cycle_at: datetime | None
     last_cycle_samples_total: int | None
     last_cycle_samples_good: int | None
+    cumulative_samples_total: int
+    cumulative_samples_good: int
     consecutive_failures: int
     connection_state: str
     updated_at: datetime
@@ -203,6 +205,7 @@ def list_worker_device_status(db: Annotated[Session, Depends(get_session)]):
             wds.device_id, d.name AS device_name,
             wds.last_cycle_at,
             wds.last_cycle_samples_total, wds.last_cycle_samples_good,
+            wds.cumulative_samples_total, wds.cumulative_samples_good,
             wds.consecutive_failures, wds.connection_state,
             wds.updated_at,
             EXTRACT(EPOCH FROM (NOW() - wds.last_cycle_at))::float

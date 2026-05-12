@@ -15,6 +15,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 import {
   Table,
   TableBody,
@@ -37,6 +39,11 @@ type Device = {
   stale_after_sec: number;
   scan_interval_ms: number;
   enabled: boolean;
+  // Phase 8.5
+  request_timeout_ms: number;
+  retry_count: number;
+  reconnect_initial_ms: number;
+  reconnect_max_ms: number;
 };
 
 type Channel = { id: number; name: string };
@@ -141,6 +148,11 @@ type FormState = {
   stale_after_sec: string;
   scan_interval_ms: string;
   enabled: boolean;
+  // Phase 8.5
+  request_timeout_ms: string;
+  retry_count: string;
+  reconnect_initial_ms: string;
+  reconnect_max_ms: string;
 };
 
 function DeviceForm({
@@ -164,12 +176,24 @@ function DeviceForm({
     stale_after_sec: device ? String(device.stale_after_sec) : "30",
     scan_interval_ms: device ? String(device.scan_interval_ms) : "1000",
     enabled: device?.enabled ?? true,
+    // Phase 8.5 — defaults match migration 0007's DEFAULT clauses
+    request_timeout_ms: device ? String(device.request_timeout_ms) : "3000",
+    retry_count: device ? String(device.retry_count) : "1",
+    reconnect_initial_ms: device ? String(device.reconnect_initial_ms) : "1000",
+    reconnect_max_ms: device ? String(device.reconnect_max_ms) : "30000",
   });
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
 
   const save = useMutation({
     mutationFn: async () => {
+      // Phase 8.5 fields go in both create and update paths
+      const hardening = {
+        request_timeout_ms: parseInt(form.request_timeout_ms, 10),
+        retry_count: parseInt(form.retry_count, 10),
+        reconnect_initial_ms: parseInt(form.reconnect_initial_ms, 10),
+        reconnect_max_ms: parseInt(form.reconnect_max_ms, 10),
+      };
       if (isNew) {
         return api.post("/devices", {
           name: form.name,
@@ -182,11 +206,9 @@ function DeviceForm({
           stale_after_sec: parseInt(form.stale_after_sec, 10),
           scan_interval_ms: parseInt(form.scan_interval_ms, 10),
           enabled: form.enabled,
+          ...hardening,
         });
       }
-      // PATCH excludes name and channel_id — they're immutable once a
-      // device exists. Sending them silently fails on backends with
-      // model_config.extra='forbid'; we just don't include them.
       return api.patch(`/devices/${device.id}`, {
         description: form.description || null,
         host: form.host,
@@ -196,6 +218,7 @@ function DeviceForm({
         stale_after_sec: parseInt(form.stale_after_sec, 10),
         scan_interval_ms: parseInt(form.scan_interval_ms, 10),
         enabled: form.enabled,
+        ...hardening,
       });
     },
     onSuccess: onDone,
@@ -219,7 +242,10 @@ function DeviceForm({
     >
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="name">Name {!isNew && <span className="normal-case text-muted-foreground">(immutable)</span>}</Label>
+          <Label htmlFor="name">
+            Name <HelpTip entry={help.device.name} />
+            {!isNew && <span className="normal-case text-muted-foreground"> (immutable)</span>}
+          </Label>
           <Input
             id="name"
             required
@@ -229,7 +255,10 @@ function DeviceForm({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="channel">Channel {!isNew && <span className="normal-case text-muted-foreground">(immutable)</span>}</Label>
+          <Label htmlFor="channel">
+            Channel <HelpTip entry={help.device.channel} />
+            {!isNew && <span className="normal-case text-muted-foreground"> (immutable)</span>}
+          </Label>
           <select
             id="channel"
             disabled={!isNew}
@@ -245,7 +274,9 @@ function DeviceForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="description">Description</Label>
+        <Label htmlFor="description">
+          Description <HelpTip entry={help.device.description} />
+        </Label>
         <Input
           id="description"
           value={form.description}
@@ -255,7 +286,9 @@ function DeviceForm({
 
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2 space-y-1.5">
-          <Label htmlFor="host">Host</Label>
+          <Label htmlFor="host">
+            Host <HelpTip entry={help.channel.host} />
+          </Label>
           <Input
             id="host"
             required
@@ -265,7 +298,9 @@ function DeviceForm({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="port">Port</Label>
+          <Label htmlFor="port">
+            Port <HelpTip entry={help.channel.port} />
+          </Label>
           <Input
             id="port"
             type="number"
@@ -278,7 +313,9 @@ function DeviceForm({
 
       <div className="grid grid-cols-3 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="unit_id">Unit ID</Label>
+          <Label htmlFor="unit_id">
+            Unit ID <HelpTip entry={help.device.unit_id} />
+          </Label>
           <Input
             id="unit_id"
             type="number"
@@ -301,7 +338,9 @@ function DeviceForm({
           </select>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="enabled">Status</Label>
+          <Label htmlFor="enabled">
+            Status <HelpTip entry={help.device.enabled} />
+          </Label>
           <label className="flex items-center gap-2 h-9 text-sm">
             <input
               id="enabled"
@@ -329,7 +368,9 @@ function DeviceForm({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="scan_interval_ms">Scan interval (ms)</Label>
+          <Label htmlFor="scan_interval_ms">
+            Scan interval (ms) <HelpTip entry={help.device.scan_interval_ms} />
+          </Label>
           <Input
             id="scan_interval_ms"
             type="number"
@@ -339,6 +380,78 @@ function DeviceForm({
           />
         </div>
       </div>
+
+      {/* Phase 8.5 — Modbus hardening config */}
+      <details className="rounded-md border bg-secondary/20 p-3 space-y-3" open={!isNew && (
+        form.request_timeout_ms !== "3000" ||
+        form.retry_count !== "1" ||
+        form.reconnect_initial_ms !== "1000" ||
+        form.reconnect_max_ms !== "30000"
+      )}>
+        <summary className="text-sm font-semibold cursor-pointer select-none">
+          Modbus hardening
+          <span className="text-xs text-muted-foreground font-normal ml-2">
+            (timeouts, retries, reconnect backoff — defaults work for LAN)
+          </span>
+        </summary>
+        <div className="grid grid-cols-2 gap-3 mt-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="request_timeout_ms">
+              Request timeout (ms) <HelpTip entry={help.channel.response_timeout_ms} />
+            </Label>
+            <Input
+              id="request_timeout_ms"
+              type="number"
+              min="100"
+              max="60000"
+              value={form.request_timeout_ms}
+              onChange={(e) => setForm({ ...form, request_timeout_ms: e.target.value })}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="retry_count">
+              Retry count <HelpTip entry={help.channel.retries} />
+            </Label>
+            <Input
+              id="retry_count"
+              type="number"
+              min="0"
+              max="10"
+              value={form.retry_count}
+              onChange={(e) => setForm({ ...form, retry_count: e.target.value })}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="reconnect_initial_ms">
+              Reconnect initial (ms)
+            </Label>
+            <Input
+              id="reconnect_initial_ms"
+              type="number"
+              min="100"
+              max="60000"
+              value={form.reconnect_initial_ms}
+              onChange={(e) => setForm({ ...form, reconnect_initial_ms: e.target.value })}
+            />
+            <p className="text-xs text-muted-foreground">
+              Backoff doubles after each failed connect, capped below.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="reconnect_max_ms">
+              Reconnect max (ms)
+            </Label>
+            <Input
+              id="reconnect_max_ms"
+              type="number"
+              min="100"
+              max="300000"
+              value={form.reconnect_max_ms}
+              onChange={(e) => setForm({ ...form, reconnect_max_ms: e.target.value })}
+            />
+          </div>
+        </div>
+      </details>
 
       {error && (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 flex gap-2">

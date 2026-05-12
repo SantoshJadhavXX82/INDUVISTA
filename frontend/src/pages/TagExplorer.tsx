@@ -14,6 +14,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router";
 import { Search, Trash2, AlertCircle, Plus, Upload, Download } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { type LiveTag, type BulkResult } from "@/types/api";
@@ -24,6 +25,15 @@ import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
 import { DeviceTabs } from "@/components/ui/device-tabs";
 import { CsvImportContent, type ImportRowResult, exportCsv } from "@/components/ui/csv-import";
+import { AddressHelper } from "@/components/forms/address-helper";
+import { ByteOrderHelp } from "@/components/forms/byte-order-help";
+import { TestReadPanel } from "@/components/forms/test-read-panel";
+import { UnitSelect } from "@/components/forms/unit-select";
+import { GroupSelect } from "@/components/forms/group-select";
+import { NamedSetSelect } from "@/components/forms/named-set-select";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
+import { useNamedSetMap, resolveNamedSet } from "@/lib/named-set-resolve";
 import {
   Table,
   TableBody,
@@ -43,6 +53,9 @@ type RegisterBlock = {
   function_code: number;
   start_address: number;
   count: number;
+  // Phase 8.5.1 — used as default for new tags + to lock the Writable
+  // checkbox when block is read-only
+  writable: boolean;
 };
 
 export default function TagExplorer() {
@@ -53,6 +66,31 @@ export default function TagExplorer() {
   const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
   const [creatingTag, setCreatingTag] = useState(false);
   const [importing, setImporting] = useState(false);
+
+  // Phase 7 C4 — Register Browser handoff. When the user clicks "Create tag"
+  // from /registers we receive ?create_from=N&fc=X&byte_order=Y&device_id=Z
+  // and auto-open the create drawer with the form pre-filled. We clear the
+  // params after consuming so a manual refresh doesn't re-trigger.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const seedFromUrl = useMemo(() => {
+    const cf = searchParams.get("create_from");
+    if (cf === null) return null;
+    return {
+      address: cf,
+      function_code: searchParams.get("fc") ?? "3",
+      byte_order: searchParams.get("byte_order") ?? "ABCD",
+      device_id: searchParams.get("device_id") ?? "",
+    };
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (seedFromUrl) {
+      setCreatingTag(true);
+      // Clear the params so refresh doesn't re-trigger this flow.
+      setSearchParams({}, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seedFromUrl !== null]);
 
   // Multi-select for bulk delete
   const [selectedTagIds, setSelectedTagIds] = useState<Set<number>>(new Set());
@@ -69,6 +107,9 @@ export default function TagExplorer() {
     queryFn: () => api.get<LiveTag[]>("/live"),
     refetchInterval: 5_000,
   });
+
+  // Phase 8.3 — for resolving display_text alongside live values
+  const { map: namedSetMap } = useNamedSetMap();
 
   const groups = useQuery({
     queryKey: ["live", "groups"],
@@ -283,7 +324,19 @@ export default function TagExplorer() {
                       aria-label={`Select ${t.tag_name}`}
                     />
                   </TableCell>
-                  <TableCell className="font-medium">{t.tag_name}</TableCell>
+                  <TableCell className="font-medium">
+                    <span className="inline-flex items-center gap-1.5">
+                      {t.tag_name}
+                      {t.is_heartbeat && (
+                        <span
+                          className="text-rose-500"
+                          title={`Heartbeat watch · stale after ${t.heartbeat_max_stale_sec ?? "?"}s`}
+                        >
+                          ♥
+                        </span>
+                      )}
+                    </span>
+                  </TableCell>
                   <TableCell>
                     <div className="flex flex-wrap gap-1">
                       {t.groups.slice(0, 2).map((g) => (
@@ -309,7 +362,32 @@ export default function TagExplorer() {
                     {t.engineering_unit ?? "—"}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {formatValue(t.value_double, t.value_text, t.data_type)}
+                    {(() => {
+                      // Phase 8.3 — named-set resolution. If the tag is mapped
+                      // to a set and the current raw value matches an entry,
+                      // show "Running (1)" instead of "1".
+                      const resolved = resolveNamedSet(
+                        namedSetMap,
+                        t.named_set_id,
+                        t.value_double === null ? null : Math.round(t.value_double),
+                      );
+                      if (resolved) {
+                        return (
+                          <span className="inline-flex items-center gap-1.5 justify-end">
+                            <span
+                              className="text-xs font-medium"
+                              style={resolved.color ? { color: resolved.color } : undefined}
+                            >
+                              {resolved.text}
+                            </span>
+                            <span className="text-[10px] text-muted-foreground tabular-nums">
+                              ({formatValue(t.value_double, t.value_text, t.data_type)})
+                            </span>
+                          </span>
+                        );
+                      }
+                      return formatValue(t.value_double, t.value_text, t.data_type);
+                    })()}
                   </TableCell>
                 </TableRow>
               ))}
@@ -356,7 +434,14 @@ export default function TagExplorer() {
           <NewTagPanel
             devices={devices.data ?? []}
             blocks={blocks.data ?? []}
-            defaultDeviceId={deviceId ? parseInt(deviceId, 10) : undefined}
+            defaultDeviceId={
+              seedFromUrl?.device_id
+                ? parseInt(seedFromUrl.device_id, 10)
+                : deviceId ? parseInt(deviceId, 10) : undefined
+            }
+            seedAddress={seedFromUrl?.address}
+            seedFunctionCode={seedFromUrl?.function_code}
+            seedByteOrder={seedFromUrl?.byte_order}
             onCreated={() => {
               queryClient.invalidateQueries({ queryKey: ["live"] });
               setCreatingTag(false);
@@ -379,11 +464,19 @@ export default function TagExplorer() {
               "function_code", "address", "register_count",
               "byte_order", "engineering_unit", "scale", "offset",
               "min_value", "max_value", "description",
+              // Phase 8.2 / 8.3 — extended schema
+              "groups", "named_set",
+              "is_heartbeat", "heartbeat_max_stale_sec",
+              // Phase 8.5.1 — writability flag (true/false). When the column
+              // is missing or blank, the tag inherits from its block's
+              // access setting: RW block → writable=true, RO block → false.
+              "writable",
             ]}
             requiredColumns={["name", "device_name", "data_type", "function_code", "address"]}
             templateCsv={
-              "name,device_name,block_name,data_type,function_code,address,register_count,byte_order,engineering_unit,scale,offset,min_value,max_value,description\n" +
-              "MyPressure,FLOWCOMP_001,FC001_HR_0_29,float32,3,0,2,ABCD,bar,1,0,,,Sample tag\n"
+              "name,device_name,block_name,data_type,function_code,address,register_count,byte_order,engineering_unit,scale,offset,min_value,max_value,description,groups,named_set,is_heartbeat,heartbeat_max_stale_sec,writable\n" +
+              "MyPressure,FLOWCOMP_001,FC001_HR_0_29,float32,3,0,2,ABCD,bar,1,0,,,Sample tag,Area-A;PT-101,,false,,false\n" +
+              "MotorState,FLOWCOMP_001,,uint16,3,200,1,ABCD,,1,0,,,Run/stop state,Motor-01,MOTOR_STATE,false,,true\n"
             }
             templateFilename="tags-template.csv"
             onImport={async (rows) => {
@@ -392,7 +485,79 @@ export default function TagExplorer() {
               const deviceByName: Record<string, number> = {};
               devices.data?.forEach((d) => { deviceByName[d.name] = d.id; });
               const blockByName: Record<string, number> = {};
-              blocks.data?.forEach((b) => { blockByName[b.name] = b.id; });
+              // Phase 8.5.1 — also index block writability by name so the
+              // import can inherit writable=block.writable when the CSV
+              // column is blank.
+              const blockWritableByName: Record<string, boolean> = {};
+              blocks.data?.forEach((b) => {
+                blockByName[b.name] = b.id;
+                blockWritableByName[b.name] = b.writable;
+              });
+
+              // Phase 8.1 — resolve engineering_unit text against the master
+              // (case-insensitive on code or label). Matched values become FK;
+              // unmatched values stay as override text. Mirrors the migration
+              // 0005 backfill logic so CSV import and direct DB seed agree.
+              let unitByKey: Record<string, number> = {};
+              try {
+                const units = await api.get<{ id: number; code: string; label: string }[]>(
+                  "/engineering-units",
+                );
+                units.forEach((u) => {
+                  unitByKey[u.code.toLowerCase()] = u.id;
+                  unitByKey[u.label.toLowerCase()] = u.id;
+                });
+              } catch {
+                // If the units endpoint is unreachable, fall back to override-only
+                // behavior so the import still succeeds.
+                unitByKey = {};
+              }
+
+              // Phase 8.3 — resolve named_set names to FKs.
+              let namedSetByName: Record<string, number> = {};
+              try {
+                const sets = await api.get<{ id: number; name: string }[]>("/named-sets");
+                sets.forEach((s) => {
+                  namedSetByName[s.name.toLowerCase()] = s.id;
+                });
+              } catch {
+                namedSetByName = {};
+              }
+
+              // Phase 8.2 — resolve group names. Auto-create groups that
+              // appear in the CSV but don't exist yet (type=CUSTOM). This is
+              // the friendliest behavior for round-trip workflows: export
+              // from one InduVista, import into another, get the same groups
+              // without manual prep.
+              const groupByName: Record<string, number> = {};
+              try {
+                const groups = await api.get<{ id: number; name: string }[]>("/groups");
+                groups.forEach((g) => { groupByName[g.name.toLowerCase()] = g.id; });
+              } catch { /* leave empty — auto-create below will be skipped */ }
+
+              const allRequestedGroupNames = new Set<string>();
+              rows.forEach((row) => {
+                (row.groups ?? "").split(";").forEach((g) => {
+                  const trimmed = g.trim();
+                  if (trimmed) allRequestedGroupNames.add(trimmed);
+                });
+              });
+              for (const gname of allRequestedGroupNames) {
+                if (!groupByName[gname.toLowerCase()]) {
+                  try {
+                    const created = await api.post<{ id: number; name: string }>("/groups", {
+                      name: gname,
+                      group_type: "CUSTOM",
+                      enabled: true,
+                    });
+                    groupByName[created.name.toLowerCase()] = created.id;
+                  } catch {
+                    // Couldn't create (probably a race or duplicate) — skip,
+                    // the tag will fail to assign that group and the user
+                    // will see it in the per-row results.
+                  }
+                }
+              }
 
               const bodies = rows.map((row) => {
                 const deviceId = deviceByName[row.device_name];
@@ -402,6 +567,46 @@ export default function TagExplorer() {
                   dt === "int32" || dt === "uint32" || dt === "float32" ? 2 :
                   dt === "int64" || dt === "uint64" || dt === "float64" ? 4 :
                   1;
+
+                // Resolve unit: try master first, fall back to text override
+                const unitText = (row.engineering_unit ?? "").trim();
+                const unitMatchId = unitText
+                  ? unitByKey[unitText.toLowerCase()] ?? null
+                  : null;
+
+                // Resolve named_set by name (case-insensitive)
+                const namedSetText = (row.named_set ?? "").trim();
+                const namedSetId = namedSetText
+                  ? namedSetByName[namedSetText.toLowerCase()] ?? null
+                  : null;
+
+                // Heartbeat fields
+                const hbStr = (row.is_heartbeat ?? "").trim().toLowerCase();
+                const isHeartbeat = hbStr === "true" || hbStr === "1" || hbStr === "yes";
+                const hbStaleSec = row.heartbeat_max_stale_sec
+                  ? parseInt(row.heartbeat_max_stale_sec, 10) || null
+                  : null;
+
+                // Phase 8.5.1 — writability resolution:
+                //   1. FC 2 / FC 4 → always false (DB CHECK forbids true here)
+                //   2. CSV column present and non-empty → use it verbatim
+                //   3. CSV column empty AND block_name set AND block.writable → inherit true
+                //   4. Otherwise → false (safe default)
+                const fcInt = parseInt(row.function_code, 10);
+                const writableRaw = (row.writable ?? "").trim().toLowerCase();
+                let writable = false;
+                if (fcInt === 1 || fcInt === 3) {
+                  if (writableRaw !== "") {
+                    writable = ["true", "1", "yes"].includes(writableRaw);
+                  } else if (row.block_name && blockWritableByName[row.block_name]) {
+                    // Empty column + writable parent block → inherit true.
+                    // Matches the rule the user asked for: "by default if the
+                    // block is enabled for Read/Write then Tag shall also be
+                    // Writable unless configuration is made as not writable".
+                    writable = true;
+                  }
+                }
+
                 return {
                   device_id: deviceId,
                   register_block_id: blockId ?? null,
@@ -409,14 +614,27 @@ export default function TagExplorer() {
                   description: row.description || null,
                   data_type: dt,
                   byte_order: row.byte_order || "ABCD",
-                  function_code: parseInt(row.function_code, 10),
+                  function_code: fcInt,
                   address: parseInt(row.address, 10),
                   register_count: row.register_count ? parseInt(row.register_count, 10) : defaultRC,
-                  engineering_unit: row.engineering_unit || null,
+                  engineering_unit_id: unitMatchId,
+                  engineering_unit: unitMatchId ? null : (unitText || null),
                   scale: row.scale ? parseFloat(row.scale) : 1.0,
                   offset: row.offset ? parseFloat(row.offset) : 0.0,
                   min_value: row.min_value ? parseFloat(row.min_value) : null,
                   max_value: row.max_value ? parseFloat(row.max_value) : null,
+                  named_set_id: namedSetId,
+                  is_heartbeat: isHeartbeat,
+                  heartbeat_max_stale_sec: hbStaleSec,
+                  writable,
+                  // Carry the resolved group ids alongside the body so we can
+                  // PUT them after the bulk insert returns the new tag ids.
+                  _groupIds: (row.groups ?? "")
+                    .split(";")
+                    .map((g) => g.trim())
+                    .filter((g) => g.length > 0)
+                    .map((g) => groupByName[g.toLowerCase()])
+                    .filter((id): id is number => typeof id === "number"),
                 };
               });
 
@@ -449,10 +667,37 @@ export default function TagExplorer() {
                 return preFlightResults;
               }
 
+              // Strip the local-only _groupIds field before sending — the
+              // backend would reject extra fields.
+              const groupIdsByLocalIndex: Record<number, number[]> = {};
+              const sendBodies = validBodies.map((b, j) => {
+                const { _groupIds, ...rest } = b as typeof b & { _groupIds: number[] };
+                if (_groupIds && _groupIds.length > 0) {
+                  groupIdsByLocalIndex[j] = _groupIds;
+                }
+                return rest;
+              });
+
               const serverResults = await api.post<BulkResult[]>(
                 "/tags/bulk",
-                { tags: validBodies },
+                { tags: sendBodies },
               );
+
+              // Phase 8.2 — for every successfully-created tag with groups,
+              // issue a PUT to set memberships. Sequential to keep error
+              // attribution clean; the count is bounded by the CSV import size.
+              for (let j = 0; j < serverResults.length; j++) {
+                const sr = serverResults[j];
+                const groupIds = groupIdsByLocalIndex[j];
+                if (sr.tag_id && groupIds && groupIds.length > 0) {
+                  try {
+                    await api.put(`/tags/${sr.tag_id}/groups`, { group_ids: groupIds });
+                  } catch (e) {
+                    // Don't fail the whole row — annotate it but keep going.
+                    sr.error = `tag created, but group assignment failed: ${(e as Error).message}`;
+                  }
+                }
+              }
 
               // Map server results back to original CSV row indexes
               const merged: ImportRowResult[] = [...preFlightResults];
@@ -466,6 +711,7 @@ export default function TagExplorer() {
               merged.sort((a, b) => a.row - b.row);
 
               queryClient.invalidateQueries({ queryKey: ["live"] });
+              queryClient.invalidateQueries({ queryKey: ["groups"] });
               return merged;
             }}
           />
@@ -586,12 +832,23 @@ function BulkDeleteResults({
 
 type EditableFields = {
   description: string;
-  engineering_unit: string;
+  // Phase 8.1 — dual-source unit. Exactly one of these is set (or both null).
+  engineering_unit_id: number | null;
+  engineering_unit: string;        // override text
   scale: string;       // strings so we can validate numerics on submit
   offset: string;
   min_value: string;
   max_value: string;
   enabled: boolean;
+  is_heartbeat: boolean;
+  heartbeat_max_stale_sec: string;
+  // Phase 8.2 — group memberships. Persisted via a separate endpoint
+  // (PUT /api/tags/:id/groups), not the main PATCH body.
+  group_ids: number[];
+  // Phase 8.3 — optional named set FK
+  named_set_id: number | null;
+  // Phase 8.5.1 — explicit write opt-in
+  writable: boolean;
 };
 
 function TagEditPanel({
@@ -612,8 +869,18 @@ function TagEditPanel({
   // a different tag is selected, so seedForm runs again automatically.)
 
   const update = useMutation({
-    mutationFn: async (body: Record<string, unknown>) => {
-      return api.patch(`/tags/${tag.tag_id}`, body);
+    mutationFn: async ({ body, groupsChanged }: {
+      body: Record<string, unknown>;
+      groupsChanged: boolean;
+    }) => {
+      // Issue tag PATCH if anything in the body changed
+      if (Object.keys(body).length > 0) {
+        await api.patch(`/tags/${tag.tag_id}`, body);
+      }
+      // Phase 8.2 — group memberships go via PUT /tags/:id/groups
+      if (groupsChanged) {
+        await api.put(`/tags/${tag.tag_id}/groups`, { group_ids: form.group_ids });
+      }
     },
     onSuccess: () => {
       setServerError(null);
@@ -645,6 +912,8 @@ function TagEditPanel({
       body.description = form.description || null;
     if (form.engineering_unit !== original.engineering_unit)
       body.engineering_unit = form.engineering_unit || null;
+    if (form.engineering_unit_id !== original.engineering_unit_id)
+      body.engineering_unit_id = form.engineering_unit_id;
     if (form.scale !== original.scale)
       body.scale = parseFloat(form.scale);
     if (form.offset !== original.offset)
@@ -655,12 +924,27 @@ function TagEditPanel({
       body.max_value = form.max_value === "" ? null : parseFloat(form.max_value);
     if (form.enabled !== original.enabled)
       body.enabled = form.enabled;
+    if (form.is_heartbeat !== original.is_heartbeat)
+      body.is_heartbeat = form.is_heartbeat;
+    if (form.heartbeat_max_stale_sec !== original.heartbeat_max_stale_sec)
+      body.heartbeat_max_stale_sec =
+        form.heartbeat_max_stale_sec === "" ? null : parseInt(form.heartbeat_max_stale_sec, 10);
+    if (form.named_set_id !== original.named_set_id)
+      body.named_set_id = form.named_set_id;
+    if (form.writable !== original.writable)
+      body.writable = form.writable;
 
-    if (Object.keys(body).length === 0) {
+    // Phase 8.2 — group memberships persist via a separate endpoint.
+    const groupsChanged = (
+      form.group_ids.length !== original.group_ids.length ||
+      form.group_ids.some((id, i) => id !== original.group_ids[i])
+    );
+
+    if (Object.keys(body).length === 0 && !groupsChanged) {
       setServerError("No changes to save.");
       return;
     }
-    update.mutate(body);
+    update.mutate({ body, groupsChanged });
   }
 
   return (
@@ -672,7 +956,7 @@ function TagEditPanel({
           <DT label="Device">{tag.device_name}</DT>
           <DT label="Tag ID">{tag.tag_id}</DT>
           <DT label="Data type">{tag.data_type}</DT>
-          <DT label="Byte order">{tag.byte_order}</DT>
+          <DT label="Byte order">{byteOrderLabelFor(tag.data_type, tag.byte_order)}</DT>
           <DT label="Function code">{tag.function_code}</DT>
           <DT label="Address">{tag.address}</DT>
           <DT label="Register count">{tag.register_count}</DT>
@@ -685,7 +969,9 @@ function TagEditPanel({
         <h3 className="text-sm font-semibold">Editable</h3>
 
         <div className="space-y-1.5">
-          <Label htmlFor="description">Description</Label>
+          <Label htmlFor="description">
+            Description <HelpTip entry={help.tag.description} />
+          </Label>
           <Input
             id="description"
             value={form.description}
@@ -695,17 +981,26 @@ function TagEditPanel({
 
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1.5">
-            <Label htmlFor="engineering_unit">Engineering unit</Label>
-            <Input
-              id="engineering_unit"
-              value={form.engineering_unit}
-              onChange={(e) => setForm({ ...form, engineering_unit: e.target.value })}
-              placeholder="e.g. bar, kg/h"
+            <Label htmlFor="engineering_unit">
+              Engineering unit <HelpTip entry={help.tag.engineering_unit} />
+            </Label>
+            <UnitSelect
+              value={{
+                engineering_unit_id: form.engineering_unit_id,
+                engineering_unit: form.engineering_unit || null,
+              }}
+              onChange={(v) => setForm({
+                ...form,
+                engineering_unit_id: v.engineering_unit_id,
+                engineering_unit: v.engineering_unit ?? "",
+              })}
             />
           </div>
 
           <div className="space-y-1.5 flex flex-col">
-            <Label htmlFor="enabled">Enabled</Label>
+            <Label htmlFor="enabled">
+              Enabled <HelpTip entry={help.tag.enabled} />
+            </Label>
             <label className="flex items-center gap-2 h-9 text-sm">
               <input
                 id="enabled"
@@ -723,7 +1018,9 @@ function TagEditPanel({
 
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1.5">
-            <Label htmlFor="scale">Scale</Label>
+            <Label htmlFor="scale">
+              Scale <HelpTip entry={help.tag.scale} />
+            </Label>
             <Input
               id="scale"
               type="number"
@@ -734,7 +1031,9 @@ function TagEditPanel({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="offset">Offset</Label>
+            <Label htmlFor="offset">
+              Offset <HelpTip entry={help.tag.offset} />
+            </Label>
             <Input
               id="offset"
               type="number"
@@ -745,7 +1044,9 @@ function TagEditPanel({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="min_value">Min value</Label>
+            <Label htmlFor="min_value">
+              Min value <HelpTip entry={help.tag.min_value} />
+            </Label>
             <Input
               id="min_value"
               type="number"
@@ -756,7 +1057,9 @@ function TagEditPanel({
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="max_value">Max value</Label>
+            <Label htmlFor="max_value">
+              Max value <HelpTip entry={help.tag.max_value} />
+            </Label>
             <Input
               id="max_value"
               type="number"
@@ -766,6 +1069,123 @@ function TagEditPanel({
             />
           </div>
         </div>
+
+        {/* Phase 8.2 — group memberships */}
+        <div className="space-y-1.5">
+          <Label>Groups <HelpTip entry={help.tag.groups} /></Label>
+          <GroupSelect
+            value={form.group_ids}
+            onChange={(ids) => setForm({ ...form, group_ids: ids })}
+          />
+          <p className="text-xs text-muted-foreground">
+            Logical classifications — orthogonal to the polling block. Create
+            new groups inline or manage them under Configuration → Groups.
+          </p>
+        </div>
+
+        {/* Phase 8.3 — named set (value→label translator) */}
+        <div className="space-y-1.5">
+          <Label htmlFor="named_set">
+            Enumeration
+            <HelpTip entry={help.tag.named_set} />
+          </Label>
+          <NamedSetSelect
+            value={form.named_set_id}
+            onChange={(id) => setForm({ ...form, named_set_id: id })}
+            dataType={tag.data_type}
+          />
+          <p className="text-xs text-muted-foreground">
+            Translates raw integer values to readable text in dashboards
+            and reports. Optional — works only for bool/int tags.
+          </p>
+        </div>
+
+        {/* Phase 7 E1a — heartbeat watch */}
+        <div className="rounded-md border bg-secondary/30 p-3 space-y-2">
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.is_heartbeat}
+              onChange={(e) => setForm({ ...form, is_heartbeat: e.target.checked })}
+              className="h-4 w-4"
+            />
+            <span className="font-medium inline-flex items-center gap-1">
+              Heartbeat watch
+              <HelpTip entry={help.tag.is_heartbeat} />
+              {form.is_heartbeat && <span className="text-rose-500">♥</span>}
+            </span>
+            <span className="text-xs text-muted-foreground">
+              Alarm if the value freezes for too long
+            </span>
+          </label>
+          {form.is_heartbeat && (
+            <div className="pl-6 grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="hb_stale">
+                  Stale after (seconds) <HelpTip entry={help.tag.heartbeat_max_stale_sec} />
+                </Label>
+                <Input
+                  id="hb_stale"
+                  type="number"
+                  min="1"
+                  placeholder="e.g. 30"
+                  value={form.heartbeat_max_stale_sec}
+                  onChange={(e) =>
+                    setForm({ ...form, heartbeat_max_stale_sec: e.target.value })
+                  }
+                />
+              </div>
+              <div className="text-xs text-muted-foreground self-end pb-2">
+                Worker marks samples <code>HEARTBEAT_FROZEN</code> when the
+                value hasn't changed for this many seconds.
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Phase 8.5.1 — writability opt-in.
+            If the parent block is Read-only, lock this checkbox OFF —
+            tags can't be writable when their block isn't. To allow
+            writes, the block's Access has to flip first. */}
+        {(tag.function_code === 1 || tag.function_code === 3) && (() => {
+          const blockIsReadOnly =
+            tag.register_block_id != null && tag.block_writable === false;
+          return (
+            <div className={cn(
+              "rounded-md border p-3 space-y-2",
+              blockIsReadOnly ? "bg-muted/40 border-muted" : "bg-secondary/30",
+            )}>
+              <label className={cn(
+                "flex items-center gap-2 text-sm",
+                blockIsReadOnly ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+              )}>
+                <input
+                  type="checkbox"
+                  checked={form.writable}
+                  disabled={blockIsReadOnly}
+                  onChange={(e) => setForm({ ...form, writable: e.target.checked })}
+                  className="h-4 w-4"
+                />
+                <span className="font-medium">Writable</span>
+                <span className="text-xs text-muted-foreground">
+                  Allow writes from Write Console / CLI / REST
+                </span>
+                {form.writable && !blockIsReadOnly && (
+                  <span className="ml-auto text-[10px] uppercase tracking-wide text-green-700 font-semibold">
+                    enabled
+                  </span>
+                )}
+              </label>
+              {blockIsReadOnly && (
+                <p className="pl-6 text-xs text-muted-foreground">
+                  The parent Register Block is Read-only — tags in it
+                  cannot be written. Open Configuration → Register Blocks
+                  and set its Access to <span className="font-mono">Read + Write</span> to unlock.
+                </p>
+              )}
+            </div>
+          );
+        })()}
 
         {serverError && (
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 flex gap-2">
@@ -826,12 +1246,20 @@ function DT({ label, children }: { label: string; children: React.ReactNode }) {
 function seedForm(tag: LiveTag): EditableFields {
   return {
     description: tag.description ?? "",
-    engineering_unit: tag.engineering_unit ?? "",
+    // Phase 8.1 — prefer FK, fall back to override; only one is set in DB at a time.
+    engineering_unit_id: tag.engineering_unit_id,
+    engineering_unit: tag.engineering_unit_override ?? "",
     scale: String(tag.scale),
     offset: String(tag.offset),
     min_value: tag.min_value === null ? "" : String(tag.min_value),
     max_value: tag.max_value === null ? "" : String(tag.max_value),
     enabled: tag.enabled,
+    is_heartbeat: tag.is_heartbeat,
+    heartbeat_max_stale_sec:
+      tag.heartbeat_max_stale_sec === null ? "" : String(tag.heartbeat_max_stale_sec),
+    group_ids: tag.group_ids ?? [],
+    named_set_id: tag.named_set_id,
+    writable: tag.writable,
   };
 }
 
@@ -847,7 +1275,72 @@ const DATA_TYPES = [
   "bool", "string",
 ] as const;
 
-const BYTE_ORDERS = ["ABCD", "CDAB", "BADC", "DCBA"] as const;
+/**
+ * Byte-order options as a function of the tag's data_type.
+ *
+ * The DB stores the canonical 4-letter codes (ABCD/CDAB/BADC/DCBA) because
+ * those map cleanly onto the four register/byte permutations the decoder
+ * understands regardless of width. The UI labels show data-type-appropriate
+ * letter counts so a user looking at a float64 doesn't see "ABCD" — they see
+ * "ABCDEFGH" which honestly reflects the 8 bytes involved.
+ *
+ *   1-register types (bool/int16/uint16):
+ *     ABCD → "AB"        (no swap)
+ *     BADC → "BA"        (byte swap inside the single register)
+ *     CDAB / DCBA → not shown (word-swap is meaningless for 1 register)
+ *
+ *   2-register types (int32/uint32/float32):
+ *     ABCD/CDAB/BADC/DCBA as is.
+ *
+ *   4-register types (int64/uint64/float64):
+ *     ABCD → "ABCDEFGH"  (big-endian, natural register order)
+ *     CDAB → "GHEFCDAB"  (word swap — registers reversed)
+ *     BADC → "BADCFEHG"  (byte swap within registers, register order intact)
+ *     DCBA → "HGFEDCBA"  (little-endian — full reverse)
+ *
+ * Friendly descriptions in parentheses help engineers who don't think in
+ * raw permutation strings.
+ */
+type ByteOrderOption = {
+  /** DB value — always one of the four canonical 4-letter codes */
+  value: "ABCD" | "CDAB" | "BADC" | "DCBA";
+  /** UI label, width-appropriate */
+  label: string;
+  /** Friendly description */
+  hint: string;
+};
+
+function byteOrderOptionsFor(dataType: string): ByteOrderOption[] {
+  // 1-register: only no-swap vs byte-swap are meaningful.
+  if (["bool", "int16", "uint16"].includes(dataType)) {
+    return [
+      { value: "ABCD", label: "AB", hint: "no swap" },
+      { value: "BADC", label: "BA", hint: "byte swap" },
+    ];
+  }
+  // 4-register (64-bit) types — show 8-letter labels.
+  if (["int64", "uint64", "float64"].includes(dataType)) {
+    return [
+      { value: "ABCD", label: "ABCDEFGH", hint: "big-endian" },
+      { value: "DCBA", label: "HGFEDCBA", hint: "little-endian" },
+      { value: "CDAB", label: "GHEFCDAB", hint: "word swap" },
+      { value: "BADC", label: "BADCFEHG", hint: "byte swap" },
+    ];
+  }
+  // 2-register types (int32 / uint32 / float32) — canonical 4-letter labels.
+  return [
+    { value: "ABCD", label: "ABCD", hint: "big-endian" },
+    { value: "DCBA", label: "DCBA", hint: "little-endian" },
+    { value: "CDAB", label: "CDAB", hint: "word swap" },
+    { value: "BADC", label: "BADC", hint: "byte swap" },
+  ];
+}
+
+/** Render the byte_order DB code as the display label for a given data_type. */
+function byteOrderLabelFor(dataType: string, dbValue: string): string {
+  const opt = byteOrderOptionsFor(dataType).find((o) => o.value === dbValue);
+  return opt?.label ?? dbValue;
+}
 
 // register_count is determined by data_type — set sensible defaults
 const DEFAULT_REGISTER_COUNT: Record<string, number> = {
@@ -867,22 +1360,38 @@ type NewTagForm = {
   function_code: string;
   address: string;
   register_count: string;
-  engineering_unit: string;
+  // Phase 8.1 — dual-source unit
+  engineering_unit_id: number | null;
+  engineering_unit: string;        // override text
   scale: string;
   offset: string;
   min_value: string;
   max_value: string;
+  is_heartbeat: boolean;
+  heartbeat_max_stale_sec: string;
+  // Phase 8.2 — group memberships (persisted via separate PUT after create)
+  group_ids: number[];
+  // Phase 8.3 — optional named set FK
+  named_set_id: number | null;
+  // Phase 8.5.1 — explicit write opt-in. Hidden when area is DI/IR.
+  writable: boolean;
 };
 
 function NewTagPanel({
   devices,
   blocks,
   defaultDeviceId,
+  seedAddress,
+  seedFunctionCode,
+  seedByteOrder,
   onCreated,
 }: {
   devices: Device[];
   blocks: RegisterBlock[];
   defaultDeviceId?: number;
+  seedAddress?: string;
+  seedFunctionCode?: string;
+  seedByteOrder?: string;
   onCreated: () => void;
 }) {
   const [form, setForm] = useState<NewTagForm>(() => ({
@@ -891,15 +1400,21 @@ function NewTagPanel({
     name: "",
     description: "",
     data_type: "float32",
-    byte_order: "ABCD",
-    function_code: "3",
-    address: "0",
+    byte_order: seedByteOrder ?? "ABCD",
+    function_code: seedFunctionCode ?? "3",
+    address: seedAddress ?? "0",
     register_count: "2",
+    engineering_unit_id: null,
     engineering_unit: "",
     scale: "1",
     offset: "0",
     min_value: "",
     max_value: "",
+    is_heartbeat: false,
+    heartbeat_max_stale_sec: "",
+    group_ids: [],
+    named_set_id: null,
+    writable: false,
   }));
   const [serverError, setServerError] = useState<string | null>(null);
 
@@ -926,34 +1441,58 @@ function NewTagPanel({
       register_block_id: blockId,
       function_code: String(b.function_code),
       address: String(b.start_address),
+      // Phase 8.5.1 — auto-default tag writability from the selected block:
+      //   - Block writable + FC 1/3 → default tag writable=true (user can untick)
+      //   - Block read-only → force writable=false (checkbox will be disabled)
+      // FC 2/4 are always read-only by spec so writable stays false either way.
+      writable: b.writable && (b.function_code === 1 || b.function_code === 3),
     });
   }
 
-  // When the data_type changes, sync register_count to match the type's width.
+  // When the data_type changes, sync register_count to match the type's width
+  // AND snap byte_order to a sensible default for that width — the option set
+  // differs by type, so a value valid for float32 may not be the obvious
+  // default for float64.
   function handleDataTypeChange(dt: string) {
+    const newOptions = byteOrderOptionsFor(dt);
+    const currentStillValid = newOptions.some((o) => o.value === form.byte_order);
     setForm({
       ...form,
       data_type: dt,
       register_count: String(DEFAULT_REGISTER_COUNT[dt] ?? 1),
+      byte_order: currentStillValid ? form.byte_order : newOptions[0].value,
     });
   }
 
   const create = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
+      const fcInt = parseInt(form.function_code, 10);
+      // Phase 8.5.1 — writable only meaningful for FC 1/3; force false otherwise.
+      // DB CHECK constraint would reject it anyway, but client-side
+      // pre-check gives the user a cleaner error.
+      const writable = (fcInt === 1 || fcInt === 3) ? form.writable : false;
       const body: Record<string, unknown> = {
         device_id: parseInt(form.device_id, 10),
         name: form.name,
         description: form.description || null,
         data_type: form.data_type,
         byte_order: form.byte_order,
-        function_code: parseInt(form.function_code, 10),
+        function_code: fcInt,
         address: parseInt(form.address, 10),
         register_count: parseInt(form.register_count, 10),
-        engineering_unit: form.engineering_unit || null,
+        engineering_unit_id: form.engineering_unit_id,
+        engineering_unit: form.engineering_unit_id ? null : (form.engineering_unit || null),
         scale: parseFloat(form.scale),
         offset: parseFloat(form.offset),
         min_value: form.min_value === "" ? null : parseFloat(form.min_value),
         max_value: form.max_value === "" ? null : parseFloat(form.max_value),
+        is_heartbeat: form.is_heartbeat,
+        heartbeat_max_stale_sec:
+          form.is_heartbeat && form.heartbeat_max_stale_sec !== ""
+            ? parseInt(form.heartbeat_max_stale_sec, 10)
+            : null,
+        named_set_id: form.named_set_id,
+        writable,
       };
       // Only include register_block_id when a block is actually selected;
       // omitting it (undefined) gets serialized away by JSON.stringify, which
@@ -961,7 +1500,13 @@ function NewTagPanel({
       if (form.register_block_id) {
         body.register_block_id = parseInt(form.register_block_id, 10);
       }
-      return api.post("/tags", body);
+      const created = await api.post<{ id: number }>("/tags", body);
+      // Phase 8.2 — group memberships live on a separate endpoint. Only call
+      // it if the user actually picked any; otherwise skip the round trip.
+      if (form.group_ids.length > 0) {
+        await api.put(`/tags/${created.id}/groups`, { group_ids: form.group_ids });
+      }
+      return created;
     },
     onSuccess: onCreated,
     onError: (e: Error) => setServerError(e instanceof ApiError ? e.detail : e.message),
@@ -978,7 +1523,9 @@ function NewTagPanel({
     >
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="device">Device</Label>
+          <Label htmlFor="device">
+            Device <HelpTip entry={help.device.name} />
+          </Label>
           <select
             id="device"
             required
@@ -992,7 +1539,9 @@ function NewTagPanel({
           </select>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="block">Register block</Label>
+          <Label htmlFor="block">
+            Register block <HelpTip entry={help.block.name} />
+          </Label>
           <select
             id="block"
             value={form.register_block_id}
@@ -1010,7 +1559,9 @@ function NewTagPanel({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="name">Name</Label>
+        <Label htmlFor="name">
+          Name <HelpTip entry={help.tag.name} />
+        </Label>
         <Input
           id="name"
           required
@@ -1021,7 +1572,9 @@ function NewTagPanel({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="description">Description</Label>
+        <Label htmlFor="description">
+          Description <HelpTip entry={help.tag.description} />
+        </Label>
         <Input
           id="description"
           value={form.description}
@@ -1031,7 +1584,9 @@ function NewTagPanel({
 
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="data_type">Data type</Label>
+          <Label htmlFor="data_type">
+            Data type <HelpTip entry={help.tag.data_type} />
+          </Label>
           <select
             id="data_type"
             value={form.data_type}
@@ -1044,15 +1599,21 @@ function NewTagPanel({
           </select>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="byte_order">Byte order</Label>
+          <Label htmlFor="byte_order" className="inline-flex items-center">
+            Byte order
+            <HelpTip entry={help.tag.byte_order} />
+            <ByteOrderHelp />
+          </Label>
           <select
             id="byte_order"
             value={form.byte_order}
             onChange={(e) => setForm({ ...form, byte_order: e.target.value })}
             className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
           >
-            {BYTE_ORDERS.map((bo) => (
-              <option key={bo} value={bo}>{bo}</option>
+            {byteOrderOptionsFor(form.data_type).map((bo) => (
+              <option key={bo.value} value={bo.value}>
+                {bo.label} ({bo.hint})
+              </option>
             ))}
           </select>
         </div>
@@ -1060,7 +1621,9 @@ function NewTagPanel({
 
       <div className="grid grid-cols-3 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="function_code">FC</Label>
+          <Label htmlFor="function_code">
+            FC <HelpTip entry={help.tag.function_code} />
+          </Label>
           <select
             id="function_code"
             value={form.function_code}
@@ -1074,7 +1637,9 @@ function NewTagPanel({
           </select>
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="address">Address</Label>
+          <Label htmlFor="address">
+            Address <HelpTip entry={help.tag.address} />
+          </Label>
           <Input
             id="address"
             type="number"
@@ -1086,7 +1651,9 @@ function NewTagPanel({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="register_count">Reg. count</Label>
+          <Label htmlFor="register_count">
+            Reg. count <HelpTip entry={help.tag.register_count} />
+          </Label>
           <Input
             id="register_count"
             type="number"
@@ -1099,18 +1666,62 @@ function NewTagPanel({
         </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      {/* C1 — address translator (PDU ↔ Modicon) */}
+      <AddressHelper
+        address={form.address}
+        functionCode={parseInt(form.function_code, 10) || 3}
+        onConvert={(pdu, impliedFc) => {
+          setForm({
+            ...form,
+            address: String(pdu),
+            function_code: String(impliedFc),
+          });
+        }}
+      />
+
+      {/* C2 — Test-read panel (only useful when a device is selected) */}
+      {form.device_id && (
+        <TestReadPanel
+          deviceId={parseInt(form.device_id, 10)}
+          functionCode={form.function_code}
+          address={form.address}
+          registerCount={form.register_count}
+          onPick={(dataType, byteOrder) => {
+            // Apply the chosen combination to the form. Also sync register_count
+            // to match the type's natural width.
+            const rc = DEFAULT_REGISTER_COUNT[dataType] ?? parseInt(form.register_count, 10);
+            setForm({
+              ...form,
+              data_type: dataType,
+              byte_order: byteOrder,
+              register_count: String(rc),
+            });
+          }}
+        />
+      )}
+
+      <div className="space-y-1.5">
+        <Label htmlFor="engineering_unit">
+          Engineering unit <HelpTip entry={help.tag.engineering_unit} />
+        </Label>
+        <UnitSelect
+          value={{
+            engineering_unit_id: form.engineering_unit_id,
+            engineering_unit: form.engineering_unit || null,
+          }}
+          onChange={(v) => setForm({
+            ...form,
+            engineering_unit_id: v.engineering_unit_id,
+            engineering_unit: v.engineering_unit ?? "",
+          })}
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="engineering_unit">Unit</Label>
-          <Input
-            id="engineering_unit"
-            value={form.engineering_unit}
-            onChange={(e) => setForm({ ...form, engineering_unit: e.target.value })}
-            placeholder="bar, kg/h, °C…"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="scale">Scale</Label>
+          <Label htmlFor="scale">
+            Scale <HelpTip entry={help.tag.scale} />
+          </Label>
           <Input
             id="scale"
             type="number"
@@ -1120,7 +1731,9 @@ function NewTagPanel({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="offset">Offset</Label>
+          <Label htmlFor="offset">
+            Offset <HelpTip entry={help.tag.offset} />
+          </Label>
           <Input
             id="offset"
             type="number"
@@ -1133,7 +1746,9 @@ function NewTagPanel({
 
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="min_value">Min value (optional)</Label>
+          <Label htmlFor="min_value">
+            Min value (optional) <HelpTip entry={help.tag.min_value} />
+          </Label>
           <Input
             id="min_value"
             type="number"
@@ -1143,7 +1758,9 @@ function NewTagPanel({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="max_value">Max value (optional)</Label>
+          <Label htmlFor="max_value">
+            Max value (optional) <HelpTip entry={help.tag.max_value} />
+          </Label>
           <Input
             id="max_value"
             type="number"
@@ -1153,6 +1770,133 @@ function NewTagPanel({
           />
         </div>
       </div>
+
+      {/* Phase 8.2 — group memberships */}
+      <div className="space-y-1.5">
+        <Label>Groups <HelpTip entry={help.tag.groups} /></Label>
+        <GroupSelect
+          value={form.group_ids}
+          onChange={(ids) => setForm({ ...form, group_ids: ids })}
+        />
+        <p className="text-xs text-muted-foreground">
+          Logical classifications — orthogonal to the polling block. Create
+          new groups inline or manage them under Configuration → Groups.
+        </p>
+      </div>
+
+      {/* Phase 8.3 — named set (value→label translator) */}
+      <div className="space-y-1.5">
+        <Label htmlFor="new_named_set">
+          Enumeration
+          <HelpTip entry={help.tag.named_set} />
+        </Label>
+        <NamedSetSelect
+          value={form.named_set_id}
+          onChange={(id) => setForm({ ...form, named_set_id: id })}
+          dataType={form.data_type}
+        />
+        <p className="text-xs text-muted-foreground">
+          Translates raw integer values to readable text in dashboards
+          and reports. Optional — works only for bool/int tags.
+        </p>
+      </div>
+
+      {/* Phase 7 E1a — heartbeat watch */}
+      <div className="rounded-md border bg-secondary/30 p-3 space-y-2">
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="checkbox"
+            checked={form.is_heartbeat}
+            onChange={(e) => setForm({ ...form, is_heartbeat: e.target.checked })}
+            className="h-4 w-4"
+          />
+          <span className="font-medium inline-flex items-center gap-1">
+            Heartbeat watch <HelpTip entry={help.tag.is_heartbeat} />
+          </span>
+          <span className="text-xs text-muted-foreground">
+            Alarm if the value freezes for too long
+          </span>
+        </label>
+        {form.is_heartbeat && (
+          <div className="pl-6 grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="heartbeat_stale">
+                Stale after (seconds) <HelpTip entry={help.tag.heartbeat_max_stale_sec} />
+              </Label>
+              <Input
+                id="heartbeat_stale"
+                type="number"
+                min="1"
+                placeholder="e.g. 30"
+                value={form.heartbeat_max_stale_sec}
+                onChange={(e) => setForm({ ...form, heartbeat_max_stale_sec: e.target.value })}
+              />
+            </div>
+            <div className="text-xs text-muted-foreground self-end pb-2">
+              The worker marks samples <code>HEARTBEAT_FROZEN</code> if the
+              value hasn't changed in this many seconds.
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Phase 8.5.1 — writability opt-in.
+          Three states:
+            - No block selected (unblocked writable tag): user-controlled
+            - Block selected and block.writable=true: user-controlled, defaulted ON
+            - Block selected and block.writable=false: locked OFF, checkbox disabled */}
+      {(form.function_code === "1" || form.function_code === "3") && (() => {
+        const selectedBlock = form.register_block_id
+          ? blocks.find((b) => String(b.id) === form.register_block_id)
+          : null;
+        const blockIsReadOnly = selectedBlock != null && !selectedBlock.writable;
+        return (
+          <div className={cn(
+            "rounded-md border p-3 space-y-2",
+            blockIsReadOnly ? "bg-muted/40 border-muted" : "bg-secondary/30",
+          )}>
+            <label className={cn(
+              "flex items-center gap-2 text-sm",
+              blockIsReadOnly ? "cursor-not-allowed opacity-60" : "cursor-pointer",
+            )}>
+              <input
+                type="checkbox"
+                checked={form.writable}
+                disabled={blockIsReadOnly}
+                onChange={(e) => setForm({ ...form, writable: e.target.checked })}
+                className="h-4 w-4"
+              />
+              <span className="font-medium">Writable</span>
+              <span className="text-xs text-muted-foreground">
+                Allow writes to this tag from Write Console / CLI / REST
+              </span>
+              {form.writable && !blockIsReadOnly && (
+                <span className="ml-auto text-[10px] uppercase tracking-wide text-green-700 font-semibold">
+                  enabled
+                </span>
+              )}
+            </label>
+            {blockIsReadOnly && (
+              <p className="pl-6 text-xs text-muted-foreground">
+                The selected block <span className="font-mono">{selectedBlock!.name}</span> is
+                Read-only. To make tags in this block writable, edit the
+                block's Access to <span className="font-mono">Read + Write</span> first.
+              </p>
+            )}
+            {!blockIsReadOnly && form.writable && form.register_block_id && (
+              <p className="pl-6 text-xs text-green-700">
+                Block is Read+Write — this tag will be writable.
+              </p>
+            )}
+            {!blockIsReadOnly && form.writable && !form.register_block_id && (
+              <p className="pl-6 text-xs text-muted-foreground">
+                This tag has no register block — it's a standalone writable
+                tag that won't be polled but can be written.
+              </p>
+            )}
+          </div>
+        );
+      })()}
 
       {serverError && (
         <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800 flex gap-2">
@@ -1187,6 +1931,16 @@ function exportTags(tags: LiveTag[]): void {
     { header: "min_value", value: (t) => t.min_value },
     { header: "max_value", value: (t) => t.max_value },
     { header: "description", value: (t) => t.description },
+    // Phase 8.2 — groups as semicolon-separated names. Comma would clash
+    // with the CSV delimiter; semicolon is the standard escape in spreadsheets.
+    { header: "groups", value: (t) => (t.groups ?? []).join(";") },
+    // Phase 8.3 — named set by name (resolved server-side on import)
+    { header: "named_set", value: (t) => t.named_set_name },
+    // Phase 7 E1a — heartbeat metadata
+    { header: "is_heartbeat", value: (t) => (t.is_heartbeat ? "true" : "false") },
+    { header: "heartbeat_max_stale_sec", value: (t) => t.heartbeat_max_stale_sec },
+    // Phase 8.5.1 — writable flag (round-trips with import)
+    { header: "writable", value: (t) => (t.writable ? "true" : "false") },
   ], filename);
 }
 

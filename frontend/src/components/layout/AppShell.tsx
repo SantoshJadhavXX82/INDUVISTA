@@ -22,9 +22,18 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen bg-background text-foreground">
       <aside className="w-60 shrink-0 border-r flex flex-col">
         <div className="px-4 py-4 border-b">
-          <div className="text-lg font-bold tracking-tight">InduVista</div>
-          <div className="text-xs text-muted-foreground mt-0.5">
-            Industrial Reporting Tool
+          <div className="flex items-center gap-2.5">
+            <img
+              src="/icon_induvista.png"
+              alt="InduVista"
+              className="h-9 w-9 rounded shrink-0 object-contain"
+            />
+            <div>
+              <div className="text-lg font-bold tracking-tight leading-tight">InduVista</div>
+              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">
+                Industrial Reporting Tool
+              </div>
+            </div>
           </div>
         </div>
         <Nav />
@@ -45,7 +54,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               >
                 role: {health.data.role}
               </Badge>
-              <span className="text-xs text-muted-foreground tabular-nums">
+              <span
+                className="text-xs text-muted-foreground tabular-nums"
+                title={
+                  `Backend uptime: ${formatUptime(health.data.uptime_sec)}\n` +
+                  `Started: ${health.data.started_at}\n` +
+                  `Cycle count: ${health.data.cycle_count}\n` +
+                  `Migration: ${health.data.migration_version ?? "—"}`
+                }
+              >
                 db {health.data.db_latency_ms.toFixed(1)} ms
               </span>
             </>
@@ -58,4 +75,15 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       </div>
     </div>
   );
+}
+
+function formatUptime(sec: number): string {
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = Math.floor(sec % 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
