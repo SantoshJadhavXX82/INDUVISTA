@@ -43,6 +43,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { formatTagValue } from "@/lib/format";
 
 type Device = { id: number; name: string };
 type RegisterBlock = {
@@ -56,6 +57,10 @@ type RegisterBlock = {
   // Phase 8.5.1 — used as default for new tags + to lock the Writable
   // checkbox when block is read-only
   writable: boolean;
+  // Phase 9.1 — surfaced on the response so future tag-form logic can
+  // hint "this tag is in an Enron block, addresses are logical". No UI
+  // behaviour change in this slice; future slices (bit-of-INT) will read it.
+  addressing_mode: "STANDARD" | "ENRON_HOLDING" | "ENRON_INPUT";
 };
 
 export default function TagExplorer() {
@@ -1417,6 +1422,10 @@ function NewTagPanel({
     writable: false,
   }));
   const [serverError, setServerError] = useState<string | null>(null);
+  // Phase 9.1.1+ — register_count is auto-derived from data_type. Power
+  // users can flip this to manually override the value; the API still
+  // rejects (data_type, register_count) mismatches inside Enron blocks.
+  const [rcOverride, setRcOverride] = useState(false);
 
   // Filter blocks to the selected device — null option for writable tags.
   const deviceBlocks = useMemo(
@@ -1582,6 +1591,29 @@ function NewTagPanel({
         />
       </div>
 
+      {/* Phase 9.1.1 — when an Enron block is selected, surface the
+          uniform-width constraint so users don't try mixing types. */}
+      {(() => {
+        const selectedBlock = form.register_block_id
+          ? blocks.find((b) => String(b.id) === form.register_block_id)
+          : null;
+        if (!selectedBlock || selectedBlock.addressing_mode === "STANDARD") {
+          return null;
+        }
+        return (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <span className="font-semibold uppercase tracking-wide text-[10px]">
+              Enron block
+            </span>
+            <p className="mt-1">
+              All tags in <span className="font-mono">{selectedBlock.name}</span> must share
+              the same data type (uniform width). Addresses are <strong>logical</strong> —
+              one address per value. The API rejects mixed-width tags inside an Enron block.
+            </p>
+          </div>
+        );
+      })()}
+
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="data_type">
@@ -1651,8 +1683,13 @@ function NewTagPanel({
           />
         </div>
         <div className="space-y-1.5">
-          <Label htmlFor="register_count">
-            Reg. count <HelpTip entry={help.tag.register_count} />
+          <Label htmlFor="register_count" className="flex items-center gap-2">
+            <span>Reg. count <HelpTip entry={help.tag.register_count} /></span>
+            {!rcOverride && (
+              <span className="ml-auto inline-flex items-center gap-1 rounded bg-secondary/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                auto
+              </span>
+            )}
           </Label>
           <Input
             id="register_count"
@@ -1661,8 +1698,39 @@ function NewTagPanel({
             min="1"
             max="4"
             value={form.register_count}
+            disabled={!rcOverride}
             onChange={(e) => setForm({ ...form, register_count: e.target.value })}
           />
+          {/* Show the override toggle only outside Enron blocks. Inside an
+              Enron block the API rejects (data_type, register_count)
+              mismatches anyway, so exposing the toggle would just lead to
+              confusing 400 errors. */}
+          {(() => {
+            const selectedBlock = form.register_block_id
+              ? blocks.find((b) => String(b.id) === form.register_block_id)
+              : null;
+            const isEnron =
+              selectedBlock != null &&
+              selectedBlock.addressing_mode !== "STANDARD";
+            if (isEnron) {
+              return (
+                <p className="text-[11px] text-muted-foreground">
+                  Locked to the data type's natural width (Enron blocks).
+                </p>
+              );
+            }
+            return (
+              <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="h-3 w-3"
+                  checked={rcOverride}
+                  onChange={(e) => setRcOverride(e.target.checked)}
+                />
+                Override (advanced — usually leave auto)
+              </label>
+            );
+          })()}
         </div>
       </div>
 
@@ -1951,14 +2019,6 @@ function tagFilenameStamp(): string {
 }
 
 function formatValue(d: number | null, t: string | null, dataType: string): string {
-  if (t !== null && t !== undefined) return t;
-  if (d === null || d === undefined) return "—";
-  if (dataType === "bool") return d ? "TRUE" : "FALSE";
-  if (dataType.startsWith("int") || dataType.startsWith("uint")) return Math.trunc(d).toString();
-  const abs = Math.abs(d);
-  if (abs === 0) return "0";
-  if (abs < 0.01) return d.toExponential(2);
-  if (abs >= 1000) return d.toFixed(1);
-  if (abs >= 10) return d.toFixed(2);
-  return d.toFixed(3);
+  // Thin wrapper over the shared formatter; keeps existing call sites tidy.
+  return formatTagValue(d, t, dataType);
 }

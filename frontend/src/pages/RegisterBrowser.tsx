@@ -18,6 +18,7 @@ import {
   ScanLine, AlertCircle, Plus, Eye, EyeOff,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
+import { formatFloat as _sharedFormatFloat } from "@/lib/format";
 import { type ScanRangeResponse } from "@/types/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -48,6 +49,12 @@ export default function RegisterBrowser() {
   const [byteOrder, setByteOrder] = useState<ByteOrder>("ABCD");
   const [hideZeros, setHideZeros] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Phase 10.2 — Enron-style reads. When enabled, the scan asks the backend
+  // to route through the persistent EnronChannel (permissive byte_count
+  // parser), and each logical address is treated as one value of the chosen
+  // width. Default 4 bytes = float32, the dominant Daniel/Emerson case.
+  const [enronMode, setEnronMode] = useState(false);
+  const [enronWidth, setEnronWidth] = useState<"2" | "4" | "8">("4");
 
   const devices = useQuery({
     queryKey: ["devices"],
@@ -62,12 +69,17 @@ export default function RegisterBrowser() {
   const scan = useMutation({
     mutationFn: (params: {
       deviceId: number; fc: number; start: number; end: number;
+      enron: boolean; width: number;
     }) => api.post<ScanRangeResponse>(
       `/devices/${params.deviceId}/scan-range`,
       {
         function_code: params.fc,
         start_address: params.start,
         end_address: params.end,
+        ...(params.enron && {
+          addressing_mode: "ENRON_HOLDING",
+          value_width_bytes: params.width,
+        }),
       },
     ),
     onMutate: () => setError(null),
@@ -92,7 +104,15 @@ export default function RegisterBrowser() {
       setError("Range too large — max 1000 addresses per scan.");
       return;
     }
-    scan.mutate({ deviceId: selectedDeviceId, fc, start, end });
+    if (enronMode && (fc !== 3 && fc !== 4)) {
+      setError("Enron reads only work with FC 3 (Holding) or FC 4 (Input regs).");
+      return;
+    }
+    scan.mutate({
+      deviceId: selectedDeviceId, fc, start, end,
+      enron: enronMode,
+      width: parseInt(enronWidth, 10),
+    });
   };
 
   // Build display rows. For 16-bit FCs (3/4), each address shows
@@ -119,21 +139,44 @@ export default function RegisterBrowser() {
       const next = rows[idx + 1];
       const next2 = rows[idx + 2];
       const next3 = rows[idx + 3];
+
+      // Phase 10.2 — Enron-mode rows ship pre-decoded float32/int32/uint32
+      // values; the backend computed them from the full 4-byte payload of
+      // the logical address. Use those instead of pairing-with-next, which
+      // would point to a different logical address in Enron mode.
+      const hasEnronDecode =
+        r.decoded_float32_abcd !== undefined ||
+        r.decoded_float64_abcd !== undefined;
+
       let float32: number | null = null;
       let int32: number | null = null;
       let uint32: number | null = null;
       let float64: number | null = null;
-      if (next) {
-        // Need 2 consecutive registers for any 32-bit interpretation.
-        float32 = interpretFloat32(r.value, next.value, byteOrder);
-        int32 = interpretInt32(r.value, next.value, byteOrder);
-        uint32 = interpretUint32(r.value, next.value, byteOrder);
-      }
-      if (next && next2 && next3) {
-        // Need 4 consecutive registers for float64.
-        float64 = interpretFloat64(
-          r.value, next.value, next2.value, next3.value, byteOrder,
-        );
+
+      if (hasEnronDecode) {
+        // Honor the user's chosen byteOrder for float32 selection.
+        if (byteOrder === "DCBA") {
+          float32 = r.decoded_float32_dcba ?? null;
+        } else {
+          // ABCD is the natural Daniel order; CDAB/BADC fall through to
+          // backend-computed ABCD as a best-effort default.
+          float32 = r.decoded_float32_abcd ?? null;
+        }
+        int32 = r.decoded_int32 ?? null;
+        uint32 = r.decoded_uint32 ?? null;
+        float64 = r.decoded_float64_abcd ?? null;
+      } else {
+        // STANDARD mode — pair with the next register(s) like Phase 7 did.
+        if (next) {
+          float32 = interpretFloat32(r.value, next.value, byteOrder);
+          int32 = interpretInt32(r.value, next.value, byteOrder);
+          uint32 = interpretUint32(r.value, next.value, byteOrder);
+        }
+        if (next && next2 && next3) {
+          float64 = interpretFloat64(
+            r.value, next.value, next2.value, next3.value, byteOrder,
+          );
+        }
       }
       return {
         ...r,
@@ -226,6 +269,42 @@ export default function RegisterBrowser() {
               </Button>
             </div>
           </div>
+
+          {/* Phase 10.2 — Enron-style read toggle. Daniel/Emerson 700XA and
+              similar devices use Enron addressing where one logical address
+              holds one value; pymodbus's strict byte_count check rejects
+              their responses, so we have to route through the EnronChannel. */}
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-xs">
+            <label className="flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={enronMode}
+                onChange={(e) => setEnronMode(e.target.checked)}
+                className="h-3.5 w-3.5"
+              />
+              <span className="font-medium">Enron read (one value per address)</span>
+            </label>
+            {enronMode && (
+              <>
+                <div className="flex items-center gap-2">
+                  <Label className="text-xs text-muted-foreground">Value width:</Label>
+                  <select
+                    value={enronWidth}
+                    onChange={(e) => setEnronWidth(e.target.value as "2" | "4" | "8")}
+                    className="h-7 rounded-md border border-input bg-background px-2 text-xs"
+                  >
+                    <option value="2">2 bytes (uint16/int16)</option>
+                    <option value="4">4 bytes (float32 / int32)</option>
+                    <option value="8">8 bytes (float64 / int64)</option>
+                  </select>
+                </div>
+                <span className="text-muted-foreground">
+                  Daniel 700XA: 3xxx → 2B, 7xxx/9xxx → 4B
+                </span>
+              </>
+            )}
+          </div>
+
           {error && (
             <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800 flex gap-2">
               <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
@@ -467,13 +546,9 @@ function isPlausibleFloat(f: number): boolean {
 }
 
 function formatFloat(f: number): string {
-  if (!isFinite(f) || isNaN(f)) return "—";
-  const a = Math.abs(f);
-  if (a === 0) return "0";
-  if (a < 1e-3 || a > 1e6) return f.toExponential(2);
-  if (a >= 1000) return f.toFixed(2);
-  if (a >= 1) return f.toFixed(4);
-  return f.toFixed(6);
+  // Thin wrapper over the shared formatter. Kept as a local function so
+  // its many call sites in this file don't need touching.
+  return _sharedFormatFloat(f);
 }
 
 function hexToAscii(hex: string): string {

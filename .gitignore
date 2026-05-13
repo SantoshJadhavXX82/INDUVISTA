@@ -43,3 +43,6 @@ build/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Scratch / temp work dirs
+backend/tmp/

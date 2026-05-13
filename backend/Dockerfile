@@ -20,6 +20,12 @@ COPY alembic.ini ./
 COPY alembic/ ./alembic/
 COPY app/ ./app/
 
+# Phase 10.1a — bake the test tree + dev dependencies list into the image
+# so `docker compose exec modbus_worker pytest /app/tests` works without
+# any side-load (`docker cp`) workaround.
+COPY tests/ ./tests/
+COPY requirements-dev.txt ./
+
 EXPOSE 8000
 
 # Default command — overridden by docker-compose per service

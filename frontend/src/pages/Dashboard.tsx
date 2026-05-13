@@ -22,6 +22,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
+import { formatTagValue } from "@/lib/format";
 import { useNamedSetMap, resolveNamedSet, type NamedSetMap } from "@/lib/named-set-resolve";
 
 const REFRESH_MS = 2_000;
@@ -426,16 +427,8 @@ function StatusBadge({ st }: { st: number | null }) {
 }
 
 function formatValue(d: number | null, t: string | null, dataType: string): string {
-  if (t !== null && t !== undefined) return t;
-  if (d === null || d === undefined) return "—";
-  if (dataType === "bool") return d ? "TRUE" : "FALSE";
-  if (dataType.startsWith("int") || dataType.startsWith("uint")) return Math.trunc(d).toString();
-  const abs = Math.abs(d);
-  if (abs === 0) return "0";
-  if (abs < 0.01) return d.toExponential(2);
-  if (abs >= 1000) return d.toFixed(1);
-  if (abs >= 10) return d.toFixed(2);
-  return d.toFixed(3);
+  // Thin wrapper over the shared formatter; keeps the call sites tidy.
+  return formatTagValue(d, t, dataType);
 }
 
 function formatAge(ageSec: number | null): string {

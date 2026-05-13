@@ -260,11 +260,19 @@ export type FramesResponse = {
   frames: Frame[];
 };
 
-/** Register Browser (Phase 7 — C4) */
+/** Register Browser (Phase 7 — C4, extended in 10.2 for Enron) */
 export type ScanRow = {
   address: number;
   hex: string;
   value: number;
+  // Phase 10.2 — populated only when the backend ran an Enron read with a
+  // known value width. Standard reads leave these undefined and the frontend
+  // pairs consecutive rows for 32/64-bit interpretations.
+  decoded_float32_abcd?: number | null;
+  decoded_float32_dcba?: number | null;
+  decoded_int32?: number | null;
+  decoded_uint32?: number | null;
+  decoded_float64_abcd?: number | null;
 };
 
 export type ScanRangeResponse = {

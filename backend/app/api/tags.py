@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.api._helpers import handle_integrity_error, sql_col
 from app.api._validation import check_tag_fits_block, find_tag_overlaps
 from app.db import get_session
+from app.modbus.datatypes import canonical_register_count
 
 router = APIRouter(prefix="/api", tags=["tags"])
 
@@ -34,7 +35,16 @@ class TagCreate(BaseModel):
     byte_order: ByteOrder = "ABCD"
     function_code: int = Field(..., ge=1, le=4)
     address: int = Field(..., ge=0, le=65535)
-    register_count: int = Field(..., ge=1, le=4)
+    register_count: int | None = Field(
+        None, ge=1, le=4,
+        description=(
+            "Optional — when omitted, the server derives it from data_type "
+            "(bool/int16/uint16 → 1, int32/uint32/float32 → 2, "
+            "int64/uint64/float64 → 4). In Enron blocks this represents the "
+            "on-wire width of one logical address; the API rejects values "
+            "that disagree with data_type."
+        ),
+    )
     # Phase 8.1: engineering unit has two paths — pick from master (preferred)
     # or override with free text. Mutual exclusion is enforced by a CHECK
     # constraint in the DB and a validator below.
@@ -159,6 +169,59 @@ _TAG_SELECT = """
 """
 
 
+def _resolve_register_count(
+    data_type: str,
+    register_count: int | None,
+    *,
+    is_enron_block: bool,
+) -> int:
+    """Reconcile the supplied register_count with the canonical value for
+    data_type. The result is what will be persisted.
+
+    Rules:
+      * register_count omitted → derive from data_type (auto).
+      * register_count supplied and equals canonical → accept.
+      * register_count supplied and differs from canonical, in an Enron
+        block → reject (wire-width inference would break).
+      * register_count supplied and differs from canonical, STANDARD mode
+        → accept (legacy / power-user override).
+    """
+    canonical = canonical_register_count(data_type)
+    if canonical is None:
+        raise HTTPException(
+            400, f"unsupported data_type {data_type!r}",
+        )
+    if register_count is None:
+        return canonical
+    if register_count == canonical:
+        return register_count
+    if is_enron_block:
+        raise HTTPException(
+            400,
+            f"register_count={register_count} disagrees with data_type "
+            f"{data_type!r} (canonical = {canonical}). In Enron blocks the "
+            f"register_count is locked to the data_type's natural width "
+            f"because the wire-level reader uses it to slice the response. "
+            f"Either change data_type to one that needs {register_count} "
+            f"registers, or let the API derive register_count automatically "
+            f"by omitting it.",
+        )
+    # STANDARD mode tolerates non-canonical pairings (rare power-user case).
+    return register_count
+
+
+def _block_addressing_mode(db: Session, register_block_id: int) -> str:
+    """Look up a register_block's addressing_mode. Returns 'STANDARD' if the
+    block doesn't exist (FK error will surface at INSERT time)."""
+    row = db.execute(
+        text("SELECT addressing_mode FROM register_blocks WHERE id = :id"),
+        {"id": register_block_id},
+    ).first()
+    if not row:
+        return "STANDARD"
+    return row[0]
+
+
 def _validate_addressing(
     db: Session,
     *,
@@ -168,36 +231,102 @@ def _validate_addressing(
     register_count: int,
     register_block_id: int | None,
     exclude_tag_id: int | None,
+    is_enron_block: bool,
 ) -> None:
-    """Run Phase 5 pre-write validation on a tag's addressing.
+    """Run pre-write validation on a tag's addressing.
 
-    Raises 400 if the resulting tag would overlap an existing tag, or if
-    its declared register_block can't contain it. Used by both POST (with
-    exclude_tag_id=None) and PATCH (with the tag's own id, so it doesn't
-    "overlap with itself" during edit).
+    Raises 400 if the tag would overlap an existing tag, or if its declared
+    register_block can't contain it.
+
+    For Enron blocks the address span used for overlap/fit checks is 1
+    (each logical address is one independent value), regardless of
+    register_count. For STANDARD blocks it's register_count (the tag's
+    bytes really do span that many physical registers).
     """
-    overlaps = find_tag_overlaps(
-        db, device_id, function_code, address, register_count,
-        exclude_tag_id=exclude_tag_id,
-    )
-    if overlaps:
-        shown = ", ".join(
-            f"{o['name']!r} (id={o['id']}, address={o['address']}+{o['register_count']})"
-            for o in overlaps[:3]
+    address_span = 1 if is_enron_block else register_count
+
+    if is_enron_block:
+        # Enron overlap = another tag at the SAME address in the same block.
+        # The find_tag_overlaps byte-range arithmetic over-flags here, because
+        # neighbouring float32 tags at addresses N and N+1 both have rc=2.
+        sql = """
+            SELECT id, name, address, register_count
+            FROM tags
+            WHERE register_block_id = :rb_id
+              AND address = :addr
+        """
+        params: dict = {"rb_id": register_block_id, "addr": address}
+        if exclude_tag_id is not None:
+            sql += " AND id <> :exclude_id"
+            params["exclude_id"] = exclude_tag_id
+        same_addr = db.execute(text(sql), params).mappings().all()
+        if same_addr:
+            other = same_addr[0]
+            raise HTTPException(
+                400,
+                f"address {address} is already used by tag {other['name']!r} "
+                f"(id={other['id']}) in this Enron block. Each Enron address "
+                f"holds one logical value; pick a different address.",
+            )
+    else:
+        overlaps = find_tag_overlaps(
+            db, device_id, function_code, address, address_span,
+            exclude_tag_id=exclude_tag_id,
         )
-        more = f" and {len(overlaps) - 3} more" if len(overlaps) > 3 else ""
-        raise HTTPException(
-            400,
-            f"tag address range [{address}, {address + register_count}) "
-            f"on FC {function_code} overlaps with: {shown}{more}",
-        )
+        if overlaps:
+            shown = ", ".join(
+                f"{o['name']!r} (id={o['id']}, address={o['address']}+{o['register_count']})"
+                for o in overlaps[:3]
+            )
+            more = f" and {len(overlaps) - 3} more" if len(overlaps) > 3 else ""
+            raise HTTPException(
+                400,
+                f"tag address range [{address}, {address + address_span}) "
+                f"on FC {function_code} overlaps with: {shown}{more}",
+            )
 
     if register_block_id is not None:
         problem = check_tag_fits_block(
-            db, register_block_id, function_code, address, register_count,
+            db, register_block_id, function_code, address, address_span,
         )
         if problem is not None:
             raise HTTPException(400, f"tag does not fit its register_block: {problem}")
+
+        if is_enron_block:
+            # Uniform-width invariant across an Enron block — guards the
+            # Enron channel reader, which infers value width from the first
+            # tag's register_count.
+            block_info = db.execute(text("""
+                SELECT (SELECT MIN(t.register_count)
+                          FROM tags t
+                         WHERE t.register_block_id = :rb_id
+                           AND (:exclude IS NULL OR t.id != :exclude)
+                       ) AS min_existing_rc,
+                       (SELECT MAX(t.register_count)
+                          FROM tags t
+                         WHERE t.register_block_id = :rb_id
+                           AND (:exclude IS NULL OR t.id != :exclude)
+                       ) AS max_existing_rc
+            """), {"rb_id": register_block_id, "exclude": exclude_tag_id}).mappings().first()
+            existing_min = block_info["min_existing_rc"] if block_info else None
+            existing_max = block_info["max_existing_rc"] if block_info else None
+            if existing_min is not None and existing_min != existing_max:
+                raise HTTPException(
+                    400,
+                    f"Enron block {register_block_id} already contains "
+                    f"tags with mixed register_count "
+                    f"({existing_min}..{existing_max}). Resolve the existing "
+                    f"mismatch before adding more tags.",
+                )
+            if existing_min is not None and existing_min != register_count:
+                raise HTTPException(
+                    400,
+                    f"Enron blocks require uniform tag width. Existing tags "
+                    f"use register_count={existing_min} (width={existing_min*2} "
+                    f"bytes / data_type wider than 16-bit needs ≥2). This tag "
+                    f"is register_count={register_count}. Either change this "
+                    f"tag's data_type to match, or put it in a different block.",
+                )
 
 
 @router.get("/tags", response_model=list[TagResponse])
@@ -255,16 +384,31 @@ def get_tag(tag_id: int, db: Annotated[Session, Depends(get_session)]):
 
 @router.post("/tags", response_model=TagResponse, status_code=201)
 def create_tag(body: TagCreate, db: Annotated[Session, Depends(get_session)]):
+    # Phase 9.1.1+ — auto-derive register_count from data_type when the
+    # client omitted it. This lets the UI hide the field for Enron blocks
+    # (where it's not user-meaningful), and gives an explicit error when
+    # someone sends an inconsistent (data_type, register_count) pair.
+    is_enron = False
+    if body.register_block_id is not None:
+        is_enron = _block_addressing_mode(db, body.register_block_id) in (
+            "ENRON_HOLDING", "ENRON_INPUT",
+        )
+    resolved_rc = _resolve_register_count(
+        body.data_type, body.register_count, is_enron_block=is_enron,
+    )
+
     _validate_addressing(
         db,
         device_id=body.device_id,
         function_code=body.function_code,
         address=body.address,
-        register_count=body.register_count,
+        register_count=resolved_rc,
         register_block_id=body.register_block_id,
         exclude_tag_id=None,
+        is_enron_block=is_enron,
     )
     payload = body.model_dump()
+    payload["register_count"] = resolved_rc
     try:
         new_id = db.execute(
             text("""
@@ -312,19 +456,43 @@ def update_tag(
     # resulting tag against the rest. Cosmetic edits (description, scale,
     # engineering_unit, min/max, enabled) skip this — they can't introduce
     # overlap or block-fit issues.
-    address_fields = {"address", "register_count", "function_code", "register_block_id"}
+    address_fields = {
+        "address", "register_count", "function_code",
+        "register_block_id", "data_type",
+    }
     if address_fields & updates.keys():
         existing = db.execute(
             text("""
                 SELECT device_id, function_code, address, register_count,
-                       register_block_id
+                       register_block_id, data_type
                 FROM tags WHERE id = :id
             """),
             {"id": tag_id},
         ).mappings().first()
         if not existing:
             raise HTTPException(404, f"tag {tag_id} not found")
-        merged = {**dict(existing), **{k: v for k, v in updates.items() if k in address_fields | {"device_id"}}}
+        merged = {
+            **dict(existing),
+            **{
+                k: v for k, v in updates.items()
+                if k in address_fields | {"device_id"}
+            },
+        }
+        is_enron = False
+        if merged["register_block_id"] is not None:
+            is_enron = _block_addressing_mode(db, merged["register_block_id"]) in (
+                "ENRON_HOLDING", "ENRON_INPUT",
+            )
+        # If the client changed data_type or sent register_count=None, run
+        # the resolver. Otherwise honour what they sent.
+        if "data_type" in updates or "register_count" in updates:
+            resolved_rc = _resolve_register_count(
+                merged["data_type"],
+                merged.get("register_count"),
+                is_enron_block=is_enron,
+            )
+            merged["register_count"] = resolved_rc
+            updates["register_count"] = resolved_rc
         _validate_addressing(
             db,
             device_id=merged["device_id"],
@@ -333,6 +501,7 @@ def update_tag(
             register_count=merged["register_count"],
             register_block_id=merged["register_block_id"],
             exclude_tag_id=tag_id,
+            is_enron_block=is_enron,
         )
 
     set_clauses = ", ".join(f"{sql_col(k)} = :{k}" for k in updates)
@@ -408,6 +577,27 @@ def bulk_create_tags(
             # Use a nested transaction (SAVEPOINT) so individual failures
             # don't abort the whole batch.
             with db.begin_nested():
+                is_enron = False
+                if tag_in.register_block_id is not None:
+                    is_enron = _block_addressing_mode(
+                        db, tag_in.register_block_id,
+                    ) in ("ENRON_HOLDING", "ENRON_INPUT")
+                resolved_rc = _resolve_register_count(
+                    tag_in.data_type, tag_in.register_count,
+                    is_enron_block=is_enron,
+                )
+                _validate_addressing(
+                    db,
+                    device_id=tag_in.device_id,
+                    function_code=tag_in.function_code,
+                    address=tag_in.address,
+                    register_count=resolved_rc,
+                    register_block_id=tag_in.register_block_id,
+                    exclude_tag_id=None,
+                    is_enron_block=is_enron,
+                )
+                payload = tag_in.model_dump()
+                payload["register_count"] = resolved_rc
                 result = db.execute(
                     text("""
                         INSERT INTO tags (
@@ -425,7 +615,7 @@ def bulk_create_tags(
                         )
                         RETURNING id
                     """),
-                    tag_in.model_dump(),
+                    payload,
                 )
                 new_id = result.scalar_one()
             results.append(BulkTagResult(

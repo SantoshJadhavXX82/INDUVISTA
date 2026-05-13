@@ -28,6 +28,16 @@ class RegisterBlockCreate(BaseModel):
     # Phase 8.5.1 — engineering policy: is this block RW-capable?
     # Only meaningful for FC 1 (Coil) and FC 3 (HR). DB CHECK enforces this.
     writable: bool = Field(False, description="Allow writes to tags in this block")
+    # Phase 9.1 — Modbus address-space convention. STANDARD = 1 address per
+    # 16-bit physical register (default, all of Modbus). ENRON_HOLDING /
+    # ENRON_INPUT = 1 address per logical value (Daniel SIM 2251, Emerson
+    # FB107 GC Application, Rosemount Analytical, ABB Totalflow, OMNI, etc.).
+    # DB CHECK enforces that ENRON_* requires FC 3 or 4 respectively.
+    addressing_mode: str = Field(
+        "STANDARD",
+        pattern="^(STANDARD|ENRON_HOLDING|ENRON_INPUT)$",
+        description="STANDARD | ENRON_HOLDING (FC3 only) | ENRON_INPUT (FC4 only)",
+    )
 
 
 class RegisterBlockUpdate(BaseModel):
@@ -37,6 +47,9 @@ class RegisterBlockUpdate(BaseModel):
     phase_ms: int | None = Field(None, ge=0)
     enabled: bool | None = None
     writable: bool | None = None
+    addressing_mode: str | None = Field(
+        None, pattern="^(STANDARD|ENRON_HOLDING|ENRON_INPUT)$",
+    )
 
 
 class RegisterBlockResponse(BaseModel):
@@ -51,12 +64,14 @@ class RegisterBlockResponse(BaseModel):
     phase_ms: int | None
     enabled: bool
     writable: bool
+    addressing_mode: str
 
 
 _BLOCK_SELECT = """
     SELECT b.id, b.device_id, d.name AS device_name, b.name,
            b.function_code, b.start_address, b.count,
-           b.scan_interval_ms, b.phase_ms, b.enabled, b.writable
+           b.scan_interval_ms, b.phase_ms, b.enabled, b.writable,
+           b.addressing_mode
     FROM register_blocks b
     JOIN devices d ON d.id = b.device_id
 """
@@ -111,11 +126,11 @@ def create_register_block(
             text("""
                 INSERT INTO register_blocks (
                     device_id, name, function_code, start_address, count,
-                    scan_interval_ms, phase_ms, writable
+                    scan_interval_ms, phase_ms, writable, addressing_mode
                 )
                 VALUES (
                     :device_id, :name, :function_code, :start_address, :count,
-                    :scan_interval_ms, :phase_ms, :writable
+                    :scan_interval_ms, :phase_ms, :writable, :addressing_mode
                 )
                 RETURNING id
             """),
@@ -213,11 +228,13 @@ def bulk_create_register_blocks(
                         INSERT INTO register_blocks (
                             device_id, name, function_code,
                             start_address, count,
-                            scan_interval_ms, phase_ms, writable
+                            scan_interval_ms, phase_ms, writable,
+                            addressing_mode
                         ) VALUES (
                             :device_id, :name, :function_code,
                             :start_address, :count,
-                            :scan_interval_ms, :phase_ms, :writable
+                            :scan_interval_ms, :phase_ms, :writable,
+                            :addressing_mode
                         )
                         RETURNING id
                     """),

@@ -44,6 +44,11 @@ type RegisterBlock = {
   enabled: boolean;
   // Phase 8.5.1 — engineering writability flag
   writable: boolean;
+  // Phase 9.1 — Modbus address-space convention.
+  // STANDARD = 1 address per 16-bit register (all Modbus).
+  // ENRON_HOLDING / ENRON_INPUT = 1 address per logical value
+  // (Daniel SIM 2251, Emerson FB107 GC, Rosemount, fiscal flow computers).
+  addressing_mode: "STANDARD" | "ENRON_HOLDING" | "ENRON_INPUT";
 };
 
 type Device = { id: number; name: string };
@@ -181,13 +186,14 @@ export default function RegisterBlocks() {
               "name", "device_name", "function_code",
               "start_address", "count",
               "scan_interval_ms", "phase_ms",
-              "access",
+              "access", "addressing",
             ]}
             requiredColumns={["name", "device_name", "function_code", "start_address", "count"]}
             templateCsv={
-              "name,device_name,function_code,start_address,count,scan_interval_ms,phase_ms,access\n" +
-              "MyBlock_HR_0_30,FLOWCOMP_001,3,0,30,1000,0,Read-only\n" +
-              "MyBlock_HR_setpoints,FLOWCOMP_001,3,400,10,1000,0,Read+Write\n"
+              "name,device_name,function_code,start_address,count,scan_interval_ms,phase_ms,access,addressing\n" +
+              "MyBlock_HR_0_30,FLOWCOMP_001,3,0,30,1000,0,Read-only,Standard\n" +
+              "MyBlock_HR_setpoints,FLOWCOMP_001,3,400,10,1000,0,Read+Write,Standard\n" +
+              "Daniel_GC_Composition,FLOWCOMP_001,3,7001,32,10000,0,Read-only,Enron\n"
             }
             templateFilename="register-blocks-template.csv"
             onImport={async (rows) => {
@@ -220,6 +226,19 @@ export default function RegisterBlocks() {
                     writable = true;
                   }
                 }
+                // Phase 9.1 — parse addressing column.
+                // Accept: "Standard" / "Enron" / "Enron_Holding" / "Enron_Input" /
+                // bare canonical values. Blank or unrecognised → STANDARD.
+                // Coil/DI (FC 1/2) silently force STANDARD regardless.
+                const addrRaw = (row.addressing ?? "").trim().toLowerCase().replace(/[-\s]/g, "_");
+                let addressing_mode: "STANDARD" | "ENRON_HOLDING" | "ENRON_INPUT" = "STANDARD";
+                if (fc === 3 || fc === 4) {
+                  if (addrRaw === "enron_holding") addressing_mode = "ENRON_HOLDING";
+                  else if (addrRaw === "enron_input") addressing_mode = "ENRON_INPUT";
+                  else if (addrRaw === "enron") {
+                    addressing_mode = fc === 4 ? "ENRON_INPUT" : "ENRON_HOLDING";
+                  }
+                }
                 valid.push({
                   device_id: did,
                   name: row.name,
@@ -229,6 +248,7 @@ export default function RegisterBlocks() {
                   scan_interval_ms: row.scan_interval_ms ? parseInt(row.scan_interval_ms, 10) : 1000,
                   phase_ms: row.phase_ms ? parseInt(row.phase_ms, 10) : 0,
                   writable,
+                  addressing_mode,
                 });
                 validIndexes.push(i);
               });
@@ -271,6 +291,8 @@ type FormState = {
   scan_interval_ms: string;
   // Phase 8.5.1 — engineering writability flag. Only meaningful for FC 1/3.
   writable: boolean;
+  // Phase 9.1 — Modbus address-space convention.
+  addressing_mode: "STANDARD" | "ENRON_HOLDING" | "ENRON_INPUT";
 };
 
 /** Convert FC numeric → friendly area label. */
@@ -284,6 +306,20 @@ const AREA_LABEL: Record<string, string> = {
 /** Is this area RW-capable per Modbus spec? */
 function fcAllowsWrite(fc: string): boolean {
   return fc === "1" || fc === "3";
+}
+
+/**
+ * Phase 9.1 — does this FC support Enron addressing?
+ * Enron only makes sense for register-area reads (FC 3/4), not bit reads.
+ * The DB CHECK constraint enforces this; the UI mirrors it for clarity.
+ */
+function fcAllowsEnron(fc: string): boolean {
+  return fc === "3" || fc === "4";
+}
+
+/** Which Enron variant matches the function code? */
+function enronModeFor(fc: string): "ENRON_HOLDING" | "ENRON_INPUT" {
+  return fc === "4" ? "ENRON_INPUT" : "ENRON_HOLDING";
 }
 
 function BlockForm({
@@ -306,6 +342,7 @@ function BlockForm({
     // Phase 8.5: null in DB = inherit from device; empty string in form = same
     scan_interval_ms: block?.scan_interval_ms != null ? String(block.scan_interval_ms) : "",
     writable: block?.writable ?? false,
+    addressing_mode: block?.addressing_mode ?? "STANDARD",
   });
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -318,6 +355,12 @@ function BlockForm({
       // Phase 8.5.1 — guard: writable=true on DI/IR is rejected by DB CHECK,
       // so flip it off client-side if the user changed area to DI/IR.
       const writable = fcAllowsWrite(form.function_code) ? form.writable : false;
+      // Phase 9.1 — same guard for Enron: only valid on FC 3/4. If user
+      // somehow set Enron then switched to Coil/DI, normalise to STANDARD
+      // before sending. DB CHECK would reject otherwise.
+      const addressing_mode = fcAllowsEnron(form.function_code)
+        ? form.addressing_mode
+        : "STANDARD";
       if (isNew) {
         return api.post("/register-blocks", {
           name: form.name,
@@ -327,6 +370,7 @@ function BlockForm({
           count: parseInt(form.count, 10),
           scan_interval_ms: blockInterval,
           writable,
+          addressing_mode,
         });
       }
       return api.patch(`/register-blocks/${block.id}`, {
@@ -335,6 +379,7 @@ function BlockForm({
         enabled: form.enabled,
         scan_interval_ms: blockInterval,
         writable,
+        addressing_mode,
       });
     },
     onSuccess: onDone,
@@ -398,11 +443,16 @@ function BlockForm({
             value={form.function_code}
             onChange={(e) => {
               const fc = e.target.value;
-              // If switching to a read-only area, automatically clear writable
+              // If switching to a read-only area, automatically clear writable.
+              // If switching to a bit area (FC 1/2), force addressing back to
+              // STANDARD — Enron only applies to register areas.
               setForm({
                 ...form,
                 function_code: fc,
                 writable: fcAllowsWrite(fc) ? form.writable : false,
+                addressing_mode: fcAllowsEnron(fc)
+                  ? form.addressing_mode
+                  : "STANDARD",
               });
             }}
             className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm disabled:opacity-50"
@@ -463,6 +513,69 @@ function BlockForm({
         </div>
       </div>
 
+      {/* Phase 9.1 — Addressing mode. Full-width row beneath FC/Access. */}
+      <div className="space-y-1.5">
+        <Label>Addressing</Label>
+        <div className="flex flex-col gap-2 pt-1 sm:flex-row sm:gap-6">
+          <label className={cn(
+            "flex items-center gap-2 text-sm cursor-pointer",
+          )}>
+            <input
+              type="radio"
+              name="addressing_mode"
+              checked={form.addressing_mode === "STANDARD"}
+              onChange={() => setForm({ ...form, addressing_mode: "STANDARD" })}
+              className="h-4 w-4"
+            />
+            <span>Standard Modbus</span>
+            <span className="text-[10px] text-muted-foreground">
+              1 address = 1 register
+            </span>
+          </label>
+          <label className={cn(
+            "flex items-center gap-2 text-sm cursor-pointer",
+            !fcAllowsEnron(form.function_code) && "opacity-40 cursor-not-allowed",
+          )}>
+            <input
+              type="radio"
+              name="addressing_mode"
+              checked={form.addressing_mode !== "STANDARD"}
+              disabled={!fcAllowsEnron(form.function_code)}
+              onChange={() => setForm({
+                ...form,
+                addressing_mode: enronModeFor(form.function_code),
+              })}
+              className="h-4 w-4"
+            />
+            <span>Enron Modbus</span>
+            <span className="text-[10px] text-muted-foreground">
+              1 address = 1 logical value (Daniel SIM 2251, fiscal flow computers)
+            </span>
+            {form.addressing_mode !== "STANDARD" && (
+              <span className="text-[10px] text-amber-700 font-semibold uppercase ml-1">
+                enron
+              </span>
+            )}
+          </label>
+        </div>
+        {!fcAllowsEnron(form.function_code) && (
+          <p className="text-xs text-muted-foreground">
+            Enron addressing applies to Holding and Input Registers only —
+            bit areas (Coil / Discrete Input) are unaffected.
+          </p>
+        )}
+        {fcAllowsEnron(form.function_code) && form.addressing_mode !== "STANDARD" && (
+          <p className="text-xs text-muted-foreground">
+            Tag addresses in this block are <strong>logical</strong> — one
+            address per value, regardless of width. For 16 float32 mole-%
+            values at 7001-7016, set <strong>count = 16</strong> (logical
+            values, not physical registers) and place tags at addresses
+            7001, 7002, …, 7016. All tags in an Enron block must share the
+            same data type (uniform width).
+          </p>
+        )}
+      </div>
+
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="start_address">
@@ -492,6 +605,11 @@ function BlockForm({
             value={form.count}
             onChange={(e) => setForm({ ...form, count: e.target.value })}
           />
+          <p className="text-xs text-muted-foreground">
+            {form.addressing_mode !== "STANDARD"
+              ? "logical value count (1 address = 1 value)"
+              : "physical 16-bit register count"}
+          </p>
         </div>
       </div>
 
@@ -594,6 +712,10 @@ function exportBlocks(blocks: RegisterBlock[]): void {
     // Phase 8.5.1 — engineering access. Friendly label exported; importer
     // accepts either friendly label or boolean.
     { header: "access", value: (b) => b.writable ? "Read+Write" : "Read-only" },
+    // Phase 9.1 — addressing mode. Friendly label (Standard / Enron),
+    // round-trips through the importer's parser.
+    { header: "addressing", value: (b) =>
+      b.addressing_mode === "STANDARD" ? "Standard" : "Enron" },
   ], `induvista-register-blocks-${stamp}.csv`);
 }
 

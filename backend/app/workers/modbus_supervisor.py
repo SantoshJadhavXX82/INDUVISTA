@@ -61,12 +61,18 @@ from pymodbus.exceptions import (
     ModbusIOException,
 )
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
 
 from app.db import engine
 from app.historian import BufferedHistorianWriter, HistorianWriter, Sample
 from app.local_buffer import LocalBuffer
 from app.modbus.decoder import decode_value
+from app.workers.enron_channel import (
+    EnronChannel,
+    EnronConnectError,
+    EnronProtocolError,
+    EnronSlaveException,
+    EnronTimeoutError,
+)
 from app.modbus.status import (
     MODBUS_EXCEPTION_NAMES,
     ST_COMM_TIMEOUT,
@@ -126,7 +132,7 @@ def load_polling_config() -> list[dict]:
             blocks = [
                 dict(r) for r in conn.execute(text("""
                     SELECT id, name, function_code, start_address, count,
-                           scan_interval_ms
+                           scan_interval_ms, addressing_mode
                     FROM register_blocks
                     WHERE device_id = :did AND enabled = TRUE
                     ORDER BY function_code, start_address
@@ -173,40 +179,22 @@ def _run_stale_check(eng) -> int:
 
 
 async def stale_detection_loop(stop_event: asyncio.Event, interval: float = 15.0):
-    """Periodically downgrade tags past their stale threshold to ST_STALE.
-
-    During a PG outage the historian path buffers samples to SQLite, but this
-    loop has no equivalent fallback — it just can't run, and that's fine.
-    Catch OperationalError quietly so we don't dump a stack trace every 15s;
-    log once on transition to "down" and once on recovery, matching the
-    historian's outage-logging cadence.
-    """
     slog = logging.getLogger("worker.stale")
     slog.info("Stale-detection started (every %.1fs)", interval)
-    pg_was_down = False
     while not stop_event.is_set():
         try:
             n = await asyncio.to_thread(_run_stale_check, engine)
-            if pg_was_down:
-                slog.info("PG reachable; stale-detection resumed")
-                pg_was_down = False
             if n:
                 slog.info("Marked %d tag(s) STALE", n)
-        except OperationalError:
-            # Expected during PG outage — historian path is buffering samples.
-            # Log once on transition rather than spamming on every tick.
-            if not pg_was_down:
-                slog.warning("PG unreachable; pausing stale-detection until reconnect")
-                pg_was_down = True
         except Exception:
-            # Anything else IS unexpected — keep the full trace for diagnosis
-            slog.exception("Stale-detection tick failed (unexpected)")
+            slog.exception("Stale-detection tick failed")
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=interval)
             break
         except asyncio.TimeoutError:
             continue
     slog.info("Stopped.")
+
 
 async def replay_loop(
     buffer: LocalBuffer,
@@ -322,6 +310,12 @@ class DeviceWorker:
         # try to create a fresh client during a reconnect race.
         self._connect_lock = asyncio.Lock()
 
+        # Phase 9.1.1 — separate persistent socket for Enron-mode blocks.
+        # Lazy: only created when this device has at least one Enron block.
+        # Coexists with self.client (pymodbus for STANDARD blocks); both
+        # may be active at once on a device with mixed-mode blocks.
+        self.enron: EnronChannel | None = None
+
         self._stop = False
 
         # Per-heartbeat-tag state (Phase 7 E1a) — monotonic time of last change.
@@ -347,6 +341,14 @@ class DeviceWorker:
         self._cycle_latencies: list[float] = []
         self._cumulative_latency_sum_ms: float = 0.0
         self._cumulative_latency_count: int = 0
+
+        # Phase 10.2-hotfix-cycle-samples — per-status-flush-window sample
+        # counters. Block loops increment these on every successful write;
+        # the 5s status flush drains them and reports them as
+        # last_cycle_samples_total/good, then resets to 0. This is what
+        # the Diagnostics "Samples" column shows.
+        self._window_samples_total: int = 0
+        self._window_samples_good: int = 0
 
         self.log = logging.getLogger(f"worker.{device['name']}")
 
@@ -397,6 +399,12 @@ class DeviceWorker:
             if self.client:
                 try:
                     self.client.close()
+                except Exception:
+                    pass
+            # Phase 9.1.1 — close persistent Enron socket on shutdown
+            if self.enron:
+                try:
+                    await self.enron.close()
                 except Exception:
                     pass
 
@@ -473,6 +481,11 @@ class DeviceWorker:
                     self._cumulative_total += len(samples)
                     good = sum(1 for s in samples if s.st == ST_READ_OK)
                     self._cumulative_good += good
+                    # Phase 10.2-hotfix — feed the status-flush window so the
+                    # Diagnostics "Samples" column shows real values, not the
+                    # stale 0/0 from the initial INSERT.
+                    self._window_samples_total += len(samples)
+                    self._window_samples_good += good
                     cycle += 1
                     if cycle % 20 == 0 or cycle == 1:
                         blog.info(
@@ -539,6 +552,169 @@ class DeviceWorker:
                         )[:64]
         return samples
 
+    # ---------- Phase 9.1.1: Enron block read --------------------------------
+    async def _poll_enron_block_once(
+        self, block: dict, now: datetime,
+    ) -> list[Sample]:
+        """Poll an Enron-mode block via the dedicated persistent socket.
+
+        Width inferred from the first tag's register_count:
+            register_count = 1 → 2 bytes (uint16/int16/bool)
+            register_count = 2 → 4 bytes (uint32/int32/float32)
+            register_count = 4 → 8 bytes (uint64/int64/float64)
+
+        The Enron channel returns fake uint16 registers in the same shape
+        pymodbus would produce for a standard read of the same byte count,
+        so _decode_block consumes the result unchanged.
+        """
+        from app.workers import frame_capture
+
+        fc = block["function_code"]
+        start = block["start_address"]
+        count = block["count"]
+        unit_id = self.device["unit_id"]
+
+        # Need at least one tag to infer width — an Enron block with no tags
+        # is misconfigured.
+        tags = self.tags_by_block.get(block["id"], [])
+        if not tags:
+            self.log.warning(
+                "Enron block %s has no tags — cannot infer width, skipping",
+                block["name"],
+            )
+            return []
+
+        # Width inference. API validation (Phase 9.1.1) enforces that all
+        # tags in an Enron block share register_count, so the first tag's
+        # value is authoritative.
+        first_rc = tags[0]["register_count"]
+        if first_rc not in (1, 2, 4):
+            self.log.warning(
+                "Enron block %s: first tag has register_count=%d, must be "
+                "1/2/4 — skipping",
+                block["name"], first_rc,
+            )
+            return self._failed_samples(
+                block, now, ST_MODBUS_IO_ERROR, "ENRON_WIDTH_INVALID",
+            )
+        value_width_bytes = first_rc * 2
+
+        # Lazy channel construction. One per device, reused across scans.
+        if self.enron is None:
+            self.enron = EnronChannel(
+                host=self.device["host"],
+                port=self.device["port"],
+                log=self.log,
+                reconnect_initial_ms=self.device.get(
+                    "reconnect_initial_ms", 1000,
+                ),
+                reconnect_max_ms=self.device.get(
+                    "reconnect_max_ms", 30000,
+                ),
+            )
+
+        request_timeout_s = self.device["request_timeout_ms"] / 1000.0
+        t0 = time.monotonic()
+        try:
+            raw = await self.enron.read_enron(
+                unit_id=unit_id,
+                function_code=fc,
+                start_address=start,
+                count=count,
+                value_width_bytes=value_width_bytes,
+                request_timeout_s=request_timeout_s,
+            )
+            latency_ms = (time.monotonic() - t0) * 1000
+            self._record_latency(latency_ms)
+            frame_capture.capture_block_read(
+                device_id=self.device["id"], block=block, unit_id=unit_id,
+                fc=fc, start=start, count=count,
+                response_data=raw, error=None, latency_ms=latency_ms,
+            )
+            return self._decode_block(block, raw, now)
+
+        except EnronSlaveException as e:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self._record_latency(latency_ms)
+            reason = MODBUS_EXCEPTION_NAMES.get(
+                e.exception_code, f"EXCEPTION_{e.exception_code}",
+            )
+            self.log.warning(
+                "Enron block %s slave exception %d (%s)",
+                block["name"], e.exception_code, reason,
+            )
+            frame_capture.capture_block_read(
+                device_id=self.device["id"], block=block,
+                unit_id=unit_id, fc=fc, start=start, count=count,
+                response_data=None,
+                error=f"EXCEPTION_{e.exception_code}_{reason}",
+                latency_ms=latency_ms,
+            )
+            return self._failed_samples(
+                block, now, ST_MODBUS_EXCEPTION, reason,
+            )
+
+        except EnronProtocolError as e:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self._record_latency(latency_ms)
+            self.log.warning("Enron block %s protocol error: %s",
+                             block["name"], e)
+            frame_capture.capture_block_read(
+                device_id=self.device["id"], block=block, unit_id=unit_id,
+                fc=fc, start=start, count=count,
+                response_data=None, error=f"ENRON_PROTO: {e}",
+                latency_ms=latency_ms,
+            )
+            return self._failed_samples(
+                block, now, ST_MODBUS_IO_ERROR,
+                f"ENRON_PROTO: {str(e)[:48]}",
+            )
+
+        except EnronTimeoutError:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self.log.warning(
+                "Enron block %s timeout (%dms)",
+                block["name"], self.device["request_timeout_ms"],
+            )
+            frame_capture.capture_block_read(
+                device_id=self.device["id"], block=block, unit_id=unit_id,
+                fc=fc, start=start, count=count,
+                response_data=None, error="ENRON_TIMEOUT",
+                latency_ms=latency_ms,
+            )
+            return self._failed_samples(
+                block, now, ST_COMM_TIMEOUT, "TIMEOUT",
+            )
+
+        except EnronConnectError as e:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self.log.warning("Enron block %s connect/conn lost: %s",
+                             block["name"], e)
+            frame_capture.capture_block_read(
+                device_id=self.device["id"], block=block, unit_id=unit_id,
+                fc=fc, start=start, count=count,
+                response_data=None, error=f"ENRON_CONN: {e}",
+                latency_ms=latency_ms,
+            )
+            return self._failed_samples(
+                block, now, ST_COMM_TIMEOUT, "CONN_LOST",
+            )
+
+        except Exception as e:
+            latency_ms = (time.monotonic() - t0) * 1000
+            self.log.warning("Enron block %s unexpected error: %s",
+                             block["name"], e)
+            frame_capture.capture_block_read(
+                device_id=self.device["id"], block=block, unit_id=unit_id,
+                fc=fc, start=start, count=count,
+                response_data=None, error=f"ENRON_UNKNOWN: {e}",
+                latency_ms=latency_ms,
+            )
+            return self._failed_samples(
+                block, now, ST_COMM_TIMEOUT,
+                f"UNKNOWN: {str(e)[:32]}",
+            )
+
     # ---------- single block read -------------------------------------------
     async def _poll_block_once(self, block: dict) -> list[Sample]:
         fc = block["function_code"]
@@ -546,6 +722,13 @@ class DeviceWorker:
         count = block["count"]
         unit_id = self.device["unit_id"]
         now = datetime.now(timezone.utc)
+
+        # Phase 9.1.1 — Enron blocks go through a separate persistent socket
+        # with permissive byte_count handling (real Daniel firmware sends
+        # byte_count = 4N + trailing, which pymodbus rejects). Fully isolated
+        # from the pymodbus path; shares only _decode_block and _failed_samples.
+        if block.get("addressing_mode") in ("ENRON_HOLDING", "ENRON_INPUT"):
+            return await self._poll_enron_block_once(block, now)
 
         if not await self._ensure_connected_with_backoff():
             return self._failed_samples(
@@ -765,6 +948,14 @@ class DeviceWorker:
                 lats = self._cycle_latencies
                 self._cycle_latencies = []  # reset window
 
+                # Phase 10.2-hotfix — snapshot and reset per-window sample
+                # counters. Whatever was written in the last ~5 seconds is
+                # what the Diagnostics "Samples" column will show.
+                window_total = self._window_samples_total
+                window_good = self._window_samples_good
+                self._window_samples_total = 0
+                self._window_samples_good = 0
+
                 avg = sum(lats) / len(lats) if lats else None
                 mx = max(lats) if lats else None
                 cum_avg = (
@@ -772,9 +963,20 @@ class DeviceWorker:
                     self._cumulative_latency_count
                 ) if self._cumulative_latency_count else None
 
-                state = "connected" if (
+                # A device is "connected" if EITHER transport is up:
+                #   - pymodbus client for STANDARD blocks
+                #   - persistent Enron socket for ENRON blocks
+                # Phase 9.1.1 introduced the second path. Reporting the
+                # union avoids a confusing "disconnected" badge on devices
+                # whose blocks are all Enron — those never use the pymodbus
+                # client at all but are happily polling via self.enron.
+                pymodbus_up = (
                     self.client is not None and self.client.connected
-                ) else (
+                )
+                enron_up = (
+                    self.enron is not None and self.enron.stats().connected
+                )
+                state = "connected" if (pymodbus_up or enron_up) else (
                     "reconnecting" if self._consecutive_failures > 0
                     else "disconnected"
                 )
@@ -782,6 +984,7 @@ class DeviceWorker:
                 await asyncio.to_thread(
                     self._report_status_sync_with_latency,
                     state, avg, mx, cum_avg,
+                    window_total, window_good,
                 )
             except asyncio.CancelledError:
                 raise
@@ -828,6 +1031,7 @@ class DeviceWorker:
     def _report_status_sync_with_latency(
         self, state: str,
         avg_ms: float | None, max_ms: float | None, cum_avg_ms: float | None,
+        last_cycle_total: int = 0, last_cycle_good: int = 0,
     ) -> None:
         try:
             with engine.begin() as conn:
@@ -842,13 +1046,15 @@ class DeviceWorker:
                     )
                     VALUES (
                         :device_id, NOW(),
-                        0, 0,
+                        :last_total, :last_good,
                         :cum_total, :cum_good,
                         :failures, :state,
                         :avg_ms, :max_ms, :cum_avg, NOW()
                     )
                     ON CONFLICT (device_id) DO UPDATE SET
                         last_cycle_at = NOW(),
+                        last_cycle_samples_total = EXCLUDED.last_cycle_samples_total,
+                        last_cycle_samples_good = EXCLUDED.last_cycle_samples_good,
                         cumulative_samples_total = EXCLUDED.cumulative_samples_total,
                         cumulative_samples_good = EXCLUDED.cumulative_samples_good,
                         consecutive_failures = EXCLUDED.consecutive_failures,
@@ -859,6 +1065,8 @@ class DeviceWorker:
                         updated_at = NOW()
                 """), {
                     "device_id": self.device["id"],
+                    "last_total": last_cycle_total,
+                    "last_good": last_cycle_good,
                     "cum_total": self._cumulative_total,
                     "cum_good": self._cumulative_good,
                     "failures": self._consecutive_failures,
@@ -872,8 +1080,31 @@ class DeviceWorker:
     def _decode_block(self, block: dict, raw, now: datetime) -> list[Sample]:
         samples: list[Sample] = []
         now_mono = time.monotonic()
+        # Phase 9.1 — Enron Modbus addressing.
+        #
+        #  STANDARD (default, all of Modbus):
+        #    1 address slot = 1 physical 16-bit register.
+        #    rel = tag.address - block.start_address
+        #    A float32 at logical address 7001 in a block starting at 7001
+        #    is at byte offset 0; the next float32 at 7003 is at offset 4.
+        #
+        #  ENRON_HOLDING / ENRON_INPUT (Daniel SIM 2251, Emerson FB107 GC,
+        #  Rosemount, ABB Totalflow, OMNI, most fiscal flow computers):
+        #    1 address slot = 1 logical value of the tag's width.
+        #    rel = (tag.address - block.start_address) * tag.register_count
+        #    16 float32 mole-% values live at addresses 7001..7016 (16 slots,
+        #    not 32). Byte offsets within the block-read response: 0, 4, 8,
+        #    ..., 60. Wire-level Modbus PDU is unchanged — block.count stays
+        #    in physical 16-bit registers, gateway/GC speak standard Modbus.
+        is_enron = block.get("addressing_mode") in (
+            "ENRON_HOLDING", "ENRON_INPUT",
+        )
         for tag in self.tags_by_block.get(block["id"], []):
-            rel = tag["address"] - block["start_address"]
+            rel_logical = tag["address"] - block["start_address"]
+            if is_enron:
+                rel = rel_logical * tag["register_count"]
+            else:
+                rel = rel_logical
             slice_len = tag["register_count"]
             tag_raw = raw[rel:rel + slice_len]
 

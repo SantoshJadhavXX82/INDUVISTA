@@ -122,13 +122,23 @@ def diagnostics_summary(db: Annotated[Session, Depends(get_session)]):
     is the green-light condition.
     """
     overlap_count = db.execute(text("""
-        SELECT COUNT(*) FROM tags t1
-        JOIN tags t2
+        WITH tag_span AS (
+          SELECT t.*,
+                 CASE
+                   WHEN b.addressing_mode IN ('ENRON_HOLDING', 'ENRON_INPUT')
+                     THEN 1
+                   ELSE t.register_count
+                 END AS effective_span
+            FROM tags t
+            LEFT JOIN register_blocks b ON b.id = t.register_block_id
+        )
+        SELECT COUNT(*) FROM tag_span t1
+        JOIN tag_span t2
           ON t1.device_id = t2.device_id
          AND t1.function_code = t2.function_code
          AND t1.id < t2.id
-        WHERE t1.address < t2.address + t2.register_count
-          AND t2.address < t1.address + t1.register_count
+        WHERE t1.address < t2.address + t2.effective_span
+          AND t2.address < t1.address + t1.effective_span
     """)).scalar()
 
     fit_count = db.execute(text("""
@@ -136,7 +146,13 @@ def diagnostics_summary(db: Annotated[Session, Depends(get_session)]):
         JOIN register_blocks b ON b.id = t.register_block_id
         WHERE t.function_code <> b.function_code
            OR t.address < b.start_address
-           OR t.address + t.register_count > b.start_address + b.count
+           OR t.address + (
+                CASE
+                  WHEN b.addressing_mode IN ('ENRON_HOLDING', 'ENRON_INPUT')
+                    THEN 1
+                  ELSE t.register_count
+                END
+              ) > b.start_address + b.count
     """)).scalar()
 
     stale_count = db.execute(text("""
@@ -265,22 +281,38 @@ def buffer_health(db: Annotated[Session, Depends(get_session)]):
 
 @router.get("/tag-overlaps", response_model=list[TagOverlap])
 def list_tag_overlaps(db: Annotated[Session, Depends(get_session)]):
-    """Find every pair of tags whose address ranges intersect on the same FC."""
+    """Find every pair of tags whose address ranges intersect on the same FC.
+
+    For tags in Enron-mode blocks the effective address span is 1 (each
+    Enron logical address holds one value), so neighbouring tags at
+    addresses N and N+1 do NOT overlap even though their register_counts
+    suggest a byte-range collision.
+    """
     rows = db.execute(text("""
+        WITH tag_span AS (
+          SELECT t.*,
+                 CASE
+                   WHEN b.addressing_mode IN ('ENRON_HOLDING', 'ENRON_INPUT')
+                     THEN 1
+                   ELSE t.register_count
+                 END AS effective_span
+            FROM tags t
+            LEFT JOIN register_blocks b ON b.id = t.register_block_id
+        )
         SELECT
           t1.device_id, d.name as device_name, t1.function_code,
           t1.id as tag1_id, t1.name as tag1_name,
           t1.address as tag1_address, t1.register_count as tag1_register_count,
           t2.id as tag2_id, t2.name as tag2_name,
           t2.address as tag2_address, t2.register_count as tag2_register_count
-        FROM tags t1
-        JOIN tags t2
+        FROM tag_span t1
+        JOIN tag_span t2
           ON t1.device_id = t2.device_id
          AND t1.function_code = t2.function_code
          AND t1.id < t2.id
         JOIN devices d ON d.id = t1.device_id
-        WHERE t1.address < t2.address + t2.register_count
-          AND t2.address < t1.address + t1.register_count
+        WHERE t1.address < t2.address + t2.effective_span
+          AND t2.address < t1.address + t1.effective_span
         ORDER BY t1.device_id, t1.function_code, t1.address
     """)).mappings().all()
     return [dict(r) for r in rows]
@@ -290,10 +322,9 @@ def list_tag_overlaps(db: Annotated[Session, Depends(get_session)]):
 def list_tag_block_fit_issues(db: Annotated[Session, Depends(get_session)]):
     """Tags whose declared register_block can't contain them.
 
-    Three possible problems, surfaced in a combined `issue` string:
-      - function_code mismatch between tag and block
-      - tag's start address is below the block's start_address
-      - tag's range extends past the block's end
+    For Enron blocks, fit is measured in logical addresses (span=1 per tag),
+    not byte ranges — block count of 16 holds 16 Enron values regardless of
+    each value's wire width.
     """
     rows = db.execute(text("""
         SELECT
@@ -309,7 +340,13 @@ def list_tag_block_fit_issues(db: Annotated[Session, Depends(get_session)]):
         JOIN devices d ON d.id = t.device_id
         WHERE t.function_code <> b.function_code
            OR t.address < b.start_address
-           OR t.address + t.register_count > b.start_address + b.count
+           OR t.address + (
+                CASE
+                  WHEN b.addressing_mode IN ('ENRON_HOLDING', 'ENRON_INPUT')
+                    THEN 1
+                  ELSE t.register_count
+                END
+              ) > b.start_address + b.count
         ORDER BY t.device_id, t.function_code, t.address
     """)).mappings().all()
 
