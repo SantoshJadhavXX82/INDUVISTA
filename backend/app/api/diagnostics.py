@@ -471,3 +471,364 @@ def find_data_gaps(
         }
         for r in rows
     ]
+
+
+# ===========================================================================
+# Phase 12.6 — system resources + operator limit warnings
+# ===========================================================================
+
+class CpuStats(BaseModel):
+    percent: float                # 0-100 across all cores
+    count_logical: int
+    count_physical: int | None
+    load_average: list[float] | None   # [1m, 5m, 15m] — None on Windows
+
+
+class MemoryStats(BaseModel):
+    total_bytes: int
+    used_bytes: int               # = total - available
+    available_bytes: int
+    cached_bytes: int             # OS file cache + buffers (reclaimable)
+    percent: float                # 0-100
+
+
+class DiskUsage(BaseModel):
+    mountpoint: str               # "C:\\" on Windows, "/" on Linux
+    device: str | None = None     # e.g. "/dev/sda1" or "\\\\?\\Volume{...}"
+    fstype: str | None = None     # ntfs / ext4 / xfs / apfs ...
+    total_bytes: int
+    used_bytes: int
+    free_bytes: int
+    percent: float                # 0-100 — over-90 warrants attention
+
+
+class GpuStats(BaseModel):
+    """Per-GPU snapshot. NVIDIA only today (via pynvml on the host agent)."""
+    index: int
+    name: str
+    utilization_percent: float
+    memory_total_bytes: int
+    memory_used_bytes: int
+    memory_percent: float
+    temperature_c: int | None
+
+
+class ProcessInfo(BaseModel):
+    pid: int
+    name: str                     # process command name (truncated)
+    cpu_percent: float
+    memory_bytes: int
+    memory_percent: float
+    threads: int
+    started_at: datetime | None
+    is_self: bool                 # True for the backend's own process (container scope only)
+
+
+class SystemStats(BaseModel):
+    """System resource snapshot — either real host or backend container.
+
+    `scope` tells you which:
+      * "host"      — pushed in by the host-side agent (psutil running natively
+                       on Windows/Linux). Real Task Manager / top parity.
+      * "container" — fallback when no host agent has reported recently.
+                       Numbers reflect the backend container's namespaced view
+                       (typically: 1 disk, a few processes, CPU%/RAM% relative
+                       to the container's limits, not the physical machine).
+
+    Operators want the "host" reading. The "container" reading still exists so
+    the page never breaks and so dev environments without the agent installed
+    aren't blank.
+    """
+    scope: str = "container"
+    hostname: str | None = None         # set when scope='host'
+    platform: str | None = None         # "Windows" / "Linux" / "Darwin"
+    host_agent_last_seen_sec: int | None = None  # age of last push, None if never
+    timestamp: datetime
+    uptime_sec: int                     # backend uptime (container) or host boot age
+    cpu: CpuStats
+    memory: MemoryStats
+    disks: list[DiskUsage]              # one entry per mount/drive
+    gpus: list[GpuStats] = []           # empty if no GPUs detected
+    top_processes: list[ProcessInfo]    # by CPU descending, capped at 10
+
+
+class OutOfRangeTag(BaseModel):
+    """A tag whose current value violates its operator-defined min/max."""
+    tag_id: int
+    tag_name: str
+    device_id: int
+    device_name: str
+    value_double: float | None
+    engineering_unit: str | None
+    min_value: float | None
+    max_value: float | None
+    violation: str                # 'LOW' or 'HIGH'
+    last_seen: datetime
+    st: int
+    st_reason: str | None
+
+
+# ---------------------------------------------------------------------------
+# psutil module-level import + process handle. Module-import is preferred
+# over per-request because psutil.cpu_percent() needs a baseline interval —
+# the first call after import returns 0.0; subsequent calls compute the
+# delta against the previous one. Calling at import time primes that.
+# ---------------------------------------------------------------------------
+import os
+import time as _time
+
+try:
+    import psutil  # type: ignore
+    _PSUTIL_OK = True
+    psutil.cpu_percent(interval=None)  # prime the running counter
+    _BACKEND_PROCESS = psutil.Process(os.getpid())
+    _BACKEND_PROCESS.cpu_percent(interval=None)
+except Exception:  # pragma: no cover — psutil may not be importable
+    _PSUTIL_OK = False
+    psutil = None  # type: ignore
+    _BACKEND_PROCESS = None  # type: ignore
+
+
+@router.get("/system-stats", response_model=SystemStats)
+def system_stats():
+    """System resources for the Diagnostics page.
+
+    Two-tier read:
+      1. If the host-side agent has POSTed within the last 30 seconds,
+         return that cached snapshot with scope='host'. These are real
+         host metrics — Windows Task Manager / Linux top parity.
+      2. Otherwise, fall back to in-container psutil readings labelled
+         scope='container' so the page never breaks and devs without the
+         agent installed still see something useful.
+
+    See host_agent/README.md for how to run the agent.
+    """
+    if not _PSUTIL_OK:
+        raise HTTPException(503, "psutil unavailable — install psutil>=6.0")
+
+    # ---- Tier 1: host-agent push, if fresh ---------------------------------
+    cached = _HOST_STATS_CACHE.get("payload")
+    cached_at = _HOST_STATS_CACHE.get("received_at_mono")
+    if cached and cached_at is not None:
+        age = _time.monotonic() - cached_at
+        if age < _HOST_STATS_MAX_AGE_SEC:
+            # Re-stamp the timestamp with the receive-time so age in the UI is
+            # based on "when the backend got it", not "when the agent built it"
+            # (which could be skewed by clock drift). Everything else passes
+            # through unchanged.
+            payload = dict(cached)
+            payload["host_agent_last_seen_sec"] = int(age)
+            return SystemStats(**payload)
+
+    # ---- Tier 2: container fallback ----------------------------------------
+    # CPU. interval=None returns the % since the last call. We primed at
+    # import and every UI refresh updates the baseline for the next read.
+    cpu_pct = psutil.cpu_percent(interval=None)
+    try:
+        load_avg = list(os.getloadavg())  # raises on Windows
+    except (AttributeError, OSError):
+        load_avg = None
+    cpu = CpuStats(
+        percent=cpu_pct,
+        count_logical=psutil.cpu_count(logical=True) or 1,
+        count_physical=psutil.cpu_count(logical=False),
+        load_average=load_avg,
+    )
+
+    # Memory
+    vm = psutil.virtual_memory()
+    cached_mem = (getattr(vm, "cached", 0) or 0) + (getattr(vm, "buffers", 0) or 0)
+    memory = MemoryStats(
+        total_bytes=vm.total,
+        used_bytes=vm.total - vm.available,
+        available_bytes=vm.available,
+        cached_bytes=int(cached_mem),
+        percent=vm.percent,
+    )
+
+    # Disks: best-effort. Inside a container we typically only see "/" and
+    # whatever bind-mounts are wired in. That's fine for a fallback.
+    candidate_mounts = ["/", "/var/lib/postgresql/data", "/mnt/data", "/data"]
+    seen_disks: set[str] = set()
+    disks: list[DiskUsage] = []
+    for mp in candidate_mounts:
+        try:
+            usage = psutil.disk_usage(mp)
+        except (FileNotFoundError, PermissionError, OSError):
+            continue
+        key = f"{mp}:{usage.total}"
+        if key in seen_disks:
+            continue
+        seen_disks.add(key)
+        disks.append(DiskUsage(
+            mountpoint=mp,
+            total_bytes=usage.total,
+            used_bytes=usage.used,
+            free_bytes=usage.free,
+            percent=usage.percent,
+        ))
+    if not disks:
+        try:
+            usage = psutil.disk_usage(os.getcwd())
+            disks.append(DiskUsage(
+                mountpoint=os.getcwd(),
+                total_bytes=usage.total,
+                used_bytes=usage.used,
+                free_bytes=usage.free,
+                percent=usage.percent,
+            ))
+        except OSError:
+            pass
+
+    # Top processes
+    procs: list[ProcessInfo] = []
+    self_pid = os.getpid()
+    for p in psutil.process_iter(
+        ["pid", "name", "cpu_percent", "memory_info", "memory_percent",
+         "num_threads", "create_time"]
+    ):
+        try:
+            info = p.info
+            mem = info["memory_info"]
+            procs.append(ProcessInfo(
+                pid=info["pid"],
+                name=(info["name"] or "?")[:40],
+                cpu_percent=float(info["cpu_percent"] or 0),
+                memory_bytes=int(mem.rss) if mem else 0,
+                memory_percent=float(info["memory_percent"] or 0),
+                threads=int(info["num_threads"] or 0),
+                started_at=(
+                    datetime.fromtimestamp(info["create_time"], tz=timezone.utc)
+                    if info["create_time"] else None
+                ),
+                is_self=(info["pid"] == self_pid),
+            ))
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    procs.sort(key=lambda x: (-x.cpu_percent, -x.memory_bytes))
+    top_procs = procs[:10]
+    if not any(p.is_self for p in top_procs):
+        self_proc = next((p for p in procs if p.is_self), None)
+        if self_proc:
+            top_procs = top_procs[:9] + [self_proc]
+
+    # Backend uptime
+    try:
+        uptime = int(_time.time() - _BACKEND_PROCESS.create_time())
+    except Exception:
+        uptime = 0
+
+    # If the agent has reported BEFORE but is now stale, surface its age so
+    # the UI can say "host agent last seen 47s ago" rather than just hiding it.
+    if cached_at is not None:
+        agent_age = int(_time.monotonic() - cached_at)
+    else:
+        agent_age = None
+
+    return SystemStats(
+        scope="container",
+        hostname=None,
+        platform=None,
+        host_agent_last_seen_sec=agent_age,
+        timestamp=datetime.now(timezone.utc),
+        uptime_sec=uptime,
+        cpu=cpu,
+        memory=memory,
+        disks=disks,
+        gpus=[],
+        top_processes=top_procs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Host-stats push endpoint
+# ---------------------------------------------------------------------------
+#
+# The host_agent/agent.py script POSTs here every ~5 seconds with real host
+# metrics (Task Manager / top parity). We hold the most recent payload in
+# memory; if the agent dies or is never started, the cache simply ages out
+# and GET /system-stats falls back to container readings.
+#
+# This is fine to keep in process memory (not Postgres) because:
+#   * one snapshot is ~10 KB
+#   * losing it on backend restart is harmless — the agent will re-post in 5s
+#   * we never need to query it historically; the trend module owns history
+
+_HOST_STATS_CACHE: dict = {}            # {"payload": dict, "received_at_mono": float}
+_HOST_STATS_MAX_AGE_SEC = 30            # treat older pushes as stale
+
+
+@router.post("/host-stats", status_code=204)
+def receive_host_stats(payload: SystemStats):
+    """Accept a host-stats push from the host-side agent.
+
+    Validation is automatic via the SystemStats schema. We don't authenticate
+    this endpoint today — InduVista's backend isn't exposed to untrusted
+    networks in its current deployment shape. If you put it behind a reverse
+    proxy on the public internet, lock this path down (mTLS or a shared
+    secret) before exposing /host-stats.
+    """
+    _HOST_STATS_CACHE["payload"] = payload.model_dump(mode="json")
+    _HOST_STATS_CACHE["received_at_mono"] = _time.monotonic()
+
+
+@router.get("/out-of-range-tags", response_model=list[OutOfRangeTag])
+def list_out_of_range_tags(db: Annotated[Session, Depends(get_session)]):
+    """Tags whose current value violates the operator-defined min/max limits.
+
+    Two ways a tag lands here:
+      1. Worker tagged it ST_RANGE_WARN (st=68) with reason RANGE_LOW/HIGH.
+      2. The value is currently outside [min_value, max_value] regardless of
+         what st says — catches the brief window between configuring a limit
+         and the next poll cycle.
+
+    Both definitions are unioned so the page shows everything currently
+    out-of-bounds. Returned sorted by violation magnitude (worst first) so
+    operators see the biggest deviations at the top.
+    """
+    rows = db.execute(text("""
+        SELECT
+            t.id              AS tag_id,
+            t.name            AS tag_name,
+            t.device_id,
+            d.name            AS device_name,
+            lv.value_double,
+            t.engineering_unit,
+            t.min_value,
+            t.max_value,
+            CASE
+                WHEN t.min_value IS NOT NULL AND lv.value_double < t.min_value THEN 'LOW'
+                WHEN t.max_value IS NOT NULL AND lv.value_double > t.max_value THEN 'HIGH'
+                ELSE NULL
+            END AS violation,
+            lv.time AS last_seen,
+            lv.st,
+            lv.st_reason
+        FROM tags t
+        JOIN devices d ON d.id = t.device_id
+        JOIN latest_tag_values lv ON lv.tag_id = t.id
+        WHERE t.enabled = TRUE
+          AND lv.value_double IS NOT NULL
+          AND (
+              (t.min_value IS NOT NULL AND lv.value_double < t.min_value)
+              OR
+              (t.max_value IS NOT NULL AND lv.value_double > t.max_value)
+          )
+        ORDER BY
+            -- Worst deviation first: distance outside the band, normalized
+            -- by band width so a 10% overshoot on a 0-100 tag ranks the same
+            -- as a 10% overshoot on a 0-10 tag.
+            GREATEST(
+                CASE WHEN t.min_value IS NOT NULL
+                     THEN (t.min_value - lv.value_double) /
+                          NULLIF(ABS(COALESCE(t.max_value, t.min_value)
+                                 - t.min_value) + 1, 0)
+                     ELSE 0 END,
+                CASE WHEN t.max_value IS NOT NULL
+                     THEN (lv.value_double - t.max_value) /
+                          NULLIF(ABS(t.max_value
+                                 - COALESCE(t.min_value, t.max_value)) + 1, 0)
+                     ELSE 0 END
+            ) DESC
+    """)).mappings().all()
+    return [dict(r) for r in rows]

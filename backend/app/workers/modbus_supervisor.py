@@ -79,6 +79,7 @@ from app.modbus.status import (
     ST_DECODE_FAIL,
     ST_MODBUS_EXCEPTION,
     ST_MODBUS_IO_ERROR,
+    ST_RANGE_WARN,
     ST_READ_OK,
     ST_RETRY_EXHAUSTED,
     ST_TRANSPORT_UNSUPPORTED,
@@ -90,6 +91,19 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("worker")
+
+
+def _fmt_lim(v: float) -> str:
+    """Compact numeric string for st_reason (column is VARCHAR(32) total).
+
+    Strips trailing zeros from a float so 5.0 → '5' and 5.250 → '5.25'.
+    Falls back to %g for huge/tiny magnitudes. Output is always <=12 chars
+    so the wrapping reason like "RANGE_HIGH (>5.250)" stays under 32.
+    """
+    if v == int(v) and abs(v) < 1e15:
+        return str(int(v))
+    s = f"{v:.4g}"
+    return s
 
 
 def load_polling_config() -> list[dict]:
@@ -144,6 +158,7 @@ def load_polling_config() -> list[dict]:
                 SELECT id, device_id, register_block_id, name,
                        data_type, byte_order, function_code,
                        address, register_count, scale, "offset",
+                       min_value, max_value,
                        is_heartbeat, heartbeat_max_stale_sec
                 FROM tags
                 WHERE device_id = :did
@@ -320,6 +335,10 @@ class DeviceWorker:
 
         # Per-heartbeat-tag state (Phase 7 E1a) — monotonic time of last change.
         self._heartbeat_state: dict[int, tuple[float | None, float]] = {}
+        # Phase 12.7 — per-tag last-seen ST class for edge-triggered
+        # RANGE_WARN logging. Keys are tag ids, values are the previous
+        # cycle's `st` (only ST_RANGE_WARN vs anything-else matters).
+        self._range_state: dict[int, int] = {}
 
         # Worker-restart-local cumulative counters (Phase 7 E1c).
         self._cumulative_total = 0
@@ -986,10 +1005,193 @@ class DeviceWorker:
                     state, avg, mx, cum_avg,
                     window_total, window_good,
                 )
+
+                # Phase 12.2 — reconcile devices.duty_role with the
+                # value reported by each device's duty_status_tag (if
+                # configured). Done on the same cadence as status flush
+                # so we don't add another timer task.
+                await asyncio.to_thread(self._reconcile_duty_standby_sync)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 self.log.exception("Status flush error")
+
+    def _reconcile_duty_standby_sync(self) -> None:
+        """Sync devices.duty_role with the value reported by each paired
+        device's duty_status_tag.
+
+        Runs every status-flush cycle (~5s). For each device:
+          1. Skip if duty_status_tag_id is NULL or device is unpaired.
+          2. Read the latest cached value of the status tag.
+          3. Skip if the tag's last read was bad (ST != OK).
+          4. Compare against system_settings duty_value/standby_value.
+          5. If the device reports a role different from what's stored,
+             swap atomically (both rows + history entry) using
+             reason='device_reported'.
+
+        Conflict handling:
+          - Both devices report 'duty' → newest reading wins (the swap
+            we run now will momentarily clash, but the other device's
+            next reading will reconcile in the opposite direction; one
+            cycle later state is consistent).
+          - Both devices report 'standby' → no change (alarm condition;
+            we log a warning but don't touch state).
+          - Unknown value → no change, warning logged.
+          - Stale read (st != ST_READ_OK) → no change.
+        """
+        ST_READ_OK = 128
+        try:
+            with engine.begin() as conn:
+                # Phase 12.2-hotfix2 — only ONE worker per cycle should run
+                # reconciliation. _status_flush_loop runs per-device-worker,
+                # so without this lock every active worker independently
+                # reconciles each pair, producing N duplicate history rows.
+                # pg_try_advisory_xact_lock is non-blocking and auto-releases
+                # at transaction commit/rollback. The magic ID is arbitrary
+                # but must not collide with other advisory locks in the app.
+                got_lock = conn.execute(
+                    text("SELECT pg_try_advisory_xact_lock(742212) AS got")
+                ).scalar()
+                if not got_lock:
+                    return  # another worker is reconciling this cycle
+
+                # Phase 12.5 — these were INFO during the 12.5 bring-up so we
+                # could trace per-cycle behaviour. Lowered to DEBUG once the
+                # feature was confirmed working — they're noisy in production
+                # (~60-80 lines/min across workers, mostly "no swap"). The
+                # actual SWAP log below stays at INFO because a swap is an
+                # operationally significant event.
+                self.log.debug("duty-reconcile: lock acquired, scanning pairs")
+
+                # Read global duty/standby value convention
+                rows = conn.execute(text("""
+                    SELECT key, value FROM system_settings
+                    WHERE key IN ('duty_standby.duty_value', 'duty_standby.standby_value')
+                """)).mappings().all()
+                settings = {r["key"]: int(r["value"]) for r in rows}
+                duty_value = settings.get("duty_standby.duty_value", 1)
+                standby_value = settings.get("duty_standby.standby_value", 0)
+
+                # Find all paired devices with a duty_status_tag configured
+                # plus the latest reading for that tag.
+                #
+                # Phase 12.5 — exclude pairs where EITHER side has
+                # manual_override=TRUE. The LEFT JOIN to devices p uses
+                # the partner row; COALESCE handles edge cases where the
+                # partner FK is somehow stale.
+                paired = conn.execute(text("""
+                    SELECT
+                        d.id AS device_id,
+                        d.duty_role,
+                        d.redundant_device_id,
+                        d.duty_status_tag_id,
+                        lv.value_double,
+                        lv.st,
+                        EXTRACT(EPOCH FROM (NOW() - lv.time)) AS age_seconds
+                    FROM devices d
+                    LEFT JOIN devices p ON p.id = d.redundant_device_id
+                    LEFT JOIN latest_tag_values lv ON lv.tag_id = d.duty_status_tag_id
+                    WHERE d.duty_status_tag_id IS NOT NULL
+                      AND d.redundant_device_id IS NOT NULL
+                      AND d.duty_role IN ('duty', 'standby')
+                      AND d.manual_override = FALSE
+                      AND COALESCE(p.manual_override, FALSE) = FALSE
+                """)).mappings().all()
+
+                self.log.debug(
+                    "duty-reconcile: %d paired devices in query result", len(paired),
+                )
+
+                # Phase 12.2-hotfix — dedupe by pair. The query above returns
+                # BOTH sides of each pair, but processing both produces
+                # duplicate history rows (identical swap recorded twice). We
+                # mark a pair as "handled" once we have a valid reading from
+                # either side. Stale-on-one-side still falls through to the
+                # partner row.
+                processed_pairs: set[tuple[int, int]] = set()
+
+                for row in paired:
+                    pair_key = tuple(sorted([
+                        row["device_id"], row["redundant_device_id"],
+                    ]))
+                    if pair_key in processed_pairs:
+                        self.log.debug(
+                            "duty-reconcile: SKIP dev=%s pair_key=%s reason=already_processed",
+                            row["device_id"], pair_key,
+                        )
+                        continue
+
+                    if row["st"] != ST_READ_OK or row["value_double"] is None:
+                        self.log.debug(
+                            "duty-reconcile: SKIP dev=%s pair_key=%s reason=stale_or_unread st=%s val=%s",
+                            row["device_id"], pair_key, row["st"], row["value_double"],
+                        )
+                        continue
+
+                    val = int(round(row["value_double"]))
+                    if val == duty_value:
+                        device_reports = "duty"
+                    elif val == standby_value:
+                        device_reports = "standby"
+                    else:
+                        self.log.warning(
+                            "device %s: duty_status_tag reports unknown value %s "
+                            "(expected %s=duty or %s=standby)",
+                            row["device_id"], val, duty_value, standby_value,
+                        )
+                        processed_pairs.add(pair_key)
+                        continue
+
+                    processed_pairs.add(pair_key)
+
+                    is_swap = device_reports != row["duty_role"]
+                    # SWAP at INFO (operationally significant); MATCH at DEBUG
+                    # (steady-state noise that drowns out real events).
+                    (self.log.info if is_swap else self.log.debug)(
+                        "duty-reconcile: EVAL dev=%s stored=%s reports=%s val=%s → %s",
+                        row["device_id"], row["duty_role"], device_reports, val,
+                        "SWAP" if is_swap else "MATCH (no swap)",
+                    )
+
+                    if not is_swap:
+                        continue  # already in sync
+
+                    # Mismatch — reconcile by swapping the pair. Use the
+                    # same atomic logic as the manual swap-duty endpoint.
+                    partner_id = row["redundant_device_id"]
+                    new_role_me = device_reports
+                    new_role_partner = "standby" if device_reports == "duty" else "duty"
+                    became_duty = row["device_id"] if device_reports == "duty" else partner_id
+                    became_standby = partner_id if device_reports == "duty" else row["device_id"]
+
+                    self.log.info(
+                        "device %s reports '%s' but stored as '%s' — reconciling",
+                        row["device_id"], device_reports, row["duty_role"],
+                    )
+
+                    conn.execute(
+                        text("UPDATE devices SET duty_role=:r WHERE id=:id"),
+                        {"r": new_role_me, "id": row["device_id"]},
+                    )
+                    conn.execute(
+                        text("UPDATE devices SET duty_role=:r WHERE id=:id"),
+                        {"r": new_role_partner, "id": partner_id},
+                    )
+                    conn.execute(
+                        text("""INSERT INTO device_duty_history
+                                (device_id, paired_device_id, switched_at,
+                                 reason, notes)
+                                VALUES (:d, :p, NOW(), 'device_reported',
+                                        :note)"""),
+                        {
+                            "d": became_duty,
+                            "p": became_standby,
+                            "note": f"device {row['device_id']} reported value {val} "
+                                    f"(={device_reports}); was stored as {row['duty_role']}",
+                        },
+                    )
+        except Exception:
+            self.log.exception("duty/standby reconciliation error")
 
     def _report_status_sync(self, total: int, good: int, connection_state: str) -> None:
         """Legacy status writer — kept for transport-unsupported loop."""
@@ -1130,6 +1332,46 @@ class DeviceWorker:
                                 st = ST_COMM_TIMEOUT
                                 st_reason = f"HEARTBEAT_FROZEN ({int(stale_sec)}s)"
 
+                # Phase 12.6 — operator-defined range warning.
+                # Only applies to numeric reads (bool/string don't have a
+                # numeric range to compare against), and only when the read
+                # itself is still considered VALID. We never DOWNGRADE a
+                # more-severe condition (HEARTBEAT_FROZEN is INVALID-tier;
+                # a range check shouldn't mask that). The operator-facing
+                # effect: SUSPECT tier with a clear reason, so the live
+                # dashboard shows amber and reports flag the row.
+                if (
+                    st == ST_READ_OK
+                    and vd is not None
+                    and tag["data_type"] != "bool"
+                ):
+                    lo = tag.get("min_value")
+                    hi = tag.get("max_value")
+                    if lo is not None and vd < lo:
+                        st = ST_RANGE_WARN
+                        st_reason = f"RANGE_LOW (<{_fmt_lim(lo)})"
+                    elif hi is not None and vd > hi:
+                        st = ST_RANGE_WARN
+                        st_reason = f"RANGE_HIGH (>{_fmt_lim(hi)})"
+
+                # Phase 12.7 — edge-triggered range-warning log.
+                # Logs once on entry into RANGE_WARN and once on exit, so
+                # operators can correlate readings with the moment a tag
+                # crossed its limit. Skipping per-cycle logs avoids drowning
+                # the worker in repeated lines for a stuck-out-of-range tag.
+                prev_range_st = self._range_state.get(tag["id"])
+                if st == ST_RANGE_WARN and prev_range_st != ST_RANGE_WARN:
+                    self.log.info(
+                        "tag %s (id=%s) ENTERED range-warning: value=%s %s",
+                        tag["name"], tag["id"], vd, st_reason,
+                    )
+                elif st != ST_RANGE_WARN and prev_range_st == ST_RANGE_WARN:
+                    self.log.info(
+                        "tag %s (id=%s) EXITED range-warning: value=%s",
+                        tag["name"], tag["id"], vd,
+                    )
+                self._range_state[tag["id"]] = st
+
                 samples.append(Sample(
                     tag_id=tag["id"], device_id=tag["device_id"],
                     register_block_id=block["id"], time=now,
@@ -1184,10 +1426,21 @@ def _config_fingerprint(config: list[dict]) -> str:
              b.get("scan_interval_ms"))
             for b in sorted(c["blocks"], key=lambda b: b["id"])
         )
+        # Phase 12.7 — include operator-set fields in the fingerprint so
+        # PATCHing min_value/max_value or is_heartbeat actually triggers
+        # a worker reload. Without this, you'd PATCH a limit, the DB row
+        # would change, but the worker would keep polling with its old
+        # in-memory copy until something ELSE (e.g. a block scan_interval)
+        # forced a reload. Heartbeat config has the same issue.
         tags_part = tuple(sorted(
             (t["id"], t["register_block_id"], t["address"], t["register_count"],
              t["data_type"], t["byte_order"],
-             float(t["scale"]), float(t["offset"]))
+             float(t["scale"]), float(t["offset"]),
+             # Nullable floats — coerce to a stable repr ('None' or 'x.xxxx').
+             None if t.get("min_value") is None else float(t["min_value"]),
+             None if t.get("max_value") is None else float(t["max_value"]),
+             bool(t.get("is_heartbeat")),
+             t.get("heartbeat_max_stale_sec"))
             for tag_list in c["tags_by_block"].values()
             for t in tag_list
         ))

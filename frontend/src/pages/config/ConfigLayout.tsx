@@ -10,7 +10,7 @@ import { NavLink, Outlet } from "react-router";
 import { cn } from "@/lib/utils";
 
 const tabs = [
-  { to: "/config/channels", label: "Channels" },
+  { to: "/config/channels", label: "Networks" },
   { to: "/config/devices", label: "Devices" },
   { to: "/config/blocks", label: "Register Blocks" },
 ];
@@ -21,7 +21,7 @@ export default function ConfigLayout() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Configuration</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Edit channels, devices, and register blocks. Changes propagate to
+          Edit networks, devices, and register blocks. Changes propagate to
           workers within ~10 seconds via the Phase 3.5 hot-reload.
         </p>
       </div>

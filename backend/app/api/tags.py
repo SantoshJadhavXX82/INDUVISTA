@@ -75,6 +75,11 @@ class TagCreate(BaseModel):
 
 
 class TagUpdate(BaseModel):
+    # Phase 11 — name editable. Tag identity is the integer id (FK from
+    # tag_values), not the name. Renaming preserves all historical data;
+    # the unique constraint (device_id, name) is enforced at the DB level
+    # and surfaces as a 409 if the new name collides with a sibling tag.
+    name: str | None = Field(None, min_length=1, max_length=100)
     register_block_id: int | None = None
     description: str | None = None
     data_type: DataType | None = None
@@ -547,10 +552,17 @@ def delete_tag(tag_id: int, db: Annotated[Session, Depends(get_session)]):
 # ---------------------------------------------------------------------------
 
 class BulkTagResult(BaseModel):
-    """One per row of the input — either a created TagResponse OR an error."""
+    """One per row of the input — what happened.
+
+    Phase 11 — upsert semantics. `action` describes the outcome:
+       created — INSERTed a new tag (no name match found)
+       updated — UPDATEed an existing tag (matched by device_id + name)
+       error   — neither, see `error` for the reason
+    """
     row: int
     tag_id: int | None = None
     name: str | None = None
+    action: str | None = None        # "created" | "updated" | "error"
     error: str | None = None
 
 
@@ -563,20 +575,39 @@ def bulk_create_tags(
     body: BulkTagsRequest,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Create many tags in one request. Per-row error reporting.
+    """Create OR update many tags in one request. Per-row error reporting.
 
-    Each tag is attempted in its own savepoint so one bad row doesn't poison
-    the rest. The endpoint returns a list aligned to the input order so the
-    client can show "row 5 failed because X" alongside successful rows.
+    Phase 11 — upsert by (device_id, name). If a row's name already
+    exists on the target device, the existing tag is UPDATED with the
+    row's fields (instead of failing with "duplicate name"). New names
+    are INSERTed as before. This makes CSV export → edit → re-import a
+    safe round-trip workflow.
 
-    Validation (overlap, block-fit) runs per row, same as the singular POST.
+    Each row runs in its own savepoint so a single bad row doesn't poison
+    the rest. The endpoint returns a list aligned to input order so the
+    client can show "row 5 was updated, row 6 errored because X."
+
+    Validation:
+      - Overlap and block-fit checks run per row, same as singular POST.
+      - For UPDATE rows, the existing tag is excluded from overlap checks
+        (a tag never overlaps itself). For INSERT rows at a *new* name
+        but an occupied address, the request is rejected.
     """
     results: list[BulkTagResult] = []
     for idx, tag_in in enumerate(body.tags):
         try:
-            # Use a nested transaction (SAVEPOINT) so individual failures
-            # don't abort the whole batch.
             with db.begin_nested():
+                # Phase 11 — look up existing tag by (device_id, name).
+                # Drives the upsert decision.
+                existing_id = db.execute(
+                    text("""
+                        SELECT id FROM tags
+                        WHERE device_id = :device_id AND name = :name
+                    """),
+                    {"device_id": tag_in.device_id, "name": tag_in.name},
+                ).scalar_one_or_none()
+
+                # Resolve register_count (handles None + Enron auto-derive)
                 is_enron = False
                 if tag_in.register_block_id is not None:
                     is_enron = _block_addressing_mode(
@@ -586,6 +617,7 @@ def bulk_create_tags(
                     tag_in.data_type, tag_in.register_count,
                     is_enron_block=is_enron,
                 )
+
                 _validate_addressing(
                     db,
                     device_id=tag_in.device_id,
@@ -593,45 +625,91 @@ def bulk_create_tags(
                     address=tag_in.address,
                     register_count=resolved_rc,
                     register_block_id=tag_in.register_block_id,
-                    exclude_tag_id=None,
+                    # Exclude self when updating so we don't flag an
+                    # unchanged tag as overlapping with its own address.
+                    exclude_tag_id=existing_id,
                     is_enron_block=is_enron,
                 )
+
                 payload = tag_in.model_dump()
                 payload["register_count"] = resolved_rc
-                result = db.execute(
-                    text("""
-                        INSERT INTO tags (
-                            device_id, register_block_id, name, description,
-                            data_type, byte_order, function_code,
-                            address, register_count,
-                            engineering_unit_id, engineering_unit, scale, "offset",
-                            min_value, max_value, named_set_id
-                        ) VALUES (
-                            :device_id, :register_block_id, :name, :description,
-                            :data_type, :byte_order, :function_code,
-                            :address, :register_count,
-                            :engineering_unit_id, :engineering_unit, :scale, :offset,
-                            :min_value, :max_value, :named_set_id
-                        )
-                        RETURNING id
-                    """),
-                    payload,
-                )
-                new_id = result.scalar_one()
+
+                if existing_id is None:
+                    # INSERT path — new name, new row
+                    result = db.execute(
+                        text("""
+                            INSERT INTO tags (
+                                device_id, register_block_id, name, description,
+                                data_type, byte_order, function_code,
+                                address, register_count,
+                                engineering_unit_id, engineering_unit, scale, "offset",
+                                min_value, max_value, named_set_id
+                            ) VALUES (
+                                :device_id, :register_block_id, :name, :description,
+                                :data_type, :byte_order, :function_code,
+                                :address, :register_count,
+                                :engineering_unit_id, :engineering_unit, :scale, :offset,
+                                :min_value, :max_value, :named_set_id
+                            )
+                            RETURNING id
+                        """),
+                        payload,
+                    )
+                    new_id = result.scalar_one()
+                    results.append(BulkTagResult(
+                        row=idx, tag_id=new_id, name=tag_in.name,
+                        action="created",
+                    ))
+                else:
+                    # UPDATE path — same name on same device, refresh fields.
+                    # We deliberately don't touch is_heartbeat, named_set_id,
+                    # heartbeat_max_stale_sec — those are typically configured
+                    # via UI and not present in a CSV round-trip. Same for
+                    # writable.
+                    payload["id"] = existing_id
+                    db.execute(
+                        text("""
+                            UPDATE tags SET
+                                register_block_id = :register_block_id,
+                                description = :description,
+                                data_type = :data_type,
+                                byte_order = :byte_order,
+                                function_code = :function_code,
+                                address = :address,
+                                register_count = :register_count,
+                                engineering_unit_id = :engineering_unit_id,
+                                engineering_unit = :engineering_unit,
+                                scale = :scale,
+                                "offset" = :offset,
+                                min_value = :min_value,
+                                max_value = :max_value,
+                                named_set_id = :named_set_id
+                            WHERE id = :id
+                        """),
+                        payload,
+                    )
+                    results.append(BulkTagResult(
+                        row=idx, tag_id=existing_id, name=tag_in.name,
+                        action="updated",
+                    ))
+        except HTTPException as he:
+            # _validate_addressing raises HTTPException with .detail — surface
+            # that message verbatim so users see "address 7002 overlaps with
+            # SMOKE_MOLE_02" instead of a generic "addressing conflict."
             results.append(BulkTagResult(
-                row=idx, tag_id=new_id, name=tag_in.name,
+                row=idx, name=tag_in.name, action="error",
+                error=str(he.detail),
             ))
         except IntegrityError as e:
-            # Map common Postgres errors to a friendly message
             msg = str(e.orig).split("\n")[0] if hasattr(e, "orig") else str(e)
             results.append(BulkTagResult(
-                row=idx, name=tag_in.name, error=msg,
+                row=idx, name=tag_in.name, action="error", error=msg,
             ))
         except Exception as e:
             results.append(BulkTagResult(
-                row=idx, name=tag_in.name, error=str(e),
+                row=idx, name=tag_in.name, action="error", error=str(e),
             ))
-    db.commit()  # commit all successful nested transactions
+    db.commit()
     return results
 
 

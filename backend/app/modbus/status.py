@@ -31,6 +31,13 @@ ST_READ_OK = 128
 # ---- SUSPECT (64-127) --------------------------------------------------------
 ST_STALE = 64
 
+# Phase 12.6 — Value read OK but outside operator-defined min/max range.
+# This is the SUSPECT tier (not INVALID) because the reading itself is
+# valid; it's just out of the configured "expected" window. Operator
+# should see it but the historian still records the actual value.
+# st_reason carries the side: RANGE_LOW or RANGE_HIGH.
+ST_RANGE_WARN = 68
+
 # ---- INVALID (0-63) ----------------------------------------------------------
 
 # The worker has never successfully read this tag.

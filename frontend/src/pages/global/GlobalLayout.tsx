@@ -19,6 +19,7 @@ const tabs = [
   { to: "/global/engineering-units", label: "Engineering Units" },
   { to: "/global/groups", label: "Groups" },
   { to: "/global/named-sets", label: "Enumerations" },
+  { to: "/global/duty-standby-values", label: "Duty/Standby Values" },
 ];
 
 export default function GlobalLayout() {

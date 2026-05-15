@@ -33,6 +33,16 @@ class DeviceCreate(BaseModel):
     secondary_port: int | None = Field(None, ge=1, le=65535)
     secondary_unit_id: int | None = Field(None, ge=0, le=255)
     redundant_device_id: int | None = None
+    # Phase 12.2 — which tag on this device reports its self-assessed
+    # duty/standby role. NULL = manual-only (current behavior).
+    duty_status_tag_id: int | None = None
+    # Phase 12.5 — suspends worker reconciliation for this pair
+    manual_override: bool = False
+    # Phase 12.6 — operator may create a device in disabled state (useful
+    # for staging a config before going live, or for test fixtures that
+    # need a config row but no polling). DB default is TRUE; this surfaces
+    # it as a proper API field instead of silently defaulting.
+    enabled: bool = True
     # Phase 8.5 — Modbus hardening config
     request_timeout_ms: int = Field(3000, ge=100, le=60000,
         description="Per-request timeout in ms (100-60000)")
@@ -45,6 +55,11 @@ class DeviceCreate(BaseModel):
 
 
 class DeviceUpdate(BaseModel):
+    # Phase 11 — name editable. Device identity is the integer id (FK from
+    # tags, register_blocks, worker_device_status). Renaming preserves all
+    # references; the unique constraint (channel_id, name) is enforced at
+    # the DB level.
+    name: str | None = Field(None, min_length=1, max_length=100)
     description: str | None = None
     protocol: str | None = None
     host: str | None = None
@@ -59,6 +74,8 @@ class DeviceUpdate(BaseModel):
     secondary_port: int | None = Field(None, ge=1, le=65535)
     secondary_unit_id: int | None = Field(None, ge=0, le=255)
     redundant_device_id: int | None = None
+    duty_status_tag_id: int | None = None
+    manual_override: bool | None = None
     enabled: bool | None = None
     # Phase 8.5 — Modbus hardening config (all optional for PATCH semantics)
     request_timeout_ms: int | None = Field(None, ge=100, le=60000)
@@ -84,6 +101,8 @@ class DeviceResponse(BaseModel):
     secondary_port: int | None
     secondary_unit_id: int | None
     redundant_device_id: int | None
+    duty_status_tag_id: int | None
+    manual_override: bool
     enabled: bool
     # Phase 8.5 — hardening config (always returned)
     request_timeout_ms: int
@@ -97,7 +116,7 @@ _DEVICE_SELECT = """
            d.description, d.protocol, d.host, d.port, d.unit_id,
            d.duty_role, d.stale_after_sec, d.scan_interval_ms,
            d.secondary_host, d.secondary_port, d.secondary_unit_id,
-           d.redundant_device_id, d.enabled,
+           d.redundant_device_id, d.duty_status_tag_id, d.manual_override, d.enabled,
            d.request_timeout_ms, d.retry_count,
            d.reconnect_initial_ms, d.reconnect_max_ms
     FROM devices d
@@ -144,7 +163,8 @@ def create_device(
                     host, port, unit_id,
                     duty_role, stale_after_sec, scan_interval_ms,
                     secondary_host, secondary_port, secondary_unit_id,
-                    redundant_device_id,
+                    redundant_device_id, duty_status_tag_id,
+                    manual_override, enabled,
                     request_timeout_ms, retry_count,
                     reconnect_initial_ms, reconnect_max_ms
                 )
@@ -153,7 +173,8 @@ def create_device(
                     :host, :port, :unit_id,
                     :duty_role, :stale_after_sec, :scan_interval_ms,
                     :secondary_host, :secondary_port, :secondary_unit_id,
-                    :redundant_device_id,
+                    :redundant_device_id, :duty_status_tag_id,
+                    :manual_override, :enabled,
                     :request_timeout_ms, :retry_count,
                     :reconnect_initial_ms, :reconnect_max_ms
                 )
@@ -217,6 +238,248 @@ def delete_device(device_id: int, db: Annotated[Session, Depends(get_session)]):
 
 
 # ---------------------------------------------------------------------------
+# Phase 12 — Duty/standby pairing (configuration + manual swap)
+# ---------------------------------------------------------------------------
+#
+# Schema invariants enforced by ck_devices_duty_role_consistency:
+#   duty_role = 'none'        ⇔  redundant_device_id IS NULL
+#   duty_role IN ('duty','standby')  ⇔  redundant_device_id IS NOT NULL
+#
+# Both rows of a pair MUST satisfy the constraint after every transaction.
+# These endpoints wrap the multi-row UPDATEs in a single transaction so
+# we never leave the database in a state that would fail the constraint.
+
+class PairRequest(BaseModel):
+    """Pair this device with a partner. This device becomes the duty role
+    given (default 'duty'); the partner becomes the opposite role.
+    Both `redundant_device_id` columns are set to point at each other."""
+    partner_device_id: int
+    this_role: Literal["duty", "standby"] = "duty"
+
+
+@router.post("/devices/{device_id}/pair", response_model=DeviceResponse)
+def pair_devices(
+    device_id: int,
+    body: PairRequest,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Create a duty/standby pair between two devices in one transaction.
+
+    Either device may already be in a pair; if so, the old partner is
+    unpaired first (set duty_role='none', redundant_device_id=NULL). This
+    keeps the schema invariant intact at every commit boundary.
+    """
+    if device_id == body.partner_device_id:
+        raise HTTPException(400, "a device cannot be its own partner")
+
+    # Verify both devices exist
+    rows = db.execute(
+        text("SELECT id, name, duty_role, redundant_device_id FROM devices "
+             "WHERE id IN (:a, :b) FOR UPDATE"),
+        {"a": device_id, "b": body.partner_device_id},
+    ).mappings().all()
+    if len(rows) != 2:
+        raise HTTPException(404, "one or both devices not found")
+
+    me = next(r for r in rows if r["id"] == device_id)
+    partner = next(r for r in rows if r["id"] == body.partner_device_id)
+    partner_role: Literal["duty", "standby"] = (
+        "standby" if body.this_role == "duty" else "duty"
+    )
+
+    # Unpair any existing partners (avoids constraint violation when our
+    # update lands on a row whose old partner now has duty_role IN
+    # ('duty','standby') but redundant_device_id NULL).
+    old_partner_ids = {
+        me["redundant_device_id"],
+        partner["redundant_device_id"],
+    } - {None, device_id, body.partner_device_id}
+    if old_partner_ids:
+        db.execute(
+            text("UPDATE devices SET duty_role='none', redundant_device_id=NULL "
+                 "WHERE id = ANY(:ids)"),
+            {"ids": list(old_partner_ids)},
+        )
+
+    # Apply the new pairing.
+    try:
+        db.execute(
+            text("UPDATE devices SET duty_role=:r, redundant_device_id=:p WHERE id=:id"),
+            {"r": body.this_role, "p": body.partner_device_id, "id": device_id},
+        )
+        db.execute(
+            text("UPDATE devices SET duty_role=:r, redundant_device_id=:p WHERE id=:id"),
+            {"r": partner_role, "p": device_id, "id": body.partner_device_id},
+        )
+        # Record the pairing as a "startup"-reason history row so reports
+        # can answer "who was duty when?" from the very first moment.
+        db.execute(
+            text("""INSERT INTO device_duty_history
+                    (device_id, paired_device_id, switched_at, reason, notes)
+                    VALUES (:d, :p, NOW(), 'startup', :note)"""),
+            {
+                "d": device_id if body.this_role == "duty" else body.partner_device_id,
+                "p": body.partner_device_id if body.this_role == "duty" else device_id,
+                "note": f"paired via API: {me['name']} ({body.this_role}) ↔ {partner['name']} ({partner_role})",
+            },
+        )
+        # Phase 12.3 — auto-generate pair tags for name-matching tags
+        # across the two devices. Same transaction as the pairing itself
+        # so a constraint failure here rolls back the whole pair.
+        from app.api.pair_tags import auto_create_pair_tags
+        auto_create_pair_tags(db, device_id, body.partner_device_id)
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        handle_integrity_error(e, "device")
+
+    return get_device(device_id, db)
+
+
+@router.post("/devices/{device_id}/unpair", response_model=DeviceResponse)
+def unpair_device(
+    device_id: int,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Break the pair this device is part of. Both devices revert to
+    duty_role='none', redundant_device_id=NULL."""
+    row = db.execute(
+        text("SELECT redundant_device_id FROM devices WHERE id=:id"),
+        {"id": device_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(404, f"device {device_id} not found")
+    partner_id = row["redundant_device_id"]
+
+    try:
+        # Phase 12.3 — remove auto-generated pair tags before unpairing.
+        # Done before the device UPDATE so we still have the FK references
+        # in place. Done inside the same transaction so the change is atomic.
+        if partner_id is not None:
+            from app.api.pair_tags import auto_delete_pair_tags
+            auto_delete_pair_tags(db, device_id, partner_id)
+        db.execute(
+            text("UPDATE devices SET duty_role='none', redundant_device_id=NULL "
+                 "WHERE id IN (:a, :b)"),
+            {"a": device_id, "b": partner_id or device_id},
+        )
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        handle_integrity_error(e, "device")
+
+    return get_device(device_id, db)
+
+
+class SwapDutyRequest(BaseModel):
+    reason: Literal["manual", "primary_failed", "partner_channel_failover",
+                    "scheduled", "failback", "startup"] = "manual"
+    notes: str | None = None
+
+
+@router.post("/devices/{device_id}/swap-duty", response_model=DeviceResponse)
+def swap_duty(
+    device_id: int,
+    body: SwapDutyRequest,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Atomically swap duty/standby roles between this device and its partner.
+
+    Records the swap in device_duty_history so reports can later answer
+    "who was duty at time T?" for fiscal audit purposes.
+
+    Caller can be either the current duty or the current standby — we
+    just flip both rows. Requires that the device is part of a pair.
+    """
+    row = db.execute(
+        text("SELECT id, name, duty_role, redundant_device_id FROM devices WHERE id=:id"),
+        {"id": device_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(404, f"device {device_id} not found")
+    if row["redundant_device_id"] is None or row["duty_role"] == "none":
+        raise HTTPException(400, "device is not part of a duty/standby pair")
+
+    partner_id = row["redundant_device_id"]
+    # After the swap, whoever was 'standby' becomes 'duty' and vice versa.
+    new_role_for_me = "standby" if row["duty_role"] == "duty" else "duty"
+    new_role_for_partner = "duty" if row["duty_role"] == "duty" else "standby"
+
+    try:
+        db.execute(
+            text("UPDATE devices SET duty_role=:r WHERE id=:id"),
+            {"r": new_role_for_me, "id": device_id},
+        )
+        db.execute(
+            text("UPDATE devices SET duty_role=:r WHERE id=:id"),
+            {"r": new_role_for_partner, "id": partner_id},
+        )
+        # The 'device_id' in history is the device that BECAME duty.
+        # 'paired_device_id' is the one that became standby.
+        became_duty = partner_id if new_role_for_me == "standby" else device_id
+        became_standby = device_id if new_role_for_me == "standby" else partner_id
+        db.execute(
+            text("""INSERT INTO device_duty_history
+                    (device_id, paired_device_id, switched_at, reason, notes)
+                    VALUES (:d, :p, NOW(), :reason, :notes)"""),
+            {
+                "d": became_duty,
+                "p": became_standby,
+                "reason": body.reason,
+                "notes": body.notes,
+            },
+        )
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        handle_integrity_error(e, "device")
+
+    return get_device(device_id, db)
+
+
+class DutyHistoryRow(BaseModel):
+    id: int
+    device_id: int
+    device_name: str
+    paired_device_id: int
+    paired_device_name: str
+    switched_at: str  # ISO 8601 string
+    reason: str
+    notes: str | None
+
+
+@router.get("/devices/{device_id}/duty-history", response_model=list[DutyHistoryRow])
+def get_duty_history(
+    device_id: int,
+    db: Annotated[Session, Depends(get_session)],
+    limit: int = Query(50, ge=1, le=500),
+):
+    """Recent duty switches involving this device, newest first.
+
+    Returns rows where this device was on EITHER side of the swap, so
+    operators can see every transition the device participated in.
+    """
+    rows = db.execute(
+        text("""
+            SELECT h.id, h.device_id, d.name AS device_name,
+                   h.paired_device_id, p.name AS paired_device_name,
+                   h.switched_at, h.reason, h.notes
+            FROM device_duty_history h
+            JOIN devices d ON d.id = h.device_id
+            JOIN devices p ON p.id = h.paired_device_id
+            WHERE h.device_id = :id OR h.paired_device_id = :id
+            ORDER BY h.switched_at DESC
+            LIMIT :limit
+        """),
+        {"id": device_id, "limit": limit},
+    ).mappings().all()
+    return [
+        {**dict(r), "switched_at": r["switched_at"].isoformat()}
+        for r in rows
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Test read (Phase 7 commissioning helper — C2)
 # ---------------------------------------------------------------------------
 #
@@ -225,6 +488,55 @@ def delete_device(device_id: int, db: Annotated[Session, Depends(get_session)]):
 # the byte count. Engineers use this to find the right interpretation by
 # eye — "the float32 ABCD column reads 19.71, matches the device display,
 # I'll pick that combination for the tag".
+
+# Phase 12.5 — Manual override for duty/standby pairs.
+# Setting manual_override=TRUE on either side of a pair suspends worker
+# reconciliation for that pair. Operators use this to perform sticky
+# manual swaps during commissioning, maintenance, or controlled failover
+# tests. Toggling via this endpoint sets BOTH sides atomically so the
+# pair has a single coherent mode at all times.
+
+class SetPairOverrideRequest(BaseModel):
+    enable: bool
+
+
+@router.post("/devices/{device_id}/set-pair-override", response_model=DeviceResponse)
+def set_pair_override(
+    device_id: int,
+    body: SetPairOverrideRequest,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Toggle manual_override on both sides of a duty/standby pair.
+
+    When enabled, the worker's reconciliation loop excludes this pair, so
+    any manual swap (via /swap-duty or the UI) sticks until override is
+    disabled. When disabled, the worker resumes reconciliation on the
+    next cycle and will sync duty_role with the device-reported value.
+    """
+    row = db.execute(
+        text("SELECT id, redundant_device_id FROM devices WHERE id = :id"),
+        {"id": device_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(404, "device not found")
+    if row["redundant_device_id"] is None:
+        raise HTTPException(400, "device is not paired — manual override only applies to pairs")
+
+    ids = [device_id, row["redundant_device_id"]]
+    db.execute(
+        text("UPDATE devices SET manual_override = :v WHERE id = ANY(:ids)"),
+        {"v": body.enable, "ids": ids},
+    )
+    db.commit()
+
+    updated = db.execute(text(_DEVICE_SELECT + " WHERE d.id = :id"),
+                         {"id": device_id}).mappings().first()
+    return dict(updated)
+
+
+# ----------------------------------------------------------------------
+# Modbus diagnostics — raw register reads + scan
+# ----------------------------------------------------------------------
 
 import struct as _struct
 from pymodbus.client import ModbusTcpClient as _ModbusTcpClient

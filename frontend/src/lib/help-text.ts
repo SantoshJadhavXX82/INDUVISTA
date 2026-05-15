@@ -189,7 +189,7 @@ export const help = {
 
     transport: {
       description:
-        "Whether this channel uses TCP/IP (Ethernet) or a serial link (RS-232 / RS-485). Determines which other fields apply.",
+        "Whether this network uses TCP/IP (Ethernet) or a serial link (RS-232 / RS-485). Determines which other fields apply.",
       example: "TCP for modern PLCs, smart meters, gateways; RTU for legacy serial gas chromatographs",
       impact:
         "TCP shows host/port. RTU shows serial device / baud / parity / stop bits. ASCII is rarely used and mostly for legacy interop.",
@@ -197,9 +197,9 @@ export const help = {
 
     enabled: {
       description:
-        "When off, no devices on this channel will be polled. Useful for taking a comms link out of service for maintenance.",
+        "When off, no devices on this network will be polled. Useful for taking a comms link out of service for maintenance.",
       impact:
-        "Disabling a channel pauses every device that uses it. Workers stop scanning, no new samples, but historical data is preserved.",
+        "Disabling a network pauses every device that uses it. Workers stop scanning, no new samples, but historical data is preserved.",
     } satisfies HelpEntry,
 
     host: {
@@ -215,7 +215,7 @@ export const help = {
         "TCP port of the Modbus endpoint. Standard is 502 but many gateways and PLCs override.",
       example: "502 (standard), 1502 (often used by smart meters), 5020/5021 (this app's simulators)",
       impact:
-        "Mismatch with the device's listening port produces immediate connection-refused errors visible in the Channels diagnostics page.",
+        "Mismatch with the device's listening port produces immediate connection-refused errors visible in the Networks diagnostics page.",
     } satisfies HelpEntry,
 
     serial_device: {
@@ -285,9 +285,9 @@ export const help = {
 
     channel: {
       description:
-        "Which transport channel carries communication to this device. A device belongs to exactly one channel.",
+        "Which network carries communication to this device. A device belongs to exactly one network.",
       impact:
-        "Moving a device to a different channel changes the connection path. Worker reloads after save; brief gap in samples is expected.",
+        "Moving a device to a different network changes the connection path. Worker reloads after save; brief gap in samples is expected.",
     } satisfies HelpEntry,
 
     unit_id: {
@@ -333,7 +333,7 @@ export const help = {
 
     device: {
       description:
-        "Which device this block belongs to. Blocks scope to a single device, even if multiple devices share a channel.",
+        "Which device this block belongs to. Blocks scope to a single device, even if multiple devices share a network.",
     } satisfies HelpEntry,
 
     function_code: {
@@ -539,14 +539,14 @@ export const help = {
 
     worker_status: {
       description:
-        "Current state of the Modbus worker process for this channel/device.",
+        "Current state of the Modbus worker process for this network/device.",
       example:
         "RUNNING (polling normally), IDLE (no enabled tags), ERROR (last cycle failed), STOPPED (manually disabled)",
     } satisfies HelpEntry,
 
     frame_rate: {
       description:
-        "Modbus frames per second observed on this channel — outgoing requests and incoming responses combined.",
+        "Modbus frames per second observed on this network — outgoing requests and incoming responses combined.",
       impact:
         "A sustained drop usually means a comm failure. A spike usually means retries piling up — check error rate alongside.",
     } satisfies HelpEntry,

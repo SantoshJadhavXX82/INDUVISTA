@@ -16,6 +16,7 @@ import GlobalLayout from "@/pages/global/GlobalLayout";
 import EngineeringUnits from "@/pages/EngineeringUnits";
 import Groups from "@/pages/Groups";
 import NamedSets from "@/pages/NamedSets";
+import DutyStandbyValues from "@/pages/global/DutyStandbyValues";
 import ModbusLayout from "@/pages/modbus/ModbusLayout";
 
 export default function App() {
@@ -48,6 +49,7 @@ export default function App() {
           <Route path="engineering-units" element={<EngineeringUnits />} />
           <Route path="groups" element={<Groups />} />
           <Route path="named-sets" element={<NamedSets />} />
+          <Route path="duty-standby-values" element={<DutyStandbyValues />} />
         </Route>
 
         {/* Back-compat — old /config/* paths for Global moved out */}

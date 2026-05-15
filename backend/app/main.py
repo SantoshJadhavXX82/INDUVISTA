@@ -129,3 +129,9 @@ app.include_router(groups.router)
 app.include_router(named_sets.router)
 # Phase 8.5 router — tag writes + audit journal
 app.include_router(writes.router)
+# Phase 12.3 router — pair tags (duty/standby logical tags)
+from app.api import pair_tags as _pair_tags
+app.include_router(_pair_tags.router)
+# Phase 12.2 router — system settings (duty/standby value convention)
+from app.api import settings as _settings
+app.include_router(_settings.router)

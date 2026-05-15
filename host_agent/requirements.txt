@@ -1,0 +1,8 @@
+# InduVista host-stats agent dependencies.
+#
+# `psutil` does the cross-platform CPU/memory/disk/process snapshot.
+# `nvidia-ml-py` (a.k.a. pynvml) is optional — only needed if you have an
+#   NVIDIA GPU and want it shown on the Diagnostics page. The agent will
+#   gracefully detect its absence and just report empty GPU info.
+psutil>=6.0.0
+nvidia-ml-py>=12.0.0  # optional — remove if no NVIDIA GPU

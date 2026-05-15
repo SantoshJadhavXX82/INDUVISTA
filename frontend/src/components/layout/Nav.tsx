@@ -1,14 +1,23 @@
 /**
- * Sidebar navigation — Phase 8.5 reorganization.
+ * Sidebar navigation — Phase 11 reorganization.
  *
- * Top-level items are operations-focused (Diagnostics, Live Dashboard, Tag
- * Explorer, Data Gaps). Three sections group related tabs:
+ * Workflow-driven layout instead of protocol-driven. Order reflects the
+ * commissioning lifecycle plus daily access patterns:
  *
- *   Modbus TCP/IP  — Frame Inspector, Register Browser, Write Console, Write Audit
- *   Configuration  — Channels, Devices, Register Blocks   (sub-tabs inside /config)
- *   Global         — Engineering Units, Groups, Enumerations (sub-tabs inside /global;
- *                    storage layer still uses /api/named-sets — the UI label
- *                    "Enumerations" is to avoid DeltaV terminology collision)
+ *   SETUP     — Engineering Units, Groups, Enumerations
+ *               Master data set up FIRST when installing the system.
+ *               Stays at the top because it's conceptually the foundation
+ *               everything else references.
+ *   OPERATE   — Live Dashboard, Diagnostics, Data Gaps
+ *               Daily monitoring screens. What ops staff opens each hour.
+ *   EXPLORE   — Tag Explorer, Register Browser, Frame Inspector,
+ *               Write Console, Write Audit
+ *               Investigation tools. Used during commissioning and
+ *               post-incident analysis. Write Audit lives here as a
+ *               read-only history of writes — investigation, not config.
+ *   CONFIGURE — Networks, Devices, Register Blocks
+ *               Protocol-level setup. Touched during onboarding and
+ *               change-control.
  *
  * The section headings are visual only — the user clicks a leaf NavLink to
  * navigate. The /modbus, /config, and /global parent routes have their own
@@ -32,7 +41,9 @@ import {
   Ruler,
   Tag,
   Hash,
+  ArrowLeftRight,
   ServerCog,
+  Eye,
   type LucideIcon,
 } from "lucide-react";
 
@@ -55,47 +66,58 @@ type Section = {
 type NavEntry = Leaf | Section;
 
 const entries: NavEntry[] = [
-  // Operations
-  { kind: "leaf", to: "/diagnostics", label: "Diagnostics", icon: Activity },
-  { kind: "leaf", to: "/dashboard", label: "Live Dashboard", icon: Gauge },
-  { kind: "leaf", to: "/data-gaps", label: "Data Gaps", icon: AlertCircle },
-
-  // Modbus TCP/IP — live tools (includes Tag Explorer, which is currently
-  // a Modbus-flavored browser; revisit when a second protocol joins)
+  // SETUP — master/reference data that everything else points at. Always
+  // first: it's the foundation an installer touches before any device exists.
   {
     kind: "section",
-    label: "Modbus TCP/IP",
-    icon: Network,
-    children: [
-      { kind: "leaf", to: "/tags", label: "Tag Explorer", icon: ListTree, matchPrefix: "/tags" },
-      { kind: "leaf", to: "/modbus/frames", label: "Frame Inspector", icon: Radio, matchPrefix: "/modbus/frames" },
-      { kind: "leaf", to: "/modbus/registers", label: "Register Browser", icon: ScanLine, matchPrefix: "/modbus/registers" },
-      { kind: "leaf", to: "/modbus/write-console", label: "Write Console", icon: Zap, matchPrefix: "/modbus/write-console" },
-      { kind: "leaf", to: "/modbus/write-audit", label: "Write Audit", icon: FileClock, matchPrefix: "/modbus/write-audit" },
-    ],
-  },
-
-  // Configuration — protocol setup
-  {
-    kind: "section",
-    label: "Configuration",
-    icon: Settings,
-    children: [
-      { kind: "leaf", to: "/config/channels", label: "Channels", icon: ServerCog, matchPrefix: "/config/channels" },
-      { kind: "leaf", to: "/config/devices", label: "Devices", icon: ServerCog, matchPrefix: "/config/devices" },
-      { kind: "leaf", to: "/config/blocks", label: "Register Blocks", icon: ServerCog, matchPrefix: "/config/blocks" },
-    ],
-  },
-
-  // Global — cross-cutting reference data
-  {
-    kind: "section",
-    label: "Global",
+    label: "Setup",
     icon: Globe2,
     children: [
       { kind: "leaf", to: "/global/engineering-units", label: "Engineering Units", icon: Ruler, matchPrefix: "/global/engineering-units" },
       { kind: "leaf", to: "/global/groups", label: "Groups", icon: Tag, matchPrefix: "/global/groups" },
       { kind: "leaf", to: "/global/named-sets", label: "Enumerations", icon: Hash, matchPrefix: "/global/named-sets" },
+      { kind: "leaf", to: "/global/duty-standby-values", label: "Duty/Standby Values", icon: ArrowLeftRight, matchPrefix: "/global/duty-standby-values" },
+    ],
+  },
+
+  // OPERATE — daily monitoring. Live Dashboard first because that's what
+  // ops staff actually open at 3am, not Diagnostics.
+  {
+    kind: "section",
+    label: "Operate",
+    icon: Gauge,
+    children: [
+      { kind: "leaf", to: "/dashboard", label: "Live Dashboard", icon: Gauge },
+      { kind: "leaf", to: "/diagnostics", label: "Diagnostics", icon: Activity },
+      { kind: "leaf", to: "/data-gaps", label: "Data Gaps", icon: AlertCircle },
+    ],
+  },
+
+  // EXPLORE — investigation. Tag Explorer is the workhorse here, sits at
+  // top. Register Browser + Frame Inspector for protocol-level debugging.
+  // Write Audit moved here because it's investigation, not master data.
+  {
+    kind: "section",
+    label: "Explore",
+    icon: Eye,
+    children: [
+      { kind: "leaf", to: "/tags", label: "Tag Explorer", icon: ListTree, matchPrefix: "/tags" },
+      { kind: "leaf", to: "/modbus/registers", label: "Register Browser", icon: ScanLine, matchPrefix: "/modbus/registers" },
+      { kind: "leaf", to: "/modbus/frames", label: "Frame Inspector", icon: Radio, matchPrefix: "/modbus/frames" },
+      { kind: "leaf", to: "/modbus/write-console", label: "Write Console", icon: Zap, matchPrefix: "/modbus/write-console" },
+      { kind: "leaf", to: "/modbus/write-audit", label: "Write Audit", icon: FileClock, matchPrefix: "/modbus/write-audit" },
+    ],
+  },
+
+  // CONFIGURE — protocol setup. Hierarchy order: Channels → Devices → Blocks.
+  {
+    kind: "section",
+    label: "Configure",
+    icon: Settings,
+    children: [
+      { kind: "leaf", to: "/config/channels", label: "Networks", icon: Network, matchPrefix: "/config/channels" },
+      { kind: "leaf", to: "/config/devices", label: "Devices", icon: ServerCog, matchPrefix: "/config/devices" },
+      { kind: "leaf", to: "/config/blocks", label: "Register Blocks", icon: ListTree, matchPrefix: "/config/blocks" },
     ],
   },
 ];

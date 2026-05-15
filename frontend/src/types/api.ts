@@ -89,6 +89,84 @@ export type StaleTag = {
   st_reason: string | null;
 };
 
+// Phase 12.6 — system resources (Diagnostics page)
+export type CpuStats = {
+  percent: number;
+  count_logical: number;
+  count_physical: number | null;
+  load_average: number[] | null;
+};
+
+export type MemoryStats = {
+  total_bytes: number;
+  used_bytes: number;
+  available_bytes: number;
+  cached_bytes: number;
+  percent: number;
+};
+
+export type DiskUsage = {
+  mountpoint: string;
+  device: string | null;
+  fstype: string | null;
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  percent: number;
+};
+
+export type GpuStats = {
+  index: number;
+  name: string;
+  utilization_percent: number;
+  memory_total_bytes: number;
+  memory_used_bytes: number;
+  memory_percent: number;
+  temperature_c: number | null;
+};
+
+export type ProcessInfo = {
+  pid: number;
+  name: string;
+  cpu_percent: number;
+  memory_bytes: number;
+  memory_percent: number;
+  threads: number;
+  started_at: string | null;
+  is_self: boolean;
+};
+
+export type SystemStats = {
+  // 'host' = pushed in by the host-agent (real Task Manager / top numbers).
+  // 'container' = fallback from psutil inside the backend container.
+  scope: "host" | "container";
+  hostname: string | null;
+  platform: string | null;          // "Windows" / "Linux" / "Darwin"
+  host_agent_last_seen_sec: number | null;
+  timestamp: string;
+  uptime_sec: number;
+  cpu: CpuStats;
+  memory: MemoryStats;
+  disks: DiskUsage[];
+  gpus: GpuStats[];
+  top_processes: ProcessInfo[];
+};
+
+export type OutOfRangeTag = {
+  tag_id: number;
+  tag_name: string;
+  device_id: number;
+  device_name: string;
+  value_double: number | null;
+  engineering_unit: string | null;
+  min_value: number | null;
+  max_value: number | null;
+  violation: "LOW" | "HIGH";
+  last_seen: string;
+  st: number;
+  st_reason: string | null;
+};
+
 export type LiveTag = {
   tag_id: number;
   tag_name: string;
@@ -133,6 +211,37 @@ export type LiveTag = {
   st: number | null;
   st_reason: string | null;
   time: string | null;
+  age_seconds: number | null;
+};
+
+// Phase 12.3 — pair tag live view. One row per (pair, name), resolved
+// to whichever side of the pair is currently the duty.
+export type PairTagLive = {
+  kind: "pair";
+  pair_tag_id: number;
+  tag_name: string;
+  data_type: string;
+  function_code: number;
+  address: number;
+  engineering_unit: string | null;
+  // The "active" side is whoever is currently duty.
+  active_device_id: number | null;
+  active_device_name: string | null;
+  active_tag_id: number | null;
+  // Both sides of the pair, for context display.
+  primary_device_id: number;
+  primary_device_name: string;
+  primary_device_duty_role: string;
+  partner_device_id: number;
+  partner_device_name: string;
+  partner_device_duty_role: string;
+  /** Phase 12.5 — true if either side has manual_override set. */
+  pair_manual_override: boolean;
+  value_double: number | null;
+  value_text: string | null;
+  time: string | null;
+  st: number | null;
+  st_reason: string | null;
   age_seconds: number | null;
 };
 

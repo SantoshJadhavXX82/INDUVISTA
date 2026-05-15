@@ -11,3 +11,4 @@ pydantic==2.10.0
 pydantic-settings==2.6.0
 pymodbus==3.7.4
 redis==5.0.8
+psutil==6.1.0

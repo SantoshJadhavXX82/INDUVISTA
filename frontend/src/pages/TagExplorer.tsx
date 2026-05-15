@@ -15,15 +15,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { Search, Trash2, AlertCircle, Plus, Upload, Download } from "lucide-react";
+import { Search, Trash2, AlertCircle, Plus, Upload, Download, RefreshCw } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { type LiveTag, type BulkResult } from "@/types/api";
+import { type LiveTag, type PairTagLive, type BulkResult } from "@/types/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
-import { DeviceTabs } from "@/components/ui/device-tabs";
+import { DevicePicker } from "@/components/ui/device-picker";
 import { CsvImportContent, type ImportRowResult, exportCsv } from "@/components/ui/csv-import";
 import { AddressHelper } from "@/components/forms/address-helper";
 import { ByteOrderHelp } from "@/components/forms/byte-order-help";
@@ -44,6 +44,7 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { formatTagValue } from "@/lib/format";
+import { TagQualityBadge } from "@/components/tags/tag-quality-badge";
 
 type Device = { id: number; name: string };
 type RegisterBlock = {
@@ -71,6 +72,11 @@ export default function TagExplorer() {
   const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
   const [creatingTag, setCreatingTag] = useState(false);
   const [importing, setImporting] = useState(false);
+
+  // Phase 12.3 — Tag Explorer view mode tab strip.
+  //   'all'  → physical tags + pair tags interleaved (pair tags with PAIR badge)
+  //   'pair' → pair tags only
+  const [viewMode, setViewMode] = useState<"all" | "pair">("all");
 
   // Phase 7 C4 — Register Browser handoff. When the user clicks "Create tag"
   // from /registers we receive ?create_from=N&fc=X&byte_order=Y&device_id=Z
@@ -113,6 +119,14 @@ export default function TagExplorer() {
     refetchInterval: 5_000,
   });
 
+  // Phase 12.3 — pair tags (logical tags derived from duty/standby device
+  // pairs). Same refresh cadence so values stay in sync.
+  const pairTags = useQuery({
+    queryKey: ["pair-tags", "live"],
+    queryFn: () => api.get<PairTagLive[]>("/pair-tags/live"),
+    refetchInterval: 5_000,
+  });
+
   // Phase 8.3 — for resolving display_text alongside live values
   const { map: namedSetMap } = useNamedSetMap();
 
@@ -152,6 +166,30 @@ export default function TagExplorer() {
       counts[t.device_id] = (counts[t.device_id] ?? 0) + 1;
     });
     return counts;
+  }, [tags.data]);
+
+  // Phase 11 — Per-device health aggregation for the DevicePicker dots.
+  // Rule: error > stale > good > unknown. Worst tag wins so any failing
+  // tag flashes red at the device-picker level.
+  const healthByDevice = useMemo(() => {
+    const ST_READ_OK = 128;
+    const STALE_SEC = 30;
+    const h: Record<number, "good" | "stale" | "error" | "unknown"> = {};
+    tags.data?.forEach((t) => {
+      let state: "good" | "stale" | "error" | "unknown" = "unknown";
+      if (t.st !== null && t.age_seconds !== null) {
+        if (t.st !== ST_READ_OK) state = "error";
+        else if (t.age_seconds > STALE_SEC) state = "stale";
+        else state = "good";
+      }
+      const prev = h[t.device_id];
+      // worst-wins ordering
+      const rank = { error: 3, stale: 2, good: 1, unknown: 0 };
+      if (!prev || rank[state] > rank[prev]) {
+        h[t.device_id] = state;
+      }
+    });
+    return h;
   }, [tags.data]);
 
   // Master checkbox indeterminate state — three-way: all/some/none selected
@@ -198,6 +236,54 @@ export default function TagExplorer() {
     },
   });
 
+  // Phase 12.4 — Pair-level swap. Click the button in any Pair section
+  // header to flip duty/standby for that pair. Uses /devices/{id}/swap-duty
+  // with reason='manual' and a default note identifying the trigger.
+  // We invalidate pair-tags and devices so the table re-resolves to the
+  // new active side within one refetch.
+  const swapPair = useMutation({
+    mutationFn: (deviceId: number) =>
+      api.post(`/devices/${deviceId}/swap-duty`, {
+        reason: "manual",
+        notes: "Swapped from Tag Explorer pair header",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pair-tags", "live"] });
+      queryClient.invalidateQueries({ queryKey: ["devices"] });
+      queryClient.invalidateQueries({ queryKey: ["live"] });
+    },
+  });
+
+  // Phase 12.4 — refresh pair tags. Auto-gen only runs at /pair time, so
+  // tags added to either device after pairing don't appear as pair tags
+  // until a regenerate call. This button surfaces that operation.
+  const regeneratePairs = useMutation({
+    mutationFn: () =>
+      api.post<{ pairs_processed: number; created: number; deleted_orphans: number }>(
+        "/pair-tags/regenerate", {},
+      ),
+    onSuccess: (r) => {
+      queryClient.invalidateQueries({ queryKey: ["pair-tags", "live"] });
+      queryClient.invalidateQueries({ queryKey: ["pair-tags"] });
+      // Brief inline feedback via toast-less state below.
+      setRegenResult(`Refreshed: ${r.created} added, ${r.deleted_orphans} removed.`);
+      setTimeout(() => setRegenResult(null), 4000);
+    },
+  });
+  const [regenResult, setRegenResult] = useState<string | null>(null);
+
+  // Phase 12.5 — toggle manual override for a pair from the Tag Explorer
+  // pair header. Used inline so operators can take/release control without
+  // diving into the device drawer.
+  const togglePairOverride = useMutation({
+    mutationFn: (vars: { deviceId: number; enable: boolean }) =>
+      api.post(`/devices/${vars.deviceId}/set-pair-override`, { enable: vars.enable }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["pair-tags", "live"] });
+      queryClient.invalidateQueries({ queryKey: ["devices"] });
+    },
+  });
+
   const selectedTag = useMemo(
     () => filtered.find((t) => t.tag_id === selectedTagId) ?? tags.data?.find((t) => t.tag_id === selectedTagId),
     [filtered, tags.data, selectedTagId],
@@ -212,13 +298,75 @@ export default function TagExplorer() {
         </p>
       </div>
 
-      {/* Device tabs */}
-      <DeviceTabs
-        devices={devices.data ?? []}
-        value={deviceId ? parseInt(deviceId, 10) : null}
-        onChange={(id) => setDeviceId(id === null ? "" : String(id))}
-        counts={countsByDevice}
-      />
+      {/* Phase 12.3 — view tab strip. "All Tags" interleaves pair tags
+          and physical tags with a PAIR/PHYS badge; "Pair Tags" focuses on
+          just the duty/standby logical tags. The Pair Tags tab is hidden
+          when no pairs exist (avoids an empty-state surprise). */}
+      <div className="flex gap-1 border-b -mb-2">
+        <button
+          type="button"
+          onClick={() => setViewMode("all")}
+          className={cn(
+            "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+            viewMode === "all"
+              ? "border-foreground text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground",
+          )}
+        >
+          All tags
+          <span className="ml-2 text-xs text-muted-foreground tabular-nums">
+            {(tags.data?.length ?? 0) + (pairTags.data?.length ?? 0)}
+          </span>
+        </button>
+        {(pairTags.data?.length ?? 0) > 0 && (
+          <button
+            type="button"
+            onClick={() => setViewMode("pair")}
+            className={cn(
+              "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+              viewMode === "pair"
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            Pair tags
+            <span className="ml-2 text-xs text-muted-foreground tabular-nums">
+              {pairTags.data?.length ?? 0}
+            </span>
+          </button>
+        )}
+        {/* Phase 12.4 — refresh pair tags. Catches the case where tags
+            were added to paired devices after the original /pair call,
+            since auto-gen only fires at pairing time. */}
+        {(pairTags.data?.length ?? 0) > 0 && (
+          <div className="ml-auto flex items-center gap-2 pb-1">
+            {regenResult && (
+              <span className="text-xs text-emerald-700">{regenResult}</span>
+            )}
+            <button
+              type="button"
+              onClick={() => regeneratePairs.mutate()}
+              disabled={regeneratePairs.isPending}
+              title="Re-scan paired devices for newly added matching tags"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-input bg-background hover:bg-secondary text-xs font-medium disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw className={cn("h-3 w-3", regeneratePairs.isPending && "animate-spin")} />
+              {regeneratePairs.isPending ? "Refreshing…" : "Refresh pair tags"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Device picker — searchable combobox with health overview */}
+      <div>
+        <DevicePicker
+          devices={devices.data ?? []}
+          value={deviceId ? parseInt(deviceId, 10) : null}
+          onChange={(id) => setDeviceId(id === null ? "" : String(id))}
+          counts={countsByDevice}
+          deviceHealth={healthByDevice}
+        />
+      </div>
 
       {/* Bulk action bar — visible only when at least one tag is selected */}
       {selectedTagIds.size > 0 && (
@@ -308,94 +456,315 @@ export default function TagExplorer() {
                 <TableHead>Type</TableHead>
                 <TableHead>Unit</TableHead>
                 <TableHead className="text-right">Current</TableHead>
+                <TableHead>Quality</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((t) => (
-                <TableRow
-                  key={t.tag_id}
-                  onClick={() => setSelectedTagId(t.tag_id)}
-                  className={cn(
-                    "cursor-pointer",
-                    selectedTagIds.has(t.tag_id) && "bg-secondary/40",
-                  )}
-                >
-                  <TableCell onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 cursor-pointer"
-                      checked={selectedTagIds.has(t.tag_id)}
-                      onChange={() => toggleTag(t.tag_id)}
-                      aria-label={`Select ${t.tag_name}`}
-                    />
-                  </TableCell>
-                  <TableCell className="font-medium">
-                    <span className="inline-flex items-center gap-1.5">
-                      {t.tag_name}
-                      {t.is_heartbeat && (
-                        <span
-                          className="text-rose-500"
-                          title={`Heartbeat watch · stale after ${t.heartbeat_max_stale_sec ?? "?"}s`}
-                        >
-                          ♥
-                        </span>
-                      )}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap gap-1">
-                      {t.groups.slice(0, 2).map((g) => (
-                        <span
-                          key={g}
-                          className="inline-flex items-center rounded bg-secondary px-1.5 py-0.5 text-[10px]"
-                        >
-                          {g}
-                        </span>
-                      ))}
-                      {t.groups.length > 2 && (
-                        <span className="text-[10px] text-muted-foreground">
-                          +{t.groups.length - 2}
-                        </span>
-                      )}
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{t.device_name}</TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">{t.function_code}</TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">{t.address}</TableCell>
-                  <TableCell className="text-xs">{t.data_type}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    {t.engineering_unit ?? "—"}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">
-                    {(() => {
-                      // Phase 8.3 — named-set resolution. If the tag is mapped
-                      // to a set and the current raw value matches an entry,
-                      // show "Running (1)" instead of "1".
-                      const resolved = resolveNamedSet(
-                        namedSetMap,
-                        t.named_set_id,
-                        t.value_double === null ? null : Math.round(t.value_double),
-                      );
-                      if (resolved) {
-                        return (
-                          <span className="inline-flex items-center gap-1.5 justify-end">
-                            <span
-                              className="text-xs font-medium"
-                              style={resolved.color ? { color: resolved.color } : undefined}
-                            >
-                              {resolved.text}
-                            </span>
-                            <span className="text-[10px] text-muted-foreground tabular-nums">
-                              ({formatValue(t.value_double, t.value_text, t.data_type)})
-                            </span>
+              {(() => {
+                /* Phase 11 — device grouping. When viewing all devices,
+                   insert a sticky-ish header row before each device's tags
+                   to make ownership visually obvious. With ~250 tags spread
+                   across 5 devices, the alternative (one undifferentiated
+                   list) makes it easy to lose track of which physical
+                   instrument a tag belongs to. */
+
+                /* Phase 12.3 — pair-tag row renderer. Pair tags are NOT
+                   editable (they're a virtual view over two physical tags),
+                   so the checkbox column is rendered as empty and clicks on
+                   the row are no-ops. The Quality column shows the live
+                   value's quality from the currently-active (duty) side. */
+                const renderPairRow = (pt: PairTagLive) => {
+                  const ST_READ_OK = 128;
+                  const STALE_SEC = 30;
+                  return (
+                    <TableRow
+                      key={`pair-${pt.pair_tag_id}`}
+                      className="bg-blue-50/30 hover:bg-blue-50/50 cursor-default"
+                    >
+                      <TableCell />
+                      <TableCell className="font-medium">
+                        <span className="inline-flex items-center gap-1.5">
+                          {pt.tag_name}
+                          <span className="inline-flex items-center rounded bg-blue-100 text-blue-800 px-1.5 py-0.5 text-[9px] font-medium tracking-wider">
+                            PAIR
                           </span>
+                        </span>
+                      </TableCell>
+                      <TableCell />
+                      <TableCell className="text-xs">
+                        <span className="text-emerald-700 font-medium">
+                          {pt.active_device_name ?? "—"}
+                        </span>
+                        {pt.active_device_name && (
+                          <span className="ml-1 text-muted-foreground">(duty)</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{pt.function_code}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{pt.address}</TableCell>
+                      <TableCell className="text-xs">{pt.data_type}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {pt.engineering_unit ?? "—"}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {formatValue(pt.value_double, pt.value_text, pt.data_type)}
+                      </TableCell>
+                      <TableCell>
+                        <TagQualityBadge
+                          st={pt.st}
+                          st_reason={pt.st_reason}
+                          age_seconds={pt.age_seconds}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  );
+                };
+
+                const renderRow = (t: LiveTag) => (
+                  <TableRow
+                    key={t.tag_id}
+                    onClick={() => setSelectedTagId(t.tag_id)}
+                    className={cn(
+                      "cursor-pointer",
+                      selectedTagIds.has(t.tag_id) && "bg-secondary/40",
+                    )}
+                  >
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 cursor-pointer"
+                        checked={selectedTagIds.has(t.tag_id)}
+                        onChange={() => toggleTag(t.tag_id)}
+                        aria-label={`Select ${t.tag_name}`}
+                      />
+                    </TableCell>
+                    <TableCell className="font-medium">
+                      <span className="inline-flex items-center gap-1.5">
+                        {t.tag_name}
+                        {t.is_heartbeat && (
+                          <span
+                            className="text-rose-500"
+                            title={`Heartbeat watch · stale after ${t.heartbeat_max_stale_sec ?? "?"}s`}
+                          >
+                            ♥
+                          </span>
+                        )}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        {t.groups.slice(0, 2).map((g) => (
+                          <span
+                            key={g}
+                            className="inline-flex items-center rounded bg-secondary px-1.5 py-0.5 text-[10px]"
+                          >
+                            {g}
+                          </span>
+                        ))}
+                        {t.groups.length > 2 && (
+                          <span className="text-[10px] text-muted-foreground">
+                            +{t.groups.length - 2}
+                          </span>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{t.device_name}</TableCell>
+                    <TableCell className="text-right tabular-nums text-xs">{t.function_code}</TableCell>
+                    <TableCell className="text-right tabular-nums text-xs">{t.address}</TableCell>
+                    <TableCell className="text-xs">{t.data_type}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {t.engineering_unit ?? "—"}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {(() => {
+                        const resolved = resolveNamedSet(
+                          namedSetMap,
+                          t.named_set_id,
+                          t.value_double === null ? null : Math.round(t.value_double),
                         );
-                      }
-                      return formatValue(t.value_double, t.value_text, t.data_type);
-                    })()}
-                  </TableCell>
-                </TableRow>
-              ))}
+                        if (resolved) {
+                          return (
+                            <span className="inline-flex items-center gap-1.5 justify-end">
+                              <span
+                                className="text-xs font-medium"
+                                style={resolved.color ? { color: resolved.color } : undefined}
+                              >
+                                {resolved.text}
+                              </span>
+                              <span className="text-[10px] text-muted-foreground tabular-nums">
+                                ({formatValue(t.value_double, t.value_text, t.data_type)})
+                              </span>
+                            </span>
+                          );
+                        }
+                        return formatValue(t.value_double, t.value_text, t.data_type);
+                      })()}
+                    </TableCell>
+                    <TableCell>
+                      <TagQualityBadge
+                        st={t.st}
+                        st_reason={t.st_reason}
+                        age_seconds={t.age_seconds}
+                      />
+                    </TableCell>
+                  </TableRow>
+                );
+
+                if (deviceId !== "") {
+                  // Specific device — flat layout.
+                  // In 'pair' view show only pair tags involving this device;
+                  // in 'all' view show pair tags first, then physical rows.
+                  const did = parseInt(deviceId, 10);
+                  const pairsForDevice = (pairTags.data ?? []).filter(
+                    (pt) =>
+                      pt.primary_device_id === did || pt.partner_device_id === did,
+                  ).filter(
+                    (pt) =>
+                      !search || pt.tag_name.toLowerCase().includes(search.toLowerCase()),
+                  );
+                  if (viewMode === "pair") {
+                    return pairsForDevice.map(renderPairRow);
+                  }
+                  return [
+                    ...pairsForDevice.map(renderPairRow),
+                    ...filtered.map(renderRow),
+                  ];
+                }
+
+                // All devices selected.
+                const allPairs = (pairTags.data ?? []).filter(
+                  (pt) =>
+                    !search || pt.tag_name.toLowerCase().includes(search.toLowerCase()),
+                );
+
+                // Group pair tags by pair (primary_device_id, partner_device_id)
+                const pairMap = new Map<string, { label: string; rows: PairTagLive[] }>();
+                for (const pt of allPairs) {
+                  const key = `${pt.primary_device_id}-${pt.partner_device_id}`;
+                  const label = `Pair: ${pt.primary_device_name} ⇄ ${pt.partner_device_name}`;
+                  const g = pairMap.get(key);
+                  if (g) g.rows.push(pt);
+                  else pairMap.set(key, { label, rows: [pt] });
+                }
+                const pairGroups = Array.from(pairMap.entries())
+                  .map(([k, g]) => ({ key: k, label: g.label, rows: g.rows }))
+                  .sort((a, b) => a.label.localeCompare(b.label));
+
+                const pairSection = pairGroups.flatMap((g) => {
+                  const headRow = g.rows[0];
+                  const inManualOverride = !!headRow.pair_manual_override;
+                  const primaryId = headRow.primary_device_id;
+                  return [
+                  <TableRow key={`pair-hdr-${g.key}`} className="bg-muted/30 hover:bg-muted/30">
+                    <TableCell colSpan={10} className="py-1.5 text-xs">
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <span className="font-semibold flex items-center gap-2 flex-wrap">
+                          {g.label}
+                          <span className="font-normal text-muted-foreground tabular-nums">
+                            {g.rows.length} pair tag{g.rows.length === 1 ? "" : "s"}
+                          </span>
+                          {/* Phase 12.5 — mode badge */}
+                          <span className={cn(
+                            "text-[10px] font-medium px-1.5 py-0.5 rounded",
+                            inManualOverride
+                              ? "bg-amber-100 text-amber-900 border border-amber-300"
+                              : "bg-slate-100 text-slate-700"
+                          )}>
+                            {inManualOverride ? "⚠ MANUAL OVERRIDE" : "AUTO (device-led)"}
+                          </span>
+                        </span>
+                        <div className="flex items-center gap-2">
+                          {/* Swap button — only available in manual override.
+                              In auto mode a swap would just be reconciled back
+                              within ~5s, so we hide it to avoid confusion. */}
+                          {inManualOverride && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                swapPair.mutate(primaryId);
+                              }}
+                              disabled={swapPair.isPending}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded border border-input bg-background hover:bg-secondary text-xs font-medium disabled:opacity-50 transition-colors"
+                              title="Swap duty/standby roles for this pair"
+                            >
+                              <svg
+                                className={cn("h-3 w-3", swapPair.isPending && "animate-spin")}
+                                viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                              >
+                                <path d="m16 3 4 4-4 4" />
+                                <path d="M20 7H4" />
+                                <path d="m8 21-4-4 4-4" />
+                                <path d="M4 17h16" />
+                              </svg>
+                              {swapPair.isPending ? "Swapping…" : "Swap duty"}
+                            </button>
+                          )}
+                          {/* Mode toggle — take/release manual control */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              togglePairOverride.mutate({
+                                deviceId: primaryId,
+                                enable: !inManualOverride,
+                              });
+                            }}
+                            disabled={togglePairOverride.isPending}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-medium disabled:opacity-50 transition-colors",
+                              inManualOverride
+                                ? "border-input bg-background hover:bg-secondary"
+                                : "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                            )}
+                            title={inManualOverride
+                              ? "Return to auto — worker will reconcile to device-reported value"
+                              : "Take manual control — worker reconciliation suspended for this pair"}
+                          >
+                            {togglePairOverride.isPending
+                              ? "Switching…"
+                              : inManualOverride
+                              ? "Return to auto"
+                              : "Take manual control"}
+                          </button>
+                        </div>
+                      </div>
+                    </TableCell>
+                  </TableRow>,
+                  ...g.rows.map(renderPairRow),
+                  ];
+                });
+
+                if (viewMode === "pair") {
+                  // Pair-tags-only view.
+                  return pairSection;
+                }
+
+                // All tags — group physical by device with header rows.
+                const groupMap = new Map<number, { name: string; rows: LiveTag[] }>();
+                for (const t of filtered) {
+                  const g = groupMap.get(t.device_id);
+                  if (g) g.rows.push(t);
+                  else groupMap.set(t.device_id, { name: t.device_name, rows: [t] });
+                }
+                const groups = Array.from(groupMap.entries())
+                  .map(([id, g]) => ({ id, name: g.name, rows: g.rows }))
+                  .sort((a, b) => a.name.localeCompare(b.name));
+
+                const physicalSection = groups.flatMap((g) => [
+                  <TableRow key={`hdr-${g.id}`} className="bg-muted/30 hover:bg-muted/30">
+                    <TableCell colSpan={10} className="py-1.5 text-xs font-semibold">
+                      {g.name}
+                      <span className="ml-2 font-normal text-muted-foreground tabular-nums">
+                        {g.rows.length} tag{g.rows.length === 1 ? "" : "s"}
+                      </span>
+                    </TableCell>
+                  </TableRow>,
+                  ...g.rows.map(renderRow),
+                ]);
+
+                return [...pairSection, ...physicalSection];
+              })()}
             </TableBody>
           </Table>
           {filtered.length === 0 && tags.data && (
@@ -836,6 +1205,10 @@ function BulkDeleteResults({
 // --------------------------------------------------------------------------
 
 type EditableFields = {
+  // Phase 11 — tag name editable. The integer tag_id is the immutable
+  // identity for the historian; renaming only updates the human-readable
+  // label, preserving all references.
+  name: string;
   description: string;
   // Phase 8.1 — dual-source unit. Exactly one of these is set (or both null).
   engineering_unit_id: number | null;
@@ -913,6 +1286,8 @@ function TagEditPanel({
     // Build a diff of changed fields only — avoid sending unchanged values.
     const original = seedForm(tag);
     const body: Record<string, unknown> = {};
+    if (form.name !== original.name)
+      body.name = form.name;
     if (form.description !== original.description)
       body.description = form.description || null;
     if (form.engineering_unit !== original.engineering_unit)
@@ -972,6 +1347,23 @@ function TagEditPanel({
       {/* Editable */}
       <section className="space-y-3 pt-2 border-t">
         <h3 className="text-sm font-semibold">Editable</h3>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="name">
+            Name
+            <span className="text-xs text-muted-foreground ml-1">
+              (renaming preserves history)
+            </span>
+          </Label>
+          <Input
+            id="name"
+            value={form.name}
+            onChange={(e) => setForm({ ...form, name: e.target.value })}
+            required
+            minLength={1}
+            maxLength={100}
+          />
+        </div>
 
         <div className="space-y-1.5">
           <Label htmlFor="description">
@@ -1250,6 +1642,7 @@ function DT({ label, children }: { label: string; children: React.ReactNode }) {
 
 function seedForm(tag: LiveTag): EditableFields {
   return {
+    name: tag.tag_name,
     description: tag.description ?? "",
     // Phase 8.1 — prefer FK, fall back to override; only one is set in DB at a time.
     engineering_unit_id: tag.engineering_unit_id,
