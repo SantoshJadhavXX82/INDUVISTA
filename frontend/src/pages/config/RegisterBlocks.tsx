@@ -20,7 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
 import { HelpTip } from "@/components/ui/help-tip";
 import { help } from "@/lib/help-text";
-import { DeviceTabs } from "@/components/ui/device-tabs";
+import { DevicePicker } from "@/components/ui/device-picker";
 import { CsvImportContent, type ImportRowResult, exportCsv } from "@/components/ui/csv-import";
 import {
   Table,
@@ -30,6 +30,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { BlockCoverageMap } from "@/components/blocks/block-coverage-map";
 
 type RegisterBlock = {
   id: number;
@@ -93,12 +94,14 @@ export default function RegisterBlocks() {
 
   return (
     <div className="space-y-3">
-      <DeviceTabs
-        devices={devices.data ?? []}
-        value={activeDeviceId}
-        onChange={setActiveDeviceId}
-        counts={countsByDevice}
-      />
+      <div>
+        <DevicePicker
+          devices={devices.data ?? []}
+          value={activeDeviceId}
+          onChange={setActiveDeviceId}
+          counts={countsByDevice}
+        />
+      </div>
 
       <div className="flex justify-between items-center">
         <span className="text-sm text-muted-foreground">
@@ -134,24 +137,72 @@ export default function RegisterBlocks() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredBlocks.map((b) => (
-                <TableRow
-                  key={b.id}
-                  onClick={() => setEditing(b)}
-                  className="cursor-pointer"
-                >
-                  <TableCell className="font-medium">{b.name}</TableCell>
-                  <TableCell className="text-xs">{b.device_name}</TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">{b.function_code}</TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">{b.start_address}</TableCell>
-                  <TableCell className="text-right tabular-nums text-xs">{b.count}</TableCell>
-                  <TableCell>
-                    <Badge variant={b.enabled ? "success" : "secondary"} className="text-xs">
-                      {b.enabled ? "enabled" : "disabled"}
-                    </Badge>
-                  </TableCell>
-                </TableRow>
-              ))}
+              {/* Phase 11 — when "All devices" is selected, intersperse a
+                  device-name section header between groups so it's visually
+                  obvious which block belongs to which device. */}
+              {(() => {
+                if (activeDeviceId !== null) {
+                  // Specific device filter — no grouping needed.
+                  return filteredBlocks.map((b) => (
+                    <TableRow
+                      key={b.id}
+                      onClick={() => setEditing(b)}
+                      className="cursor-pointer"
+                    >
+                      <TableCell className="font-medium">{b.name}</TableCell>
+                      <TableCell className="text-xs">{b.device_name}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{b.function_code}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{b.start_address}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{b.count}</TableCell>
+                      <TableCell>
+                        <Badge variant={b.enabled ? "success" : "secondary"} className="text-xs">
+                          {b.enabled ? "enabled" : "disabled"}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ));
+                }
+
+                // Group by device when viewing all.
+                const groupMap = new Map<number, { name: string; rows: typeof filteredBlocks }>();
+                for (const b of filteredBlocks) {
+                  const g = groupMap.get(b.device_id);
+                  if (g) g.rows.push(b);
+                  else groupMap.set(b.device_id, { name: b.device_name, rows: [b] });
+                }
+                const groups = Array.from(groupMap.entries())
+                  .map(([id, g]) => ({ id, name: g.name, rows: g.rows }))
+                  .sort((a, b) => a.name.localeCompare(b.name));
+
+                return groups.flatMap((g) => [
+                  <TableRow key={`hdr-${g.id}`} className="bg-muted/30 hover:bg-muted/30">
+                    <TableCell colSpan={6} className="py-1.5 text-xs font-semibold">
+                      {g.name}
+                      <span className="ml-2 font-normal text-muted-foreground tabular-nums">
+                        {g.rows.length} block{g.rows.length === 1 ? "" : "s"}
+                      </span>
+                    </TableCell>
+                  </TableRow>,
+                  ...g.rows.map((b) => (
+                    <TableRow
+                      key={b.id}
+                      onClick={() => setEditing(b)}
+                      className="cursor-pointer"
+                    >
+                      <TableCell className="font-medium pl-6">{b.name}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{b.device_name}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{b.function_code}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{b.start_address}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">{b.count}</TableCell>
+                      <TableCell>
+                        <Badge variant={b.enabled ? "success" : "secondary"} className="text-xs">
+                          {b.enabled ? "enabled" : "disabled"}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  )),
+                ]);
+              })()}
             </TableBody>
           </Table>
         </CardContent>
@@ -401,6 +452,8 @@ function BlockForm({
       }}
       className="space-y-4"
     >
+      {!isNew && block && <BlockCoveragePanel block={block} />}
+
       <div className="space-y-1.5">
         <Label htmlFor="name">
           Name <HelpTip entry={help.block.name} />
@@ -723,4 +776,50 @@ function filenameStamp(): string {
   const d = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+
+// =============================================================================
+// Phase 11 — Block Coverage Panel
+// =============================================================================
+type CoverageTag = {
+  id: number;
+  name: string;
+  address: number;
+  register_count: number;
+  data_type: string;
+};
+
+function BlockCoveragePanel({ block }: { block: RegisterBlock }) {
+  const tags = useQuery({
+    queryKey: ["tags-for-block", block.id],
+    queryFn: () => api.get<CoverageTag[]>(`/tags?register_block_id=${block.id}`),
+  });
+
+  if (tags.isPending) {
+    return (
+      <div className="rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
+        Loading coverage…
+      </div>
+    );
+  }
+  if (tags.isError || !tags.data) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium">Coverage</span>
+        <span className="text-[10px] text-muted-foreground uppercase tracking-wide">
+          {block.addressing_mode === "STANDARD" ? "Standard" : "Enron"}
+        </span>
+      </div>
+      <BlockCoverageMap
+        start_address={block.start_address}
+        count={block.count}
+        addressing_mode={block.addressing_mode}
+        tags={tags.data}
+      />
+    </div>
+  );
 }

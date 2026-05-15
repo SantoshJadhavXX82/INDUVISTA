@@ -57,11 +57,11 @@ export default function Channels() {
     <div className="space-y-3">
       <div className="flex justify-between items-center">
         <span className="text-sm text-muted-foreground">
-          {channels.data ? `${channels.data.length} channels` : "Loading…"}
+          {channels.data ? `${channels.data.length} network${channels.data.length === 1 ? "" : "s"}` : "Loading…"}
         </span>
         <Button onClick={() => setEditing("new")} size="sm">
           <Plus className="h-4 w-4 mr-1.5" />
-          Add channel
+          Add network
         </Button>
       </div>
 
@@ -105,7 +105,7 @@ export default function Channels() {
       <Drawer
         open={editing !== null}
         onClose={() => setEditing(null)}
-        title={editing === "new" ? "New channel" : `Channel: ${editing && editing !== "new" ? editing.name : ""}`}
+        title={editing === "new" ? "New network" : `Network: ${editing && editing !== "new" ? editing.name : ""}`}
       >
         {editing !== null && (
           <ChannelForm
@@ -266,7 +266,7 @@ function ChannelForm({
               className="h-4 w-4"
             />
             <span className="text-muted-foreground">
-              {form.enabled ? "enabled (workers will poll devices on this channel)" : "disabled"}
+              {form.enabled ? "enabled (workers will poll devices on this network)" : "disabled"}
             </span>
           </label>
         </div>
@@ -281,15 +281,15 @@ function ChannelForm({
 
       <div className="flex gap-2">
         <Button type="submit" disabled={save.isPending}>
-          {save.isPending ? "Saving…" : isNew ? "Create channel" : "Save changes"}
+          {save.isPending ? "Saving…" : isNew ? "Create network" : "Save changes"}
         </Button>
       </div>
 
       {!isNew && (
         <section className="pt-4 border-t border-red-100">
-          <h3 className="text-sm font-semibold text-red-700">Delete channel</h3>
+          <h3 className="text-sm font-semibold text-red-700">Delete network</h3>
           <p className="text-xs text-muted-foreground mt-1 mb-2">
-            Channels with devices can't be deleted — delete the devices first. Type{" "}
+            Networks with devices can't be deleted — delete the devices first. Type{" "}
             <code className="font-mono bg-secondary px-1 rounded">{channel.name}</code> to confirm.
           </p>
           <div className="flex gap-2">

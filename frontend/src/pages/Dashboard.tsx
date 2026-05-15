@@ -17,7 +17,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Sparkline } from "@/components/ui/sparkline";
-import { DeviceTabs } from "@/components/ui/device-tabs";
+import { DevicePicker } from "@/components/ui/device-picker";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -74,13 +74,32 @@ export default function Dashboard() {
   // Phase 8.3 — named-set resolver, shared across both card and table views
   const { map: namedSetMap } = useNamedSetMap();
 
-  // Count tags per device for the DeviceTabs counts badge
+  // Count tags per device for the DevicePicker counts badge
   const countsByDevice = useMemo(() => {
     const counts: Record<number | "all", number> = { all: tags.data?.length ?? 0 };
     tags.data?.forEach((t) => {
       counts[t.device_id] = (counts[t.device_id] ?? 0) + 1;
     });
     return counts;
+  }, [tags.data]);
+
+  // Phase 11 — per-device health (worst-tag-wins) for DevicePicker dots.
+  const healthByDevice = useMemo(() => {
+    const ST_READ_OK = 128;
+    const STALE_SEC = 30;
+    const h: Record<number, "good" | "stale" | "error" | "unknown"> = {};
+    const rank = { error: 3, stale: 2, good: 1, unknown: 0 };
+    tags.data?.forEach((t) => {
+      let state: "good" | "stale" | "error" | "unknown" = "unknown";
+      if (t.st !== null && t.age_seconds !== null) {
+        if (t.st !== ST_READ_OK) state = "error";
+        else if (t.age_seconds > STALE_SEC) state = "stale";
+        else state = "good";
+      }
+      const prev = h[t.device_id];
+      if (!prev || rank[state] > rank[prev]) h[t.device_id] = state;
+    });
+    return h;
   }, [tags.data]);
 
   const filtered = useMemo(() => {
@@ -114,13 +133,16 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Device tabs */}
-      <DeviceTabs
-        devices={devices.data ?? []}
-        value={activeDeviceId}
-        onChange={setActiveDeviceId}
-        counts={countsByDevice}
-      />
+      {/* Device picker */}
+      <div>
+        <DevicePicker
+          devices={devices.data ?? []}
+          value={activeDeviceId}
+          onChange={setActiveDeviceId}
+          counts={countsByDevice}
+          deviceHealth={healthByDevice}
+        />
+      </div>
 
       {/* Filter row */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
@@ -197,10 +219,96 @@ export default function Dashboard() {
           No tags match the current filter.
         </p>
       ) : viewMode === "cards" ? (
-        <CardGrid tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        activeDeviceId === null ? (
+          <GroupedCards tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        ) : (
+          <CardGrid tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        )
       ) : (
-        <TagsTable tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        activeDeviceId === null ? (
+          <GroupedTable tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        ) : (
+          <TagsTable tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        )
       )}
+    </div>
+  );
+}
+
+// --------------------------------------------------------------------------
+// Phase 11 — Device grouping helpers.
+//
+// When "All devices" is selected, we render one section per device with a
+// header strip ("FLOWCOMP_001 · 177 tags"), then that device's cards/rows.
+// This keeps the visual model "each device is its own block of data" rather
+// than mixing them in one undifferentiated grid where it's easy to lose
+// track of which tag belongs to which physical instrument.
+// --------------------------------------------------------------------------
+
+function groupByDevice<T extends { device_id: number; device_name: string }>(
+  items: T[],
+): Array<{ deviceId: number; deviceName: string; items: T[] }> {
+  const map = new Map<number, { deviceName: string; items: T[] }>();
+  for (const item of items) {
+    const g = map.get(item.device_id);
+    if (g) g.items.push(item);
+    else map.set(item.device_id, { deviceName: item.device_name, items: [item] });
+  }
+  // Sort by device name so the order is stable across renders.
+  return Array.from(map.entries())
+    .map(([id, g]) => ({ deviceId: id, deviceName: g.deviceName, items: g.items }))
+    .sort((a, b) => a.deviceName.localeCompare(b.deviceName));
+}
+
+function DeviceSectionHeader({
+  name, count,
+}: { name: string; count: number }) {
+  return (
+    <div className="flex items-baseline gap-2 pb-1 pt-2 border-b border-border/40">
+      <h3 className="text-sm font-semibold">{name}</h3>
+      <span className="text-xs text-muted-foreground tabular-nums">
+        {count} tag{count === 1 ? "" : "s"}
+      </span>
+    </div>
+  );
+}
+
+function GroupedCards({
+  tags, sparkByTag, namedSetMap,
+}: {
+  tags: LiveTag[];
+  sparkByTag: Record<number, { time: string; value: number }[]>;
+  namedSetMap: NamedSetMap;
+}) {
+  const groups = useMemo(() => groupByDevice(tags), [tags]);
+  return (
+    <div className="space-y-4">
+      {groups.map((g) => (
+        <section key={g.deviceId} className="space-y-2">
+          <DeviceSectionHeader name={g.deviceName} count={g.items.length} />
+          <CardGrid tags={g.items} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function GroupedTable({
+  tags, sparkByTag, namedSetMap,
+}: {
+  tags: LiveTag[];
+  sparkByTag: Record<number, { time: string; value: number }[]>;
+  namedSetMap: NamedSetMap;
+}) {
+  const groups = useMemo(() => groupByDevice(tags), [tags]);
+  return (
+    <div className="space-y-4">
+      {groups.map((g) => (
+        <section key={g.deviceId} className="space-y-2">
+          <DeviceSectionHeader name={g.deviceName} count={g.items.length} />
+          <TagsTable tags={g.items} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
+        </section>
+      ))}
     </div>
   );
 }

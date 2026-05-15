@@ -1,0 +1,109 @@
+name,device_name,block_name,data_type,function_code,address,register_count,byte_order,engineering_unit,scale,offset,min_value,max_value,description,groups,named_set,is_heartbeat,heartbeat_max_stale_sec,writable
+DOUT_1,GC_SIM_001,GC700XA_1001_10,bool,3,1001,,ABCD,,1,0,,,Discrete Output 1-5,,,false,,false
+DOUT_2,GC_SIM_001,GC700XA_1001_10,bool,3,1002,,ABCD,,1,0,,,Discrete Output 1-5,,,false,,false
+DOUT_3,GC_SIM_001,GC700XA_1001_10,bool,3,1003,,ABCD,,1,0,,,Discrete Output 1-5,,,false,,false
+DOUT_4,GC_SIM_001,GC700XA_1001_10,bool,3,1004,,ABCD,,1,0,,,Discrete Output 1-5,,,false,,false
+DOUT_5,GC_SIM_001,GC700XA_1001_10,bool,3,1005,,ABCD,,1,0,,,Discrete Output 1-5,,,false,,false
+DIN_1,GC_SIM_001,GC700XA_1001_10,bool,3,1006,,ABCD,,1,0,,,Discrete Input 1-5,,,false,,false
+DIN_2,GC_SIM_001,GC700XA_1001_10,bool,3,1007,,ABCD,,1,0,,,Discrete Input 1-5,,,false,,false
+DIN_3,GC_SIM_001,GC700XA_1001_10,bool,3,1008,,ABCD,,1,0,,,Discrete Input 1-5,,,false,,false
+DIN_4,GC_SIM_001,GC700XA_1001_10,bool,3,1009,,ABCD,,1,0,,,Discrete Input 1-5,,,false,,false
+DIN_5,GC_SIM_001,GC700XA_1001_10,bool,3,1010,,ABCD,,1,0,,,Discrete Input 1-5,,,false,,false
+RUN_T,GC_SIM_001,GC700XA_3033_32,uint16,3,3033,,ABCD,s,1,0,,,Run Time(1/30th Sec),,,false,,false
+STREAM_NO,GC_SIM_001,GC700XA_3033_32,uint16,3,3034,,ABCD,,1,0,,,Last Analy_Stream Number,,,false,,false
+CDT_STREAM_MASK,GC_SIM_001,GC700XA_3033_32,uint16,3,3035,,ABCD,,1,0,,,Last Analy_CDT Stream Mask,,,false,,false
+CUR_MONTH,GC_SIM_001,GC700XA_3033_32,uint16,3,3036,,ABCD,,1,0,,,Current Month,,,false,,true
+CUR_DAY,GC_SIM_001,GC700XA_3033_32,uint16,3,3037,,ABCD,,1,0,,,Current Day,,,false,,true
+CUR_YEAR_YY,GC_SIM_001,GC700XA_3033_32,uint16,3,3038,,ABCD,,1,0,,,Current Year,,,false,,true
+CUR_HOUR,GC_SIM_001,GC700XA_3033_32,uint16,3,3039,,ABCD,,1,0,,,Current Hour,,,false,,true
+CUR_MINUTE,GC_SIM_001,GC700XA_3033_32,uint16,3,3040,,ABCD,,1,0,,,Current Minute,,,false,,true
+START_TIME_MM,GC_SIM_001,GC700XA_3033_32,uint16,3,3041,,ABCD,,1,0,,,Last Analy_Start Time,,,false,,false
+START_TIME_DD,GC_SIM_001,GC700XA_3033_32,uint16,3,3042,,ABCD,,1,0,,,Last Analy_Start Time,,,false,,false
+START_TIME_YY,GC_SIM_001,GC700XA_3033_32,uint16,3,3043,,ABCD,,1,0,,,Last Analy_Start Time,,,false,,false
+START_TIME_hh,GC_SIM_001,GC700XA_3033_32,uint16,3,3044,,ABCD,,1,0,,,Last Analy_Start Time,,,false,,false
+START_TIME_mm,GC_SIM_001,GC700XA_3033_32,uint16,3,3045,,ABCD,,1,0,,,Last Analy_Start Time,,,false,,false
+SYS_ALARM_BITMAP_3046,GC_SIM_001,GC700XA_3033_32,uint16,3,3046,,ABCD,,1,0,,,"0:Unused, 1:Unused, 2:System Alarm_Alarm On - Last Analysis_Analog Input 1 Low Signal, 3:System Alarm_Alarm On - Last Analysis_Analog Input 1 High Signal, 4:System Alarm_Alarm On - Last Analysis_Analo",,,false,,false
+SYS_ALARM_BITMAP_3047,GC_SIM_001,GC700XA_3033_32,uint16,3,3047,,ABCD,,1,0,,,"0:System Alarm_Alarm On - Current Analysis_Power Failure, 1:Calibration Failed, 2:Preamp Failure, 3:Unused, 4:Unused, 5:Unused, 6:Unused, 7:Unused, 8:Unused, 9:Unused, 10:Unused, 11:Unused, 12:Unused,",,,false,,false
+NDF,GC_SIM_001,GC700XA_3033_32,uint16,3,3058,,ABCD,,1,0,,,New Data Flag,,,false,,true
+ANAL_CAL_FLAG,GC_SIM_001,GC700XA_3033_32,uint16,3,3059,,ABCD,,1,0,,,Analy/Calib Flag,,,false,,false
+DAILY_AVG_UPDATED,GC_SIM_001,GC700XA_3033_32,uint16,3,3060,,ABCD,,1,0,,,Daily Avg Updated,,,false,,true
+LAST_STREAM,GC_SIM_001,GC700XA_3033_32,uint16,3,3061,,ABCD,,1,0,,,Last Stream,,,false,,false
+STREAM_NEW_DATA,GC_SIM_001,GC700XA_3033_32,uint16,3,3062,,ABCD,,1,0,,,2 - Stream 2_New Data Available,,,false,,true
+STREAM_NEW_DATA_2,GC_SIM_001,GC700XA_3033_32,uint16,3,3063,,ABCD,,1,0,,,3 - Stream 3_New Data Available,,,false,,true
+STREAM_NEW_DATA_3,GC_SIM_001,GC700XA_3033_32,uint16,3,3064,,ABCD,,1,0,,,4 - Stream 4_New Data Available,,,false,,true
+STREAM_NEW_DATA_4,GC_SIM_001,GC700XA_3065_32,uint16,3,3065,,ABCD,,1,0,,,5 - Stream 5_New Data Available,,,false,,true
+CALCULATIONS_CONFIGURATION_PRIMARY_CV_UNITS,GC_SIM_001,GC700XA_3097_32,uint16,3,3098,,ABCD,MJ/m3,1,0,,,Calculations Configuration_Primary CV Units,,,false,,false
+LAST_RUN_VALID_1,GC_SIM_001,GC700XA_3097_32,uint16,3,3099,,ABCD,,1,0,,,Last Run Data Valid 1,,,false,,true
+LAST_RUN_VALID_2,GC_SIM_001,GC700XA_3097_32,uint16,3,3100,,ABCD,,1,0,,,Last Run Data Valid 2,,,false,,true
+LAST_RUN_VALID_3,GC_SIM_001,GC700XA_3097_32,uint16,3,3101,,ABCD,,1,0,,,Last Run Data Valid 3,,,false,,true
+LAST_RUN_VALID_4,GC_SIM_001,GC700XA_3097_32,uint16,3,3102,,ABCD,,1,0,,,Last Run Data Valid 4,,,false,,true
+CYCLE_T,GC_SIM_001,GC700XA_5001_2,int32,3,5001,,ABCD,s,1,0,,,Last Analy_Cycle Time (1/30th sec),,,false,,false
+CYCLE_T_2,GC_SIM_001,GC700XA_5001_2,int32,3,5002,,ABCD,s,1,0,,,Last Analy_Cycle Time (1/30th sec),,,false,,false
+WEIGHT_1,GC_SIM_001,GC700XA_7017_32,float32,3,7017,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_2,GC_SIM_001,GC700XA_7017_32,float32,3,7018,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_3,GC_SIM_001,GC700XA_7017_32,float32,3,7019,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_4,GC_SIM_001,GC700XA_7017_32,float32,3,7020,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_5,GC_SIM_001,GC700XA_7017_32,float32,3,7021,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_6,GC_SIM_001,GC700XA_7017_32,float32,3,7022,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_7,GC_SIM_001,GC700XA_7017_32,float32,3,7023,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_8,GC_SIM_001,GC700XA_7017_32,float32,3,7024,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_9,GC_SIM_001,GC700XA_7017_32,float32,3,7025,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_10,GC_SIM_001,GC700XA_7017_32,float32,3,7026,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_11,GC_SIM_001,GC700XA_7017_32,float32,3,7027,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_12,GC_SIM_001,GC700XA_7017_32,float32,3,7028,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_13,GC_SIM_001,GC700XA_7017_32,float32,3,7029,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_14,GC_SIM_001,GC700XA_7017_32,float32,3,7030,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_15,GC_SIM_001,GC700XA_7017_32,float32,3,7031,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+WEIGHT_16,GC_SIM_001,GC700XA_7017_32,float32,3,7032,,ABCD,,1,0,,,Last Analy_Weight %,,,false,,false
+ISO_CV_SUP_DRY_P,GC_SIM_001,GC700XA_7017_32,float32,3,7033,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Sup Dry - Pri,,,false,,false
+ISO_CV_SUP_SAT_P,GC_SIM_001,GC700XA_7017_32,float32,3,7034,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Sup Sat - Pri,,,false,,false
+ISO_RHO_REL_P,GC_SIM_001,GC700XA_7017_32,float32,3,7035,,ABCD,kg/m3,1,0,,,Last Analy_ISO Real Rel Den Gas - Pri,,,false,,false
+ISO_Z_P,GC_SIM_001,GC700XA_7017_32,float32,3,7036,,ABCD,,1,0,,,Last Analy_ISO Z Factor - Pri,,,false,,false
+ISO_WI_SUP_P,GC_SIM_001,GC700XA_7017_32,float32,3,7037,,ABCD,MJ/m3,1,0,,,Last Analy_ISO Wobbe Index Sup - Pri,,,false,,false
+TOTAL_UNN_CONC,GC_SIM_001,GC700XA_7017_32,float32,3,7038,,ABCD,,1,0,,,Last Analy_Total Unnormalized Conc,,,false,,false
+STREAM_AVG_MW,GC_SIM_001,GC700XA_7017_32,float32,3,7039,,ABCD,,1,0,,,1 - Stream 1_Avg Molecular Weight,,,false,,false
+CALC_1_TOTAL_SULPHUR,GC_SIM_001,GC700XA_7017_32,float32,3,7040,,ABCD,,1,0,,,Calc Result[1 - TOTAL SULPHUR],,,false,,false
+CALC_2_USER_CAL_2,GC_SIM_001,GC700XA_7017_32,float32,3,7041,,ABCD,,1,0,,,Calc Result[2 - User Cal 2],,,false,,false
+CALC_3_USER_CAL_3,GC_SIM_001,GC700XA_7017_32,float32,3,7042,,ABCD,,1,0,,,Calc Result[3 - User Cal 3],,,false,,false
+CALC_4_USER_CAL_4,GC_SIM_001,GC700XA_7017_32,float32,3,7043,,ABCD,,1,0,,,Calc Result[4 - User Cal 4],,,false,,false
+CALC_5_USER_CAL_5,GC_SIM_001,GC700XA_7017_32,float32,3,7044,,ABCD,,1,0,,,Calc Result[5 - User Cal 5],,,false,,false
+ISO_CV_SUP_DRY_S,GC_SIM_001,GC700XA_7017_32,float32,3,7046,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Sup Dry - Sec,,,false,,false
+ISO_CV_SUP_SAT_S,GC_SIM_001,GC700XA_7017_32,float32,3,7047,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Sup Sat - Sec,,,false,,false
+ISO_CV_INF_DRY_S,GC_SIM_001,GC700XA_7017_32,float32,3,7048,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Inf Dry - Sec,,,false,,false
+ISO_CV_INF_SAT_S,GC_SIM_001,GC700XA_7049_32,float32,3,7049,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Inf Sat - Sec,,,false,,false
+ISO_Z_S,GC_SIM_001,GC700XA_7049_32,float32,3,7050,,ABCD,,1,0,,,Last Analy_ISO Z Factor - Sec,,,false,,false
+ISO_RHO_REL_S,GC_SIM_001,GC700XA_7049_32,float32,3,7051,,ABCD,kg/m3,1,0,,,Last Analy_ISO Real Rel Den Gas - Sec,,,false,,false
+ISO_RHO_KG_M3_S,GC_SIM_001,GC700XA_7049_32,float32,3,7052,,ABCD,kg/m3,1,0,,,Last Analy_ISO Gas Den kg/m3 - Sec,,,false,,false
+ISO_WI_SUP_S,GC_SIM_001,GC700XA_7049_32,float32,3,7053,,ABCD,MJ/m3,1,0,,,Last Analy_ISO Wobbe Index Sup - Sec,,,false,,false
+ISO_WI_INF_S,GC_SIM_001,GC700XA_7049_32,float32,3,7054,,ABCD,MJ/m3,1,0,,,Last Analy_ISO Wobbe Index Inf - Sec,,,false,,false
+AI_1_AI_1,GC_SIM_001,GC700XA_7081_32,float32,3,7085,,ABCD,,1,0,,,Current Value[1 - Analog Input 1],,,false,,false
+AI_2_AI_2,GC_SIM_001,GC700XA_7081_32,float32,3,7086,,ABCD,,1,0,,,Current Value[2 - Analog Input 2],,,false,,false
+ISO_CV_INF_DRY_P,GC_SIM_001,GC700XA_7081_32,float32,3,7087,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Inf Dry - Pri,,,false,,false
+ISO_CV_INF_SAT_P,GC_SIM_001,GC700XA_7081_32,float32,3,7088,,ABCD,MJ/m3,1,0,,,Last Analy_ISO CV Inf Sat - Pri,,,false,,false
+ISO_WI_INF_P,GC_SIM_001,GC700XA_7081_32,float32,3,7089,,ABCD,MJ/m3,1,0,,,Last Analy_ISO Wobbe Index Inf - Pri,,,false,,false
+ISO_RHO_KG_M3_P,GC_SIM_001,GC700XA_7081_32,float32,3,7090,,ABCD,kg/m3,1,0,,,Last Analy_ISO Gas Den kg/m3 - Pri,,,false,,false
+FCAL_TOTAL_CALIB_RUNS,GC_SIM_001,GC700XA_7081_32,float32,3,7091,,ABCD,,1,0,,,Last FCalib_Total Calibration Runs,,,false,,false
+FCAL_TOTAL_AVG_RUNS,GC_SIM_001,GC700XA_7081_32,float32,3,7092,,ABCD,,1,0,,,Last FCalib_Total Average Runs,,,false,,false
+AUTO_CALIB_START_TIME_hhmm,GC_SIM_001,GC700XA_7081_32,float32,3,7093,,ABCD,,1,0,,,Auto Calibration Start Time,,,false,,false
+CAL_STREAM_NUMBER,GC_SIM_001,GC700XA_7113_32,float32,3,7122,,ABCD,,1,0,,,Last Calib_Stream Number,,,false,,false
+GSMR_INCOMP_COMBUSTION_FACTOR,GC_SIM_001,GC700XA_7113_32,float32,3,7123,,ABCD,,1,0,,,Last Analy_GS(M)R Incomp Combustion Factor,,,false,,false
+GSMR_SOOT_INDEX,GC_SIM_001,GC700XA_7113_32,float32,3,7124,,ABCD,,1,0,,,Last Analy_GS(M)R Soot Index,,,false,,false
+RATIO_OF_LATENT_HEAT_CAP,GC_SIM_001,GC700XA_7113_32,float32,3,7125,,ABCD,,1,0,,,Last Analy_Ratio of Latent Heat Cap,,,false,,false
+CLEAR_ALL_ALARMS,GC_SIM_001,GC700XA_8963_2,float32,3,8963,,ABCD,,1,0,,,Clear All Alarms,,,false,,true
+ACK_ALL_ALARMS,GC_SIM_001,GC700XA_8963_2,float32,3,8964,,ABCD,,1,0,,,Acknowledge All Alarms,,,false,,true
+CUR_MONTH_2,GC_SIM_001,GC700XA_9006_9,uint16,3,9006,,ABCD,,1,0,,,Current Month,,,false,,true
+CUR_DAY_2,GC_SIM_001,GC700XA_9006_9,uint16,3,9007,,ABCD,,1,0,,,Current Day,,,false,,true
+CUR_YEAR_YYYY,GC_SIM_001,GC700XA_9006_9,uint16,3,9008,,ABCD,,1,0,,,Current Year,,,false,,true
+CUR_HOUR_2,GC_SIM_001,GC700XA_9006_9,uint16,3,9009,,ABCD,,1,0,,,Current Hour,,,false,,true
+CUR_MINUTE_2,GC_SIM_001,GC700XA_9006_9,uint16,3,9010,,ABCD,,1,0,,,Current Minute,,,false,,true
+CUR_SECOND,GC_SIM_001,GC700XA_9006_9,uint16,3,9011,,ABCD,,1,0,,,Current Second,,,false,,true
+MODBUS_ID_1_PORT_0,GC_SIM_001,GC700XA_9006_9,uint16,3,9013,,ABCD,,1,0,,,Modbus Id[1 - Port 0],,,false,,false
+SITE_ID,GC_SIM_001,GC700XA_9006_9,uint16,3,9014,,ABCD,,1,0,,,Site Id,,,false,,true
+ANALYSIS_T,GC_SIM_001,GC700XA_9022_32,uint16,3,9022,,ABCD,s,1,0,,,Analysis Time,,,false,,false
+CYCLE_T_3,GC_SIM_001,GC700XA_9022_32,uint16,3,9024,,ABCD,s,1,0,,,Cycle Time,,,false,,false
+RUN_T_2,GC_SIM_001,GC700XA_9022_32,uint16,3,9026,,ABCD,s,1,0,,,Run Time,,,false,,false
+CUR_STREAM,GC_SIM_001,GC700XA_9022_32,uint16,3,9028,,ABCD,,1,0,,,Current Stream,,,false,,false
+GC_CONTROL_ANALYSER_CONTROL,GC_SIM_001,GC700XA_9022_32,uint16,3,9030,,ABCD,,1,0,,,GC Control_Analyser Control (Write Reg 9030),,,false,,true
+GC_CALIBRATING,GC_SIM_001,GC700XA_9022_32,uint16,3,9032,,ABCD,,1,0,,,GC Calibrating,,,false,,false
+ACTIVE_ALARM_FLAG,GC_SIM_001,GC700XA_9022_32,uint16,3,9034,,ABCD,,1,0,,,Active Alarm Flag,,,false,,false
+UNACK_ALARM_FLAG,GC_SIM_001,GC700XA_9022_32,uint16,3,9035,,ABCD,,1,0,,,UnAck Alarm Flag,,,false,,false
