@@ -46,3 +46,7 @@ build/
 
 # Scratch / temp work dirs
 backend/tmp/
+
+# Graphify output and intermediates
+graphify-out/
+.graphify_*

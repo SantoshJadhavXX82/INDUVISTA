@@ -1,5 +1,5 @@
 /**
- * Sidebar navigation — Phase 11 reorganization.
+ * Sidebar navigation — Phase 11 reorganization (Trend added in 13.3).
  *
  * Workflow-driven layout instead of protocol-driven. Order reflects the
  * commissioning lifecycle plus daily access patterns:
@@ -8,8 +8,11 @@
  *               Master data set up FIRST when installing the system.
  *               Stays at the top because it's conceptually the foundation
  *               everything else references.
- *   OPERATE   — Live Dashboard, Diagnostics, Data Gaps
+ *   OPERATE   — Live Dashboard, Trend, Diagnostics, Data Gaps
  *               Daily monitoring screens. What ops staff opens each hour.
+ *               Trend sits between Dashboard (current values) and
+ *               Diagnostics (health) — the natural eye-flow when
+ *               investigating "is this normal?".
  *   EXPLORE   — Tag Explorer, Register Browser, Frame Inspector,
  *               Write Console, Write Audit
  *               Investigation tools. Used during commissioning and
@@ -44,6 +47,7 @@ import {
   ArrowLeftRight,
   ServerCog,
   Eye,
+  TrendingUp,
   type LucideIcon,
 } from "lucide-react";
 
@@ -81,13 +85,16 @@ const entries: NavEntry[] = [
   },
 
   // OPERATE — daily monitoring. Live Dashboard first because that's what
-  // ops staff actually open at 3am, not Diagnostics.
+  // ops staff actually open at 3am, not Diagnostics. Trend follows
+  // Dashboard since the natural follow-up to "what's the value now?" is
+  // "what has it been doing?".
   {
     kind: "section",
     label: "Operate",
     icon: Gauge,
     children: [
       { kind: "leaf", to: "/dashboard", label: "Live Dashboard", icon: Gauge },
+      { kind: "leaf", to: "/trend", label: "Trend", icon: TrendingUp, matchPrefix: "/trend" },
       { kind: "leaf", to: "/diagnostics", label: "Diagnostics", icon: Activity },
       { kind: "leaf", to: "/data-gaps", label: "Data Gaps", icon: AlertCircle },
     ],

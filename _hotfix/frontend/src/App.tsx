@@ -18,6 +18,8 @@ import Groups from "@/pages/Groups";
 import NamedSets from "@/pages/NamedSets";
 import DutyStandbyValues from "@/pages/global/DutyStandbyValues";
 import ModbusLayout from "@/pages/modbus/ModbusLayout";
+// Phase 13.2 — Trend module
+import Trend from "@/pages/Trend";
 
 export default function App() {
   return (
@@ -28,6 +30,8 @@ export default function App() {
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/tags" element={<TagExplorer />} />
         <Route path="/data-gaps" element={<DataGaps />} />
+        {/* Phase 13.2 — Trend module (historical first, real-time in 13.3) */}
+        <Route path="/trend" element={<Trend />} />
 
         {/* Phase 8.5 — Modbus TCP/IP tools grouped under /modbus */}
         <Route path="/modbus" element={<ModbusLayout />}>

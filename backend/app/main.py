@@ -135,3 +135,7 @@ app.include_router(_pair_tags.router)
 # Phase 12.2 router — system settings (duty/standby value convention)
 from app.api import settings as _settings
 app.include_router(_settings.router)
+
+# Phase 13.1 - Trend module
+from app.api import trends
+app.include_router(trends.router)

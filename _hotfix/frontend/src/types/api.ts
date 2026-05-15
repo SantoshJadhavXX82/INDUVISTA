@@ -393,3 +393,94 @@ export type ScanRangeResponse = {
   chunks: number;
   rows: ScanRow[];
 };
+
+// ---------------------------------------------------------------------------
+// Phase 13.1 — Trend module
+// ---------------------------------------------------------------------------
+// These types mirror backend/app/api/trends.py exactly. If the backend's
+// Pydantic schemas change, regenerate the corresponding types here.
+
+export type TrendTag = {
+  id: number;
+  name: string;
+  description: string | null;
+  device_id: number;
+  device_name: string;
+  channel_id: number;
+  channel_name: string;
+  protocol: string | null;
+  register_block_id: number | null;
+  register_block_name: string | null;
+  address: number | null;
+  data_type: string;
+  engineering_unit: string | null;
+  logging_enabled: boolean;
+  min_value: number | null;
+  max_value: number | null;
+  current_value_double: number | null;
+  current_value_text: string | null;
+  current_st: number | null;
+  // Derived from current_st by the backend: 'good' | 'uncertain' | 'bad'
+  // (or null when there's no reading yet).
+  current_quality: string | null;
+  last_update_utc: string | null;
+};
+
+// Single point on the trend chart. Short field names keep payloads small
+// for 1000+ point series. Optional fields populated only for the
+// corresponding aggregation level — `mn`/`mx`/`g`/`b` for buckets,
+// `st`/`src` for raw points.
+export type TrendPoint = {
+  t: string;                // ISO timestamp (UTC)
+  v: number | null;         // value_double
+  vt?: string | null;       // value_text (non-numeric tags)
+  mn?: number | null;       // bucket min (aggregated rows only)
+  mx?: number | null;       // bucket max (aggregated rows only)
+  st?: number;              // ST quality (raw rows only)
+  src?: string | null;      // source (raw rows only)
+  g?: number | null;        // good_count in bucket
+  b?: number | null;        // bad_count in bucket
+};
+
+export type TrendSeries = {
+  tag_id: number;
+  tag_name: string;
+  engineering_unit: string | null;
+  data_type: string;
+  min_value: number | null;
+  max_value: number | null;
+  aggregation: "raw" | "1m" | "1h" | "1d";
+  raw_count: number;        // total samples in window before downsampling
+  returned_count: number;   // points in this response
+  points: TrendPoint[];
+};
+
+export type TrendHistoryResponse = {
+  start: string;
+  end: string;
+  aggregation: "raw" | "1m" | "1h" | "1d";
+  series: TrendSeries[];
+};
+
+export type TagAvailability = {
+  tag_id: number;
+  tag_name: string;
+  expected_samples: number;
+  actual_samples: number;
+  good_samples: number;
+  uncertain_samples: number;
+  bad_samples: number;
+  missing_samples: number;
+  availability_pct: number;
+  good_availability_pct: number;
+  longest_gap_sec: number | null;
+  longest_gap_start: string | null;
+  first_sample: string | null;
+  last_sample: string | null;
+};
+
+export type TrendSummaryResponse = {
+  start: string;
+  end: string;
+  tags: TagAvailability[];
+};

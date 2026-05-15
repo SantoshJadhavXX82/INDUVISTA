@@ -1,0 +1,242 @@
+"""Phase 13.1 — Trend backend smoke test (stdlib-only HTTP).
+
+Runs inside the backend container. Uses urllib (always available) instead
+of requests (not installed) and psycopg2 (which the backend already uses).
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
+
+import psycopg2
+
+
+API = os.environ.get("INDUVISTA_API", "http://backend:8000/api")
+PG_DSN = os.environ.get(
+    "DATABASE_URL_PSYCOPG2",
+    "host=postgres port=5432 dbname=industrial_reporting "
+    "user=svj_admin password=change_this_password",
+)
+
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
+WINDOW_START = NOW - timedelta(minutes=10)
+WINDOW_END = NOW
+N_SAMPLES = 600
+
+N_GOOD = 540
+N_UNCERTAIN = 30
+N_BAD = 30
+
+
+def http_get(path: str, params: dict | None = None) -> tuple[int, dict]:
+    url = f"{API}/{path}"
+    if params:
+        clean = {k: v for k, v in params.items() if v is not None}
+        url += "?" + urllib.parse.urlencode(clean)
+    req = urllib.request.Request(url)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8")
+        try:
+            return e.code, json.loads(body)
+        except json.JSONDecodeError:
+            return e.code, {"detail": body}
+
+
+PASS, FAIL = 0, 0
+def ok(msg):  global PASS; PASS += 1; print(f"  [PASS] {msg}")
+def bad(msg): global FAIL; FAIL += 1; print(f"  [FAIL] {msg}")
+def section(n, t): print(f"\n{n}. {t}\n" + "-" * 70)
+
+
+def pg_conn():
+    if PG_DSN.startswith(("postgresql://", "postgresql+psycopg2://")):
+        from urllib.parse import urlparse
+        u = urlparse(PG_DSN.replace("postgresql+psycopg2://", "postgresql://"))
+        return psycopg2.connect(
+            host=u.hostname, port=u.port or 5432,
+            dbname=(u.path or "/").lstrip("/"),
+            user=u.username, password=u.password,
+        )
+    return psycopg2.connect(PG_DSN)
+
+
+def main() -> int:
+    print(f"InduVista Phase 13.1 trend smoke test — {API}")
+    print("=" * 70)
+
+    section(0, "Pick test tag (enabled, numeric)")
+    status, tags = http_get("trends/tags", {"enabled_only": "true", "limit": 20})
+    if status != 200:
+        bad(f"/trends/tags returned {status}: {tags}")
+        return 1
+    numeric = [
+        t for t in tags
+        if t["data_type"] in ("uint16", "int16", "uint32", "int32", "float32", "float64")
+    ]
+    if not numeric:
+        bad("No enabled numeric tags found.")
+        return 1
+    tag = numeric[0]
+    tag_id = tag["id"]
+    print(f"  Using tag_id={tag_id} name='{tag['name']}' device='{tag['device_name']}' "
+          f"data_type={tag['data_type']} EU={tag.get('engineering_unit')}")
+    ok(f"got tag list ({len(tags)} tags)")
+    if "current_quality" in tag:
+        ok("tag response includes derived quality field")
+    else:
+        bad("tag response missing current_quality field")
+
+    section(1, f"Insert {N_SAMPLES} synthetic samples with mixed quality")
+    conn = pg_conn()
+    cur = conn.cursor()
+
+    rows = []
+    delta = (WINDOW_END - WINDOW_START).total_seconds() / N_SAMPLES
+    for i in range(N_SAMPLES):
+        ts = WINDOW_START + timedelta(seconds=i * delta)
+        val = 50.0 + (i % 100) * 0.5
+        if i < N_GOOD:
+            st, st_class = 128, "READ_OK"
+        elif i < N_GOOD + N_UNCERTAIN:
+            st, st_class = 80, "RANGE_WARN"
+        else:
+            st, st_class = 32, "COMM_TIMEOUT"
+        rows.append((ts, tag_id, val, st, st_class, "modbus"))
+
+    cur.executemany(
+        "INSERT INTO tag_values (time, tag_id, value_double, st, st_class, source) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON CONFLICT (tag_id, time) DO UPDATE "
+        "SET value_double = EXCLUDED.value_double, st = EXCLUDED.st, "
+        "    st_class = EXCLUDED.st_class, source = EXCLUDED.source",
+        rows,
+    )
+    conn.commit()
+    ok(f"inserted {N_SAMPLES} rows")
+
+    try:
+        section(2, "GET /history aggregation=raw returns the inserted points")
+        status, body = http_get("trends/history", {
+            "tag_ids": tag_id,
+            "start": WINDOW_START.isoformat(),
+            "end":   WINDOW_END.isoformat(),
+            "aggregation": "raw",
+            "max_points": 1000,
+        })
+        if status != 200:
+            bad(f"/history raw status={status} body={body}")
+        else:
+            ser = body["series"][0]
+            ok(f"raw query returned {ser['returned_count']} points (raw_count={ser['raw_count']})")
+            if ser["raw_count"] >= N_SAMPLES: ok(f"raw_count >= {N_SAMPLES}")
+            else: bad(f"raw_count {ser['raw_count']} < {N_SAMPLES}")
+            if ser["aggregation"] == "raw": ok("aggregation reported as 'raw'")
+            else: bad(f"expected 'raw', got '{ser['aggregation']}'")
+
+        section(3, "GET /history aggregation=auto picks correct grain")
+        _, b = http_get("trends/history", {
+            "tag_ids": tag_id,
+            "start": WINDOW_START.isoformat(),
+            "end":   WINDOW_END.isoformat(),
+            "aggregation": "auto",
+        })
+        if b.get("aggregation") == "raw": ok("auto on 10-min window → raw")
+        else: bad(f"auto on 10-min window → {b.get('aggregation')}")
+
+        _, b = http_get("trends/history", {
+            "tag_ids": tag_id,
+            "start": (NOW - timedelta(hours=2)).isoformat(),
+            "end":   NOW.isoformat(),
+            "aggregation": "auto",
+        })
+        if b.get("aggregation") in ("1m", "raw"): ok(f"auto on 2-hour window → {b['aggregation']}")
+        else: bad(f"auto on 2-hour window → {b.get('aggregation')}")
+
+        section(4, "max_points caps returned_count")
+        _, b = http_get("trends/history", {
+            "tag_ids": tag_id,
+            "start": WINDOW_START.isoformat(),
+            "end":   WINDOW_END.isoformat(),
+            "aggregation": "raw",
+            "max_points": 100,
+        })
+        rc = b["series"][0]["returned_count"]
+        if rc <= 100: ok(f"max_points=100 → returned_count={rc}")
+        else: bad(f"returned {rc} > 100")
+
+        section(5, "GET /summary availability + quality bands")
+        _, b = http_get("trends/summary", {
+            "tag_ids": tag_id,
+            "start": WINDOW_START.isoformat(),
+            "end":   WINDOW_END.isoformat(),
+        })
+        if not b.get("tags"):
+            bad("summary returned no tag rows")
+        else:
+            s = b["tags"][0]
+            print(f"  actual={s['actual_samples']} expected={s['expected_samples']} "
+                  f"good={s['good_samples']} uncertain={s['uncertain_samples']} "
+                  f"bad={s['bad_samples']} missing={s['missing_samples']} "
+                  f"availability={s['availability_pct']}% "
+                  f"good_availability={s['good_availability_pct']}%")
+            if s["actual_samples"] >= N_SAMPLES: ok(f"actual_samples ({s['actual_samples']}) >= {N_SAMPLES}")
+            else: bad(f"actual_samples {s['actual_samples']} < {N_SAMPLES}")
+            if s["good_samples"] >= N_GOOD: ok(f"good_samples ({s['good_samples']}) >= {N_GOOD}")
+            else: bad(f"good_samples {s['good_samples']} < {N_GOOD}")
+            if s["uncertain_samples"] >= N_UNCERTAIN: ok(f"uncertain_samples >= {N_UNCERTAIN}")
+            else: bad(f"uncertain_samples {s['uncertain_samples']} < {N_UNCERTAIN}")
+            if s["bad_samples"] >= N_BAD: ok(f"bad_samples >= {N_BAD}")
+            else: bad(f"bad_samples {s['bad_samples']} < {N_BAD}")
+
+        section(6, "API rejects malformed input")
+        st, _ = http_get("trends/history", {
+            "tag_ids": "",
+            "start": WINDOW_START.isoformat(),
+            "end":   WINDOW_END.isoformat(),
+        })
+        if st == 400: ok("empty tag_ids → 400")
+        else: bad(f"empty tag_ids → {st}")
+
+        st, _ = http_get("trends/history", {
+            "tag_ids": str(tag_id),
+            "start": WINDOW_END.isoformat(),
+            "end":   WINDOW_START.isoformat(),
+        })
+        if st == 400: ok("start > end → 400")
+        else: bad(f"start>end → {st}")
+
+        st, _ = http_get("trends/history", {
+            "tag_ids": "999999999",
+            "start": WINDOW_START.isoformat(),
+            "end":   WINDOW_END.isoformat(),
+        })
+        if st == 404: ok("unknown tag_id → 404")
+        else: bad(f"unknown tag → {st}")
+
+    finally:
+        section(7, "Clean up inserted test rows")
+        cur.execute(
+            "DELETE FROM tag_values WHERE tag_id = %s AND time >= %s AND time < %s",
+            (tag_id, WINDOW_START, WINDOW_END),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        ok("inserted rows deleted")
+
+    print("\n" + "=" * 70)
+    print(f"RESULTS: {PASS} PASS  {FAIL} FAIL")
+    print("All checks passed." if FAIL == 0 else "Some checks FAILED — see above.")
+    return 0 if FAIL == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
