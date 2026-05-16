@@ -21,6 +21,7 @@
     "uplot": "^1.6.31"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.7.5",
     "@types/react": "^19.0.0",

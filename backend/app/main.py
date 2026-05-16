@@ -139,3 +139,7 @@ app.include_router(_settings.router)
 # Phase 13.1 - Trend module
 from app.api import trends
 app.include_router(trends.router)
+
+# Phase 14.2 router - alarms (rules CRUD, active list, history, ack)
+from app.api import alarms as _alarms
+app.include_router(_alarms.router)

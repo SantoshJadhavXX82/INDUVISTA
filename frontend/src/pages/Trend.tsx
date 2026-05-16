@@ -20,10 +20,11 @@
  * Spec mapping: §6.1 / §6.2 / §6.3 / §6.4 (Pause/Resume).
  * Snapshot (§6.4) and Clear (§6.4) are deferred to 13.3d.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   TrendingUp, RefreshCw, AlertTriangle, Pause, Play, Camera, Eraser, Timer, Clock,
+  BarChart3,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import type { TrendHistoryResponse } from "@/types/api";
@@ -39,8 +40,21 @@ import TimeRangePicker, {
   makePresetRange,
 } from "@/components/TimeRangePicker";
 import TrendSummaryPanel from "@/components/TrendSummaryPanel";
+import RawDataTable from "@/components/RawDataTable";
+import LiveValuePanel from "@/components/LiveValuePanel";
 import SavedViews from "@/components/SavedViews";
-import TimeFormatSelector from "@/components/TimeFormatSelector";
+import AggregationSelector, {
+  type AggregationOption,
+} from "@/components/AggregationSelector";
+import AggregationModeSelector, {
+  type AggregationMode, loadAggregationMode,
+} from "@/components/AggregationModeSelector";
+import TooltipModeSelector, {
+  type TooltipMode, loadTooltipMode,
+} from "@/components/TooltipModeSelector";
+import QualityFilterSelector, {
+  type QualityFilter, loadQualityFilter,
+} from "@/components/QualityFilterSelector";
 import { useTimeFormat } from "@/lib/timeFormat";
 import type { TrendViewConfig } from "@/types/api";
 
@@ -104,9 +118,78 @@ export default function Trend() {
   // the value becomes irrelevant and the chart resumes normal behavior.
   const [bufferClearAt, setBufferClearAt] = useState<number | null>(null);
 
+  // Spec 16.2/16.3 — operator-controlled aggregation interval. "auto"
+  // routes by window size (raw <30min, 1m <4h, 1h <7d, 1d wider).
+  const [aggregation, setAggregation] = useState<AggregationOption>("auto");
+
+  // Spec 16.1 — aggregation MODE (last/first/avg/min/max). Ignored when
+  // the effective interval is raw. Persisted across sessions.
+  const [aggregationMode, setAggregationMode] =
+    useState<AggregationMode>(loadAggregationMode);
+
+  // Spec 16.1 Option A - min/max envelope band around aggregated lines.
+  // Defaults ON (industrial-trending standard); turns into a no-op in raw
+  // mode automatically (no buckets, no min/max). Persists across sessions.
+  const [showEnvelope, setShowEnvelope] = useState<boolean>(() => {
+    try {
+      const v = localStorage.getItem("induvista.showEnvelope");
+      return v === null ? true : v === "true";
+    } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("induvista.showEnvelope", String(showEnvelope)); }
+    catch { /* ignore */ }
+  }, [showEnvelope]);
+
+  // Tooltip display preference — persists across sessions.
+  const [tooltipMode, setTooltipMode] = useState<TooltipMode>(loadTooltipMode);
+
+  // Spec 9.4 — quality filter. Persists across sessions.
+  const [qualityFilter, setQualityFilter] = useState<QualityFilter>(loadQualityFilter);
+
+  // Per-tag show/hide on the chart, driven by clicks on Live Value Panel
+  // tiles. Prunes itself when a tag is removed from selection.
+  const [hiddenTagIds, setHiddenTagIds] = useState<Set<number>>(new Set());
+  const toggleHidden = useCallback((id: number) => {
+    setHiddenTagIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    setHiddenTagIds((prev) => {
+      const filtered = new Set(
+        [...prev].filter((id) => selectedIds.includes(id)),
+      );
+      // Only update if changed - avoids extra renders.
+      return filtered.size === prev.size ? prev : filtered;
+    });
+  }, [selectedIds]);
+
   // Imperative handle on the chart — used by the PNG snapshot button to
   // trigger a canvas download without exposing uPlot internals here.
   const chartRef = useRef<TrendChartHandle>(null);
+
+  // Phase 13 closeout — σ-popover click-through to the raw data table.
+  // The SigmaInfoPopover renders a "View in raw data table" button that
+  // fires onShowInRawTable(tagId). We lift the focused-tag state here so
+  // the RawDataTable can react (auto-open, filter rows, show a badge)
+  // and we can scroll the section into view.
+  const rawTableRef = useRef<HTMLDivElement>(null);
+  const [rawTableFocusTagId, setRawTableFocusTagId] = useState<number | null>(null);
+  const handleShowInRawTable = useCallback((tagId: number) => {
+    setRawTableFocusTagId(tagId);
+    // Defer the scroll until React has painted the (likely expanding)
+    // RawDataTable, so block: "start" lands on the right pixel.
+    requestAnimationFrame(() => {
+      rawTableRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }, []);
 
   // Build the current view config that SavedViews can snapshot if the
   // operator clicks "Save". We compose it on each render — cheap and
@@ -180,6 +263,8 @@ export default function Trend() {
       "trend-history",
       mode,
       selectedIds,
+      aggregation,
+      aggregationMode,
       mode === "historical"
         ? `${historicalRange.start}|${historicalRange.end}`
         : `${liveWindowMinutes}|${bufferClearAt ?? 0}`,
@@ -204,7 +289,8 @@ export default function Trend() {
       const params = new URLSearchParams({
         tag_ids: selectedIds.join(","),
         start, end,
-        aggregation: "auto",
+        aggregation,
+        agg_mode: aggregationMode,
         max_points: "2000",
       });
       return api.get<TrendHistoryResponse>(`/trends/history?${params}`);
@@ -214,6 +300,40 @@ export default function Trend() {
     refetchOnWindowFocus: false,
     staleTime: 0,
   });
+
+  // Pre-compute how many samples each quality filter option would hide.
+  // Surfacing these counts in the QualityFilterSelector dropdown makes
+  // it obvious when "Hide bad" and "Good only" would produce identical
+  // results (i.e. data has no UNCERTAIN samples in ST 64-127 to differ on).
+  const qualityCounts = useMemo(() => {
+    if (!historyQuery.data) return undefined;
+    const isRaw = historyQuery.data.aggregation === "raw";
+    let total = 0, hideBadHidden = 0, goodOnlyHidden = 0;
+    for (const s of historyQuery.data.series) {
+      for (const p of s.points) {
+        total++;
+        if (isRaw) {
+          // hide_bad drops ST < 64; good_only drops ST < 128.
+          // Unknown ST (null) passes hide_bad but fails good_only.
+          if (p.st != null && p.st < 64) hideBadHidden++;
+          if (p.st == null || p.st < 128) goodOnlyHidden++;
+        } else {
+          // Aggregated: classified by bucket counts (same rule the chart
+          // and tooltip use).
+          const bad = p.b ?? 0;
+          const good = p.g ?? 0;
+          if (bad > 0) {
+            hideBadHidden++;
+            goodOnlyHidden++;
+          } else if (good === 0) {
+            // No data in bucket - treated as not-good for good_only.
+            goodOnlyHidden++;
+          }
+        }
+      }
+    }
+    return { total, hideBadHidden, goodOnlyHidden };
+  }, [historyQuery.data]);
 
   // Tick every 5s so "Updated Xs ago" stays accurate even when nothing
   // else is re-rendering the page.
@@ -287,7 +407,38 @@ export default function Trend() {
                   </Button>
                 </>
               )}
-              <TimeFormatSelector />
+              <AggregationSelector
+                value={aggregation}
+                onChange={setAggregation}
+                effective={historyQuery.data?.aggregation}
+              />
+              <AggregationModeSelector
+                value={aggregationMode}
+                onChange={setAggregationMode}
+                disabled={historyQuery.data?.aggregation === "raw"}
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                className={`h-8 text-xs gap-1.5 ${showEnvelope && historyQuery.data?.aggregation !== "raw" ? "border-blue-400 text-blue-700" : ""}`}
+                onClick={() => setShowEnvelope((v) => !v)}
+                disabled={historyQuery.data?.aggregation === "raw"}
+                title={historyQuery.data?.aggregation === "raw"
+                  ? "Envelope applies only to aggregated views (current view is raw)"
+                  : "Min/Max envelope band around the aggregation line"}
+              >
+                <BarChart3 className="h-3 w-3" />
+                Envelope: {showEnvelope ? "On" : "Off"}
+              </Button>
+              <QualityFilterSelector
+                value={qualityFilter}
+                onChange={setQualityFilter}
+                counts={qualityCounts}
+              />
+              <TooltipModeSelector
+                value={tooltipMode}
+                onChange={setTooltipMode}
+              />
               <SavedViews
                 currentConfig={currentConfig}
                 onLoad={handleLoadView}
@@ -315,6 +466,18 @@ export default function Trend() {
           />
         </CardContent>
       </Card>
+
+      {/* ============ Live Value Panel (spec 6.3) ====================
+          Renders only when at least one tag is selected. Shows current
+          values regardless of historical vs live trend mode - operators
+          always see what the plant is doing right now. */}
+      <LiveValuePanel
+        selectedIds={selectedIds}
+        liveMode={mode === "live" && !paused}
+        refreshIntervalSec={refreshIntervalSec}
+        hiddenTagIds={hiddenTagIds}
+        onToggleHidden={toggleHidden}
+      />
 
       {/* ============ Chart card ==================================== */}
       <Card>
@@ -397,20 +560,35 @@ export default function Trend() {
 
           {historyQuery.data &&
             historyQuery.data.series.some((s) => s.returned_count > 0) && (
-            <TrendChart ref={chartRef} history={historyQuery.data} height={440} />
+            <TrendChart ref={chartRef} history={historyQuery.data} height={440} tooltipMode={tooltipMode} hiddenTagIds={hiddenTagIds} qualityFilter={qualityFilter} showEnvelope={showEnvelope} />
           )}
         </CardContent>
       </Card>
 
-      {/* ============ Summary panel ================================
-          Uses the actual start/end from the last successful fetch so it
-          stays aligned with whatever the chart is currently showing — even
-          across pause/resume and mode switches. */}
+      {/* ============ Raw data table + Summary panel ===================
+          Uses the actual start/end from the last successful fetch so they
+          stay aligned with whatever the chart is currently showing — even
+          across pause/resume and mode switches. RawDataTable is wrapped
+          in a ref'd div so handleShowInRawTable() can scroll-into-view
+          when the σ-popover clicks through. */}
+      {selectedIds.length > 0 && historyQuery.data && (
+        <div ref={rawTableRef}>
+          <RawDataTable
+            selectedIds={selectedIds}
+            start={historyQuery.data.start}
+            end={historyQuery.data.end}
+            focusTagId={rawTableFocusTagId}
+            onClearFocus={() => setRawTableFocusTagId(null)}
+          />
+        </div>
+      )}
+
       {selectedIds.length > 0 && historyQuery.data && (
         <TrendSummaryPanel
           tagIds={selectedIds}
           start={historyQuery.data.start}
           end={historyQuery.data.end}
+          onShowInRawTable={handleShowInRawTable}
         />
       )}
     </div>

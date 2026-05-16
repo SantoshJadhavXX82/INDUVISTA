@@ -21,6 +21,8 @@ import DutyStandbyValues from "@/pages/global/DutyStandbyValues";
 import ModbusLayout from "@/pages/modbus/ModbusLayout";
 // Phase 13.2 — Trend module
 import Trend from "@/pages/Trend";
+// Phase 14.5 - Alarms module
+import Alarms from "@/pages/Alarms";
 
 export default function App() {
   return (
@@ -34,6 +36,8 @@ export default function App() {
         <Route path="/data-gaps" element={<DataGaps />} />
         {/* Phase 13.2 — Trend module (historical first, real-time in 13.3) */}
         <Route path="/trend" element={<Trend />} />
+        {/* Phase 14.5 - Alarms */}
+        <Route path="/alarms" element={<Alarms />} />
 
         {/* Phase 8.5 — Modbus TCP/IP tools grouped under /modbus */}
         <Route path="/modbus" element={<ModbusLayout />}>
