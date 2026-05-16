@@ -114,6 +114,17 @@ services:
   # one SQLite writer, and no multi-writer dance on the local buffer. If
   # polling and replay ever need independent scaling, split them back out
   # by reading from ./storage:/data in a dedicated container.
-
+  alarm_evaluator:
+      build: ./backend
+      container_name: svj_alarm_evaluator
+      restart: unless-stopped
+      env_file:
+        - .env
+      depends_on:
+        - postgres
+        - valkey
+      volumes:
+        - ./backend/app:/app/app
+      command: ["python", "-m", "app.workers.alarm_evaluator"]
 volumes:
   svj_postgres_data:

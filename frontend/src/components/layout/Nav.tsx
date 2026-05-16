@@ -48,6 +48,7 @@ import {
   ServerCog,
   Eye,
   TrendingUp,
+  BellRing,
   type LucideIcon,
 } from "lucide-react";
 
@@ -95,6 +96,7 @@ const entries: NavEntry[] = [
     children: [
       { kind: "leaf", to: "/dashboard", label: "Live Dashboard", icon: Gauge },
       { kind: "leaf", to: "/trend", label: "Trend", icon: TrendingUp, matchPrefix: "/trend" },
+      { kind: "leaf", to: "/alarms", label: "Alarms", icon: BellRing, matchPrefix: "/alarms" },
       { kind: "leaf", to: "/diagnostics", label: "Diagnostics", icon: Activity },
       { kind: "leaf", to: "/data-gaps", label: "Data Gaps", icon: AlertCircle },
     ],

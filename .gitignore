@@ -50,3 +50,5 @@ backend/tmp/
 # Graphify output and intermediates
 graphify-out/
 .graphify_*
+
+test-results-ui/
