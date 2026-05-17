@@ -126,5 +126,19 @@ services:
       volumes:
         - ./backend/app:/app/app
       command: ["python", "-m", "app.workers.alarm_evaluator"]
+
+  calc_evaluator:
+      build: ./backend
+      container_name: svj_calc_evaluator
+      restart: unless-stopped
+      env_file:
+        - .env
+      depends_on:
+        - postgres
+        - valkey
+      volumes:
+        - ./backend/app:/app/app
+      command: ["python", "-m", "app.workers.calc_evaluator"]
+
 volumes:
   svj_postgres_data:

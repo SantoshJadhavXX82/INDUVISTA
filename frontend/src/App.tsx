@@ -23,6 +23,8 @@ import ModbusLayout from "@/pages/modbus/ModbusLayout";
 import Trend from "@/pages/Trend";
 // Phase 14.5 - Alarms module
 import Alarms from "@/pages/Alarms";
+import AlarmSeveritiesAdmin from "@/pages/AlarmSeveritiesAdmin";
+import AlarmRuleTypesAdmin from "@/pages/AlarmRuleTypesAdmin";
 
 export default function App() {
   return (
@@ -38,6 +40,8 @@ export default function App() {
         <Route path="/trend" element={<Trend />} />
         {/* Phase 14.5 - Alarms */}
         <Route path="/alarms" element={<Alarms />} />
+        <Route path="/global/alarm-severities" element={<AlarmSeveritiesAdmin />} />
+        <Route path="/global/alarm-types" element={<AlarmRuleTypesAdmin />} />
 
         {/* Phase 8.5 — Modbus TCP/IP tools grouped under /modbus */}
         <Route path="/modbus" element={<ModbusLayout />}>

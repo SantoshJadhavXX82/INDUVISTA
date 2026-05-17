@@ -805,9 +805,13 @@ function buildChart(
     legend: { show: false },
     hooks: {
       draw: [
-        // Limit lines: only when ≤ 2 tags selected — chart stays readable.
+        // Limit lines: draw the per-tag min/max horizontal markers only
+        // when exactly ONE tag is on the chart. With two or more tags
+        // the overlapping horizontal lines crowd the plot and make it
+        // hard to read the actual signal — operator feedback was that
+        // the lines were noise rather than signal in multi-tag views.
         (u) => {
-          if (history.series.length > 2) return;
+          if (history.series.length !== 1) return;
           try {
             history.series.forEach((s, idx) => {
               const scaleKey = scaleAssignment[idx];

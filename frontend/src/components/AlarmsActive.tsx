@@ -25,10 +25,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useTimeFormat } from "@/lib/timeFormat";
 import ShelveDialog from "@/components/ShelveDialog";
+import { useSeverityColors, hexWithAlpha } from "@/components/SeverityBadge";
+import { useSeverities } from "@/lib/useSeverities";
 
 import type { AlarmActive, AlarmEvent, Severity, StateValue } from "@/types/alarms";
 import {
-  RULE_TYPE_LABELS, SEVERITY_LABELS, SEVERITY_RANK, STATE_LABELS,
+  RULE_TYPE_LABELS, SEVERITY_RANK, STATE_LABELS,
 } from "@/types/alarms";
 
 interface Props {
@@ -50,15 +52,25 @@ export default function AlarmsActive({
   const [shelveTarget, setShelveTarget] = useState<AlarmActive | null>(null);
   const [shelveError, setShelveError] = useState<string | null>(null);
 
-  // Defensive client-side sort: severity desc, then last_change desc.
+  // Defensive client-side sort: severity desc (rank asc = more urgent),
+  // then last_change desc. Phase 14.8 — uses the live alarm_severities
+  // rank, so custom severities slot in at their configured position.
+  // Falls back to the hardcoded SEVERITY_RANK for system codes during
+  // the brief window before useSeverities loads.
+  const { data: severities } = useSeverities();
   const sorted = useMemo(() => {
     if (!data) return [];
+    const ranks = new Map<string, number>(
+      (severities ?? []).map((s) => [s.code, s.rank])
+    );
+    const rankOf = (code: string): number =>
+      ranks.get(code) ?? SEVERITY_RANK[code as Severity] ?? 999;
     return [...data].sort((a, b) => {
-      const s = SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity];
+      const s = rankOf(a.severity) - rankOf(b.severity);
       if (s !== 0) return s;
       return b.last_change_time.localeCompare(a.last_change_time);
     });
-  }, [data]);
+  }, [data, severities]);
 
   const ackMutation = useMutation({
     mutationFn: ({ ruleId }: { ruleId: number }) =>
@@ -226,14 +238,17 @@ function ActiveRow({
   // because the operator should ack-to-close the latched alarm, not
   // mute it (semantically distinct concerns).
   const canShelve = alarm.state === "active_unack" || alarm.state === "active_ack";
-  const bar = severityBarClass(alarm.severity);
-  const rowBg = alarm.state === "active_unack"
-    ? severityRowBgClass(alarm.severity)
-    : "";
+  // Phase 14.8 — colours come from alarm_severities.color_hex so
+  // operator-defined custom severities use their configured colour.
+  const { color: severityColor } = useSeverityColors(alarm.severity);
+  const barStyle = { backgroundColor: severityColor };
+  const rowStyle = alarm.state === "active_unack"
+    ? { backgroundColor: hexWithAlpha(severityColor, 0.08) }
+    : undefined;
 
   return (
-    <tr className={`border-t border-border hover:bg-secondary/30 ${rowBg}`}>
-      <td className={`p-0 w-1 ${bar}`} />
+    <tr className="border-t border-border hover:bg-secondary/30" style={rowStyle}>
+      <td className="p-0 w-1" style={barStyle} />
       <td className="px-3 py-2">
         <div className="flex items-center gap-2">
           <SeverityIcon severity={alarm.severity} />
@@ -330,14 +345,19 @@ function ActiveRow({
 // ---------------------------------------------------------------------------
 
 function SeverityIcon({ severity }: { severity: Severity }) {
+  // Phase 14.8 — icon shape stays semantic (rank-tier picks the
+  // glyph: octagon for top tier, triangle for mid, circle for low),
+  // but the colour is pulled from alarm_severities.color_hex so
+  // custom severities use their configured palette.
+  const { color, rank } = useSeverityColors(severity);
   const cls = "h-4 w-4 flex-shrink-0";
-  switch (severity) {
-    case "critical": return <AlertOctagon className={`${cls} text-red-600`} />;
-    case "high":     return <AlertTriangle className={`${cls} text-orange-600`} />;
-    case "medium":   return <AlertTriangle className={`${cls} text-amber-600`} />;
-    case "low":      return <AlertCircle className={`${cls} text-blue-600`} />;
-    case "info":     return <AlertCircle className={`${cls} text-slate-500`} />;
-  }
+  // Map rank -> icon shape. Ranks 1 (most urgent) ... 5+ (least).
+  // Use ranges so custom severities with arbitrary ranks still render.
+  let Icon = AlertCircle;
+  if (rank <= 1)       Icon = AlertOctagon;
+  else if (rank <= 3)  Icon = AlertTriangle;
+  else                 Icon = AlertCircle;
+  return <Icon className={cls} style={{ color }} />;
 }
 
 function StateBadge({ state }: { state: StateValue }) {
@@ -362,26 +382,6 @@ function stateBadgeClass(state: StateValue): string {
       return "bg-slate-50 text-slate-600 border-slate-300";
     case "normal":
       return "bg-emerald-50 text-emerald-800 border-emerald-300";
-  }
-}
-
-function severityBarClass(s: Severity): string {
-  switch (s) {
-    case "critical": return "bg-red-500";
-    case "high":     return "bg-orange-500";
-    case "medium":   return "bg-amber-500";
-    case "low":      return "bg-blue-500";
-    case "info":     return "bg-slate-400";
-  }
-}
-
-function severityRowBgClass(s: Severity): string {
-  switch (s) {
-    case "critical": return "bg-red-50/40";
-    case "high":     return "bg-orange-50/30";
-    case "medium":   return "bg-amber-50/20";
-    case "low":      return "";
-    case "info":     return "";
   }
 }
 

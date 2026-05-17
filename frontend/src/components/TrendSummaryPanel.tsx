@@ -21,7 +21,7 @@
  */
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { AlertTriangle, RefreshCw } from "lucide-react";
+import { AlertTriangle, RefreshCw, HelpCircle, ChevronDown, ChevronUp } from "lucide-react";
 import { api } from "@/lib/api";
 import type {
   TrendSummaryResponse,
@@ -54,6 +54,18 @@ type TrendSummaryPanelProps = {
       can click through from the bell-curve tooltip to the raw data
       table filtered to that tag. */
   onShowInRawTable?: (tagId: number) => void;
+  /**
+   * Phase 13.13 — ROC visibility.
+   *
+   * ROC (rate of change) is only meaningful at the trailing edge of a
+   * live data feed: it asks "how fast is the value changing RIGHT NOW".
+   * In a historical view the end-of-range edge is frozen and "now" has
+   * already passed, so the value would be misleading (or zero, for old
+   * ranges). Pass `false` when the chart is in historical mode to hide
+   * the ROC column, the ROC unit selector, and skip the ROC history
+   * fetch entirely.
+   */
+  showRoc?: boolean;
 };
 
 // Trailing window for ROC. 5 min of raw data covers the least-squares
@@ -61,9 +73,13 @@ type TrendSummaryPanelProps = {
 const ROC_WINDOW_MS = 5 * 60 * 1000;
 
 export default function TrendSummaryPanel({
-  tagIds, start, end, onShowInRawTable,
+  tagIds, start, end, onShowInRawTable, showRoc = true,
 }: TrendSummaryPanelProps) {
   const { formatDateTime } = useTimeFormat();
+
+  // Help panel disclosure state (sticky preference would be nice but
+  // not warranted yet — operators rarely re-open the same chart).
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // ROC unit state, persisted to localStorage.
   const [rocUnit, setRocUnit] = useState<RocUnit>(() => loadRocUnit());
@@ -116,7 +132,7 @@ export default function TrendSummaryPanel({
       });
       return api.get<TrendHistoryResponse>(`/trends/history?${params}`);
     },
-    enabled: tagIds.length > 0 && rocWindow != null,
+    enabled: showRoc && tagIds.length > 0 && rocWindow != null,
     staleTime: 0,
     // Same rationale as summaryQuery — keep the last ROC dataset
     // visible across scans so the cell doesn't flicker to "—".
@@ -148,16 +164,38 @@ export default function TrendSummaryPanel({
     <Card>
       <CardHeader className="pb-2">
         <CardTitle className="text-sm font-medium flex items-center justify-between gap-3">
-          <span>Data quality &amp; availability</span>
+          <span className="flex items-center gap-2">
+            Data quality &amp; availability
+            <button
+              type="button"
+              onClick={() => setHelpOpen((v) => !v)}
+              className="inline-flex items-center gap-1 text-xs font-normal text-muted-foreground hover:text-foreground"
+              title={helpOpen ? "Hide column reference" : "Show column reference"}
+            >
+              <HelpCircle className="h-3.5 w-3.5" />
+              {helpOpen ? (
+                <ChevronUp className="h-3 w-3" />
+              ) : (
+                <ChevronDown className="h-3 w-3" />
+              )}
+            </button>
+          </span>
           <div className="flex items-center gap-3">
-            <RocUnitSelector value={rocUnit} onChange={handleRocUnitChange} />
-            {(summaryQuery.isFetching || rocHistoryQuery.isFetching) && (
+            {showRoc && (
+              <RocUnitSelector value={rocUnit} onChange={handleRocUnitChange} />
+            )}
+            {(summaryQuery.isFetching ||
+              (showRoc && rocHistoryQuery.isFetching)) && (
               <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
             )}
           </div>
         </CardTitle>
       </CardHeader>
       <CardContent>
+        {helpOpen && (
+          <HelpPanel showRoc={showRoc} onClose={() => setHelpOpen(false)} />
+        )}
+
         {summaryQuery.isLoading && (
           <p className="text-xs text-muted-foreground py-2">Loading summary…</p>
         )}
@@ -197,12 +235,14 @@ export default function TrendSummaryPanel({
                   <span className="italic">σ</span> (STD DEV)
                 </TableHead>
                 <TableHead className="text-right" title="Min – Max observed across GOOD samples">Range</TableHead>
-                <TableHead
-                  className="text-right"
-                  title="Rate of change at the trailing edge — least-squares slope over the last 5 min of GOOD samples (ST >= 128, max 20). Hover any cell for diagnostic detail."
-                >
-                  ROC
-                </TableHead>
+                {showRoc && (
+                  <TableHead
+                    className="text-right"
+                    title="Rate of change at the trailing edge — least-squares slope over the last 5 min of GOOD samples (ST >= 128, max 20). Hover any cell for diagnostic detail."
+                  >
+                    ROC
+                  </TableHead>
+                )}
                 <TableHead>Longest gap</TableHead>
                 <TableHead>First sample</TableHead>
                 <TableHead>Last sample</TableHead>
@@ -297,13 +337,15 @@ export default function TrendSummaryPanel({
                         ? `${formatStat(s.observed_min)} – ${formatStat(s.observed_max)}`
                         : "—"}
                     </TableCell>
-                    <TableCell
-                      className="text-right tabular-nums whitespace-nowrap text-slate-700"
-                      data-roc-cell={s.tag_id}
-                      title={rocTooltip(roc)}
-                    >
-                      {formatROC(roc, s.engineering_unit)}
-                    </TableCell>
+                    {showRoc && (
+                      <TableCell
+                        className="text-right tabular-nums whitespace-nowrap text-slate-700"
+                        data-roc-cell={s.tag_id}
+                        title={rocTooltip(roc)}
+                      >
+                        {formatROC(roc, s.engineering_unit)}
+                      </TableCell>
+                    )}
                     <TableCell className="text-xs">
                       {s.longest_gap_sec != null
                         ? (
@@ -399,4 +441,134 @@ function formatStat(v: number | null): string {
   else if (abs >= 1)   str = v.toFixed(3);
   else                  str = v.toFixed(4);
   return str.replace(/\.?0+$/, "");
+}
+
+// ---------------------------------------------------------------------------
+// Help panel
+// ---------------------------------------------------------------------------
+
+/**
+ * Inline reference for every column in the summary table.
+ *
+ * Definitions and time windows are stated explicitly. Operators
+ * sometimes care a lot whether Mean is "across the whole visible range"
+ * vs "trailing N minutes" — making this obvious avoids the wrong
+ * conclusion. ROC is the only field with its own window (5 min); all
+ * other statistical fields use the visible time range.
+ */
+function HelpPanel({
+  showRoc, onClose,
+}: {
+  showRoc: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div className="mb-3 rounded-md border border-blue-200 bg-blue-50/40 p-3 text-xs">
+      <div className="flex items-center justify-between mb-2">
+        <span className="font-medium text-blue-900">Column reference</span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-blue-700 hover:text-blue-900 text-[11px]"
+        >
+          Hide
+        </button>
+      </div>
+
+      <div className="text-blue-900/80 mb-3">
+        Unless noted, every statistic is computed across the
+        <strong> currently visible time range </strong>
+        (the start and end of the chart). Change the range or live
+        window and the values recompute.
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-blue-900/90">
+        <HelpRow term="Availability">
+          Percentage of expected samples that actually landed in the
+          database, regardless of quality. <code>actual / expected × 100</code>.
+          Expected = (range duration) / (tag scan interval).
+        </HelpRow>
+
+        <HelpRow term="Good %">
+          Percentage of expected samples that landed
+          <strong> and </strong> were quality GOOD (ST ≥ 128).
+          A high Availability with low Good % means data is flowing
+          but a sensor or transport is flagging UNCERTAIN / BAD.
+        </HelpRow>
+
+        <HelpRow term="Good">
+          Count of samples with ST ≥ 128. These are the only samples
+          included in Mean / σ / Range / ROC.
+        </HelpRow>
+
+        <HelpRow term="Uncertain">
+          Count of samples with ST in [64, 127]. Typically: stale value,
+          sensor drift, low confidence. <strong>Excluded</strong> from statistics.
+        </HelpRow>
+
+        <HelpRow term="Bad">
+          Count of samples with ST &lt; 64. Typically: comm fault, sensor
+          fault, out of range. <strong>Excluded</strong> from statistics.
+        </HelpRow>
+
+        <HelpRow term="Missing">
+          Expected samples that never arrived (no row at all in the database).
+          <code> expected − actual</code>. High missing usually means
+          modbus worker downtime or a network gap.
+        </HelpRow>
+
+        <HelpRow term="Mean">
+          Arithmetic mean of GOOD samples, computed over the visible
+          time range. <code>Σv / N_good</code>. Non-GOOD samples are skipped.
+        </HelpRow>
+
+        <HelpRow term="σ (STD DEV)">
+          Sample standard deviation of GOOD samples over the visible
+          time range, using Bessel's correction (divisor <code>n − 1</code>).
+          Click any σ cell for the bell-curve breakdown and a jump-to-raw
+          link.
+        </HelpRow>
+
+        <HelpRow term="Range">
+          Minimum and maximum GOOD values observed in the visible time
+          range. Outlier-sensitive — a single spike will widen Range.
+        </HelpRow>
+
+        {showRoc && (
+          <HelpRow term="ROC">
+            Rate of change at the trailing edge of the data — least-squares
+            slope over the <strong>last 5 minutes</strong> of GOOD samples
+            (max 20 points). Independent of the visible range; always uses
+            the trailing 5 min from the chart's end time. The unit selector
+            (/s, /min, /hr) only affects display. Only shown in
+            <strong> Real-Time </strong>mode — in Historical mode the
+            trailing edge isn't "now", so the value would be misleading.
+          </HelpRow>
+        )}
+
+        <HelpRow term="Longest gap">
+          Longest stretch of missing-or-non-GOOD samples within the visible
+          range, in seconds (with a tooltip showing when it started).
+          Useful for finding when a sensor or worker dropped out.
+        </HelpRow>
+
+        <HelpRow term="First / Last sample">
+          Timestamps of the earliest and latest sample of <em>any</em>
+          quality within the visible range. Helps confirm the actual
+          coverage when a tag was enabled mid-window.
+        </HelpRow>
+      </div>
+    </div>
+  );
+}
+
+function HelpRow({
+  term, children,
+}: { term: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="font-medium">{term}</div>
+      <div className="text-[11px] leading-snug">{children}</div>
+    </div>
+  );
 }

@@ -54,10 +54,14 @@ router = APIRouter(prefix="/api/alarms", tags=["alarms"])
 # Vocabularies — must match the CHECK constraints in migration 0028
 # ---------------------------------------------------------------------------
 
-RuleType = Literal[
-    "hi_hi", "hi", "lo", "lo_lo", "deviation", "rate_of_change",
-]
-Severity = Literal["critical", "high", "medium", "low", "info"]
+RuleType = str
+# Phase 14.6b — RuleType is now a free-form string validated by FK to
+# alarm_rule_types.code at DB level. Same rationale as Severity.
+# Phase 14.6 — Severity is now a free-form string validated by FK to
+# alarm_severities.code at DB level. The Literal type can't enumerate
+# user-extensible vocabularies, so we accept any string here and let
+# the alarm_rules_severity_fk constraint reject unknown codes.
+Severity = str
 EventType = Literal[
     "activated", "cleared",
     "acked", "shelved", "unshelved",
@@ -107,6 +111,15 @@ class AlarmRuleCreate(BaseModel):
                     "Supports {tag_name}, {value}, {threshold} substitutions "
                     "in the evaluator.",
     )
+    # Phase 14.7 — Rolling window used by deviation and rate_of_change.
+    # Ignored by other rule types. NULL = evaluator default (60s).
+    window_seconds: int | None = Field(
+        None, ge=1, le=86400,
+        description="Rolling window in seconds. Used by deviation "
+                    "(value compared against rolling mean) and "
+                    "rate_of_change (least-squares slope). Ignored by "
+                    "other rule types. NULL falls back to 60s.",
+    )
 
 
 class AlarmRuleUpdate(BaseModel):
@@ -121,6 +134,7 @@ class AlarmRuleUpdate(BaseModel):
     latched: bool | None = None
     enabled: bool | None = None
     message_template: str | None = Field(None, max_length=500)
+    window_seconds: int | None = Field(None, ge=1, le=86400)
 
 
 class AlarmRuleResponse(BaseModel):
@@ -136,6 +150,7 @@ class AlarmRuleResponse(BaseModel):
     latched: bool
     enabled: bool
     message_template: str | None
+    window_seconds: int | None
     created_at: datetime
     updated_at: datetime
 
@@ -218,16 +233,16 @@ def create_rule(
             INSERT INTO alarm_rules (
                 tag_id, rule_type, severity, threshold, deadband,
                 on_delay_sec, off_delay_sec, latched, enabled,
-                message_template
+                message_template, window_seconds
             )
             VALUES (
                 :tag_id, :rule_type, :severity, :threshold, :deadband,
                 :on_delay_sec, :off_delay_sec, :latched, :enabled,
-                :message_template
+                :message_template, :window_seconds
             )
             RETURNING id, tag_id, rule_type, severity, threshold, deadband,
                       on_delay_sec, off_delay_sec, latched, enabled,
-                      message_template, created_at, updated_at
+                      message_template, window_seconds, created_at, updated_at
         """), body.model_dump()).mappings().first()
         db.commit()
     except IntegrityError as e:
@@ -239,6 +254,22 @@ def create_rule(
                 f"A '{body.rule_type}' rule already exists for tag "
                 f"{body.tag_id}. The four level types (hi_hi, hi, lo, lo_lo) "
                 f"are mutually exclusive per tag.",
+            )
+        if "alarm_rules_severity_fk" in msg or (
+            "foreign key" in msg and "severity" in msg
+        ):
+            raise HTTPException(
+                400,
+                f"Unknown severity '{body.severity}'. Add it under "
+                f"Setup > Alarm Severities first, or pick an existing one.",
+            )
+        if "alarm_rules_rule_type_fk" in msg or (
+            "foreign key" in msg and "rule_type" in msg
+        ):
+            raise HTTPException(
+                400,
+                f"Unknown rule type '{body.rule_type}'. Add it under "
+                f"Setup > Alarm Types first, or pick an existing one.",
             )
         if "foreign key" in msg or "tags" in msg:
             raise HTTPException(
@@ -261,7 +292,7 @@ def list_rules(
     sql = """
         SELECT r.id, r.tag_id, t.name AS tag_name, r.rule_type, r.severity,
                r.threshold, r.deadband, r.on_delay_sec, r.off_delay_sec,
-               r.latched, r.enabled, r.message_template,
+               r.latched, r.enabled, r.message_template, r.window_seconds,
                r.created_at, r.updated_at
         FROM alarm_rules r
         LEFT JOIN tags t ON t.id = r.tag_id
@@ -291,7 +322,7 @@ def get_rule(
     row = db.execute(text("""
         SELECT r.id, r.tag_id, t.name AS tag_name, r.rule_type, r.severity,
                r.threshold, r.deadband, r.on_delay_sec, r.off_delay_sec,
-               r.latched, r.enabled, r.message_template,
+               r.latched, r.enabled, r.message_template, r.window_seconds,
                r.created_at, r.updated_at
         FROM alarm_rules r
         LEFT JOIN tags t ON t.id = r.tag_id
@@ -327,7 +358,7 @@ def update_rule(
         f"WHERE id = :id "
         f"RETURNING id, tag_id, rule_type, severity, threshold, deadband, "
         f"          on_delay_sec, off_delay_sec, latched, enabled, "
-        f"          message_template, created_at, updated_at"
+        f"          message_template, window_seconds, created_at, updated_at"
     )
 
     try:
@@ -341,6 +372,22 @@ def update_rule(
                 409,
                 "Updating rule_type would collide with an existing rule of "
                 "the same type on this tag.",
+            )
+        if "alarm_rules_severity_fk" in msg or (
+            "foreign key" in msg and "severity" in msg
+        ):
+            raise HTTPException(
+                400,
+                f"Unknown severity. Add it under Setup > Alarm "
+                f"Severities first, or pick an existing one.",
+            )
+        if "alarm_rules_rule_type_fk" in msg or (
+            "foreign key" in msg and "rule_type" in msg
+        ):
+            raise HTTPException(
+                400,
+                f"Unknown rule type. Add it under Setup > Alarm "
+                f"Types first, or pick an existing one.",
             )
         raise HTTPException(400, f"Constraint violation: {e.orig}")
 
