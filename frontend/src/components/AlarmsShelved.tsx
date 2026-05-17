@@ -19,10 +19,11 @@ import { api } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { SeverityBadge } from "@/components/SeverityBadge";
 import { useTimeFormat } from "@/lib/timeFormat";
 
-import type { AlarmActive, AlarmEvent, Severity } from "@/types/alarms";
-import { RULE_TYPE_LABELS, SEVERITY_LABELS } from "@/types/alarms";
+import type { AlarmActive, AlarmEvent } from "@/types/alarms";
+import { RULE_TYPE_LABELS } from "@/types/alarms";
 
 const REFRESH_MS = 10_000;
 
@@ -118,10 +119,7 @@ export default function AlarmsShelved() {
                     </Badge>
                   </td>
                   <td className="px-3 py-2">
-                    <Badge variant="outline"
-                           className={`text-[10px] ${severityBadgeClass(r.severity)}`}>
-                      {SEVERITY_LABELS[r.severity]}
-                    </Badge>
+                    <SeverityBadge code={r.severity} />
                   </td>
                   <td className="px-3 py-2 text-right tabular-nums">
                     {formatNumber(r.threshold)}
@@ -185,16 +183,6 @@ export default function AlarmsShelved() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function severityBadgeClass(s: Severity): string {
-  switch (s) {
-    case "critical": return "bg-red-50 text-red-800 border-red-300 font-semibold";
-    case "high":     return "bg-orange-50 text-orange-800 border-orange-300";
-    case "medium":   return "bg-amber-50 text-amber-800 border-amber-300";
-    case "low":      return "bg-blue-50 text-blue-800 border-blue-300";
-    case "info":     return "bg-slate-50 text-slate-700 border-slate-300";
-  }
-}
 
 function formatNumber(v: number): string {
   const abs = Math.abs(v);

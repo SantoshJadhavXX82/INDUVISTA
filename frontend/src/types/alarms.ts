@@ -88,6 +88,10 @@ export interface AlarmRule {
   latched: boolean;
   enabled: boolean;
   message_template: string | null;
+  // Phase 14.7 — rolling window for deviation / rate_of_change.
+  // Null for other rule types; null also falls back to evaluator
+  // default (60s) when set on a dev/RoC rule.
+  window_seconds: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -142,6 +146,7 @@ export interface AlarmRuleCreate {
   latched: boolean;
   enabled: boolean;
   message_template: string | null;
+  window_seconds: number | null;
 }
 
 export type AlarmRuleUpdate = Partial<Omit<AlarmRuleCreate, "tag_id">>;

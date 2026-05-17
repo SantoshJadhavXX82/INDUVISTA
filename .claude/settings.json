@@ -17,7 +17,8 @@
       "Bash(grep -iE \"\\(password|secret|api[_-]?key|token|bearer\\)\\\\s*[:=]\\\\s*['\\\\\"]?[A-Za-z0-9_\\\\-]{8,}\")",
       "Bash(grep -viE \"POSTGRES_PASSWORD=induvista_dev_2026|password.*str|password:\\\\s*str|password.*\\\\$\\\\{\")",
       "Bash(grep -iE \"id_rsa|\\\\.pem$|\\\\.p12$|\\\\.pfx$|credentials\\\\.json|service-account|keystore\")",
-      "Bash(grep -rEn \"\\(sk-ant-[A-Za-z0-9_\\\\-]{20,}|sk-[A-Za-z0-9]{40,}|AIza[0-9A-Za-z_\\\\-]{30,}|ghp_[A-Za-z0-9]{30,}|aws_secret|BEGIN \\(RSA |OPENSSH \\)?PRIVATE KEY\\)\" _phase134 _phase134hotfix _phase135 _phase136 _phase137 _smoke _tagpicker _hotfix .claude/settings.json backend/app/api/trends.py)"
+      "Bash(grep -rEn \"\\(sk-ant-[A-Za-z0-9_\\\\-]{20,}|sk-[A-Za-z0-9]{40,}|AIza[0-9A-Za-z_\\\\-]{30,}|ghp_[A-Za-z0-9]{30,}|aws_secret|BEGIN \\(RSA |OPENSSH \\)?PRIVATE KEY\\)\" _phase134 _phase134hotfix _phase135 _phase136 _phase137 _smoke _tagpicker _hotfix .claude/settings.json backend/app/api/trends.py)",
+      "PowerShell(git add -A; \"staged: $\\(\\(git diff --cached --name-only | Measure-Object -Line\\).Lines\\) files\"; git diff --cached --stat | Select-Object -Last 5)"
     ]
   }
 }

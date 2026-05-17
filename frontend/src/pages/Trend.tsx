@@ -420,15 +420,19 @@ export default function Trend() {
               <Button
                 variant="outline"
                 size="sm"
-                className={`h-8 text-xs gap-1.5 ${showEnvelope && historyQuery.data?.aggregation !== "raw" ? "border-blue-400 text-blue-700" : ""}`}
+                className={`h-8 text-xs gap-1.5 ${showEnvelope && historyQuery.data?.aggregation !== "raw" && selectedIds.length === 1 ? "border-blue-400 text-blue-700" : ""}`}
                 onClick={() => setShowEnvelope((v) => !v)}
-                disabled={historyQuery.data?.aggregation === "raw"}
-                title={historyQuery.data?.aggregation === "raw"
-                  ? "Envelope applies only to aggregated views (current view is raw)"
-                  : "Min/Max envelope band around the aggregation line"}
+                disabled={historyQuery.data?.aggregation === "raw" || selectedIds.length > 1}
+                title={
+                  historyQuery.data?.aggregation === "raw"
+                    ? "Envelope applies only to aggregated views (current view is raw)"
+                    : selectedIds.length > 1
+                      ? "Envelope is hidden when more than one tag is charted — the overlapping min/max bands make the chart hard to read"
+                      : "Min/Max envelope band around the aggregation line"
+                }
               >
                 <BarChart3 className="h-3 w-3" />
-                Envelope: {showEnvelope ? "On" : "Off"}
+                Envelope: {(showEnvelope && selectedIds.length === 1) ? "On" : "Off"}
               </Button>
               <QualityFilterSelector
                 value={qualityFilter}
@@ -560,7 +564,7 @@ export default function Trend() {
 
           {historyQuery.data &&
             historyQuery.data.series.some((s) => s.returned_count > 0) && (
-            <TrendChart ref={chartRef} history={historyQuery.data} height={440} tooltipMode={tooltipMode} hiddenTagIds={hiddenTagIds} qualityFilter={qualityFilter} showEnvelope={showEnvelope} />
+            <TrendChart ref={chartRef} history={historyQuery.data} height={440} tooltipMode={tooltipMode} hiddenTagIds={hiddenTagIds} qualityFilter={qualityFilter} showEnvelope={showEnvelope && selectedIds.length === 1} />
           )}
         </CardContent>
       </Card>
@@ -589,6 +593,7 @@ export default function Trend() {
           start={historyQuery.data.start}
           end={historyQuery.data.end}
           onShowInRawTable={handleShowInRawTable}
+          showRoc={mode === "live"}
         />
       )}
     </div>

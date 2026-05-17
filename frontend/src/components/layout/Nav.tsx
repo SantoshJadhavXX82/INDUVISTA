@@ -48,6 +48,8 @@ import {
   ServerCog,
   Eye,
   TrendingUp,
+  Palette,
+  ListChecks,
   BellRing,
   type LucideIcon,
 } from "lucide-react";
@@ -79,6 +81,8 @@ const entries: NavEntry[] = [
     icon: Globe2,
     children: [
       { kind: "leaf", to: "/global/engineering-units", label: "Engineering Units", icon: Ruler, matchPrefix: "/global/engineering-units" },
+      { kind: "leaf", to: "/global/alarm-severities", label: "Alarm Severities", icon: Palette, matchPrefix: "/global/alarm-severities" },
+      { kind: "leaf", to: "/global/alarm-types", label: "Alarm Types", icon: ListChecks, matchPrefix: "/global/alarm-types" },
       { kind: "leaf", to: "/global/groups", label: "Groups", icon: Tag, matchPrefix: "/global/groups" },
       { kind: "leaf", to: "/global/named-sets", label: "Enumerations", icon: Hash, matchPrefix: "/global/named-sets" },
       { kind: "leaf", to: "/global/duty-standby-values", label: "Duty/Standby Values", icon: ArrowLeftRight, matchPrefix: "/global/duty-standby-values" },

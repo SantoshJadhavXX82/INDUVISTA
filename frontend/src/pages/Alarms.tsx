@@ -19,9 +19,11 @@ import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useSeverityColors, hexWithAlpha } from "@/components/SeverityBadge";
+import { useSeverities } from "@/lib/useSeverities";
 
 import type { AlarmActive, Severity } from "@/types/alarms";
-import { SEVERITY_LABELS, SEVERITY_RANK } from "@/types/alarms";
+import { SEVERITY_RANK } from "@/types/alarms";
 
 import AlarmsActive from "@/components/AlarmsActive";
 import AlarmsHistory from "@/components/AlarmsHistory";
@@ -58,6 +60,16 @@ export default function Alarms() {
   const totalActive = activeQuery.data?.length ?? 0;
   const totalShelved = shelvedQuery.data?.length ?? 0;
 
+  // Phase 14.8 — counter chips are now driven by the live
+  // alarm_severities list (sorted by rank) instead of a hardcoded
+  // critical/high/medium/low/info array. Custom severities defined
+  // under Setup show up here automatically.
+  const { data: severitiesData } = useSeverities();
+  const severitiesList = useMemo(
+    () => [...(severitiesData ?? [])].sort((a, b) => a.rank - b.rank),
+    [severitiesData],
+  );
+
   return (
     <div className="flex flex-col gap-4 p-4">
       {/* Header card with severity counters */}
@@ -84,12 +96,12 @@ export default function Alarms() {
         </CardHeader>
         <CardContent className="pt-0">
           <div className="flex items-center gap-2 flex-wrap">
-            {(["critical", "high", "medium", "low", "info"] as Severity[]).map((s) => (
+            {severitiesList.map((s) => (
               <SeverityCounter
-                key={s}
-                severity={s}
-                count={counts[s]}
-                muted={counts[s] === 0}
+                key={s.code}
+                severity={s.code}
+                count={counts[s.code] ?? 0}
+                muted={(counts[s.code] ?? 0) === 0}
               />
             ))}
           </div>
@@ -148,25 +160,35 @@ export default function Alarms() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function severityRollup(rows: AlarmActive[]): Record<Severity, number> {
-  const out: Record<Severity, number> = {
-    critical: 0, high: 0, medium: 0, low: 0, info: 0,
-  };
-  for (const r of rows) out[r.severity]++;
+function severityRollup(rows: AlarmActive[]): Record<string, number> {
+  // Phase 14.8 — open map rather than fixed-key Record<Severity>. Any
+  // code that appears in the active list gets a counter; custom
+  // severities are first-class.
+  const out: Record<string, number> = {};
+  for (const r of rows) out[r.severity] = (out[r.severity] ?? 0) + 1;
   return out;
 }
 
 function SeverityCounter({
   severity, count, muted,
 }: { severity: Severity; count: number; muted: boolean }) {
+  // Phase 14.8 — colors pulled from alarm_severities.color_hex via
+  // useSeverityColors. Custom severities defined under Setup now show
+  // up with their configured colour in the header chip row too.
+  const { color, label } = useSeverityColors(severity);
   return (
     <div
       className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md border ${
         muted ? "opacity-50" : ""
-      } ${severityBgClass(severity)}`}
+      }`}
+      style={{
+        borderColor: hexWithAlpha(color, 0.4),
+        backgroundColor: hexWithAlpha(color, 0.06),
+      }}
     >
-      <span className={`w-2 h-2 rounded-full ${severityDotClass(severity)}`} />
-      <span className="text-xs font-medium">{SEVERITY_LABELS[severity]}</span>
+      <span className="w-2 h-2 rounded-full"
+            style={{ backgroundColor: color }} />
+      <span className="text-xs font-medium">{label}</span>
       <span className="text-xs tabular-nums font-semibold">{count}</span>
     </div>
   );
@@ -193,26 +215,3 @@ function TabButton({
     </button>
   );
 }
-
-function severityBgClass(s: Severity): string {
-  switch (s) {
-    case "critical": return "border-red-200 bg-red-50/50";
-    case "high":     return "border-orange-200 bg-orange-50/50";
-    case "medium":   return "border-amber-200 bg-amber-50/50";
-    case "low":      return "border-blue-200 bg-blue-50/50";
-    case "info":     return "border-slate-200 bg-slate-50/50";
-  }
-}
-function severityDotClass(s: Severity): string {
-  switch (s) {
-    case "critical": return "bg-red-500";
-    case "high":     return "bg-orange-500";
-    case "medium":   return "bg-amber-500";
-    case "low":      return "bg-blue-500";
-    case "info":     return "bg-slate-400";
-  }
-}
-
-// Exported for use by tab components so the severity palette stays
-// consistent across the page.
-export { severityBgClass, severityDotClass };

@@ -142,4 +142,10 @@ app.include_router(trends.router)
 
 # Phase 14.2 router - alarms (rules CRUD, active list, history, ack)
 from app.api import alarms as _alarms
+from app.api import alarm_severities as _alarm_severities
+from app.api import alarm_rule_types as _alarm_rule_types
+from app.api import calc as _calc
 app.include_router(_alarms.router)
+app.include_router(_alarm_severities.router)
+app.include_router(_alarm_rule_types.router)
+app.include_router(_calc.router)
