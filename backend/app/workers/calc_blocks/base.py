@@ -58,7 +58,8 @@ class BaseBlock(ABC):
     """Abstract base class for all calc blocks."""
 
     CODE: str  # subclasses set this; matches calc_block_types.code
-
+    CONFIG_SCHEMA: dict = {}   # ← add this line; populated by install_schemas()
+    
     @classmethod
     @abstractmethod
     def inputs(cls, block_config: dict[str, Any]) -> list[int]:
@@ -94,6 +95,24 @@ class BaseBlock(ABC):
             return BAD_QUALITY
         return min(s.quality for s in inputs)
 
+class StatefulBlock(BaseBlock):
+    """Block that persists state across evaluation cycles.
+
+    The worker fetches state from calc_block_state before each
+    evaluation, passes it to evaluate() along with wall-clock time,
+    and persists the new_state returned by the block.
+
+    Subclass evaluate signature:
+        evaluate(cls, cfg, samples, state, now_wall)
+            -> (BlockResult, new_state_dict)
+
+    new_state_dict must be JSON-serializable.
+    """
+    STATEFUL = True
+
+    @classmethod
+    def evaluate(cls, cfg, samples, state, now_wall):
+        raise NotImplementedError("StatefulBlock subclass must implement evaluate")
 
 # ---------------------------------------------------------------------------
 # Registry

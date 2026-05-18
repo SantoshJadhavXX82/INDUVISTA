@@ -1,0 +1,11 @@
+tag_name,rule_type,severity,threshold,deadband,on_delay_sec,off_delay_sec,latched,window_seconds,message_template,enabled
+smoke_phase_14_11_tag_a,hi_hi,critical,95.0,1.0,30,30,true,,Tag A critical high-high,true
+smoke_phase_14_11_tag_a,hi,high,85.0,1.0,30,30,false,,,true
+smoke_phase_14_11_tag_b,lo,medium,10.0,0.5,15,15,false,,Tag B low,true
+smoke_phase_14_11_tag_b,rate_of_change,high,5.0,0.0,5,5,false,60,Fast change,true
+smoke_phase_14_11_tag_a,frozen,critical,1.0,0.0,0,0,false,,,true
+smoke_phase_14_11_tag_nonexistent,hi,high,50.0,0.0,0,0,false,,,true
+smoke_phase_14_11_tag_a,hi,low,90.0,0.0,0,0,false,,,true
+smoke_phase_14_11_tag_b,rate_of_change,medium,3.0,0.0,0,0,false,,Missing window,true
+smoke_phase_14_11_tag_a,hi_hi,bogus_severity,99.0,0.0,0,0,false,,,true
+smoke_phase_14_11_tag_b,not_a_real_type,high,50.0,0.0,0,0,false,,,true

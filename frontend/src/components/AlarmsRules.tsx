@@ -1,17 +1,16 @@
 /**
- * Phase 14.5 — Alarm rules CRUD.
+ * Phase 14.5 - Alarm rules CRUD.
  *
- * Lists every configured rule with per-row actions (toggle enabled,
- * edit, delete). An inline form expands above the list for create/edit.
- * The form covers the four "evaluable" rule types (hi_hi / hi / lo /
- * lo_lo). deviation and rate_of_change are accepted by the backend
- * schema but not yet executed by the evaluator, so we don't expose
- * them here.
+ * Phase 14.10 - Added frozen to the windowed-form-fields list with
+ * its own threshold-unit hint (frozen uses inverted comparison: low
+ * delta = stuck).
+ *
+ * Phase 14.11 - Bulk Import button + modal mount.
  */
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Pencil, Trash2, Power, X, Save, AlertTriangle, RefreshCw,
+  Plus, Pencil, Trash2, Power, X, Save, AlertTriangle, RefreshCw, Upload, Download,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
@@ -20,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { SeverityBadge } from "@/components/SeverityBadge";
+import AlarmsBulkImport from "@/components/AlarmsBulkImport";
 
 import type {
   AlarmRule, AlarmRuleCreate, AlarmRuleUpdate, RuleType, Severity,
@@ -33,22 +33,31 @@ import type { AlarmRuleType } from "@/types/alarmRuleTypes";
 
 type TagOption = { id: number; name: string };
 
-// What the form holds while the operator is editing. tag_id can be 0
-// for "no selection yet" since 0 isn't a valid tag id.
+// Rule types that use a rolling window. Phase 14.10 added frozen.
+const WINDOWED_RULE_TYPES = new Set<string>([
+  "deviation", "rate_of_change", "frozen",
+]);
+
+// Phase 14.12 - Trigger a browser download of the exported rule set.
+// Format is in the URL path (not query param) so the route can't collide
+// with /api/alarms/rules/{rule_id}. Browser handles the file via
+// Content-Disposition. Relative URL works in dev (Vite proxy) and prod.
+function downloadExport(format: "csv" | "xlsx"): void {
+  window.location.href = `/api/alarms/rules/export/${format}`;
+}
+
 interface FormState {
-  id: number | null;         // null when creating, number when editing
+  id: number | null;
   tag_id: number;
   rule_type: RuleType;
   severity: Severity;
-  threshold: string;         // strings so empty inputs are representable
+  threshold: string;
   deadband: string;
   on_delay_sec: string;
   off_delay_sec: string;
   latched: boolean;
   enabled: boolean;
   message_template: string;
-  // Phase 14.7 — rolling window for deviation / rate_of_change.
-  // Shown only when one of those rule types is selected.
   window_seconds: string;
 }
 
@@ -72,6 +81,8 @@ export default function AlarmsRules() {
   const [formOpen, setFormOpen] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
+  // Phase 14.11 - bulk import modal state
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   // ---- queries ----
 
@@ -81,21 +92,12 @@ export default function AlarmsRules() {
     staleTime: 5_000,
   });
 
-  // Phase 14.6 — load severities from the master table instead of using
-  // the hardcoded ALL_SEVERITIES constant. Operators can now add custom
-  // severities under Setup > Alarm Severities and they appear here.
-  // Phase 14.8 — the per-row badge label is rendered by <SeverityBadge>
-  // which calls useSeverities itself; this hook stays for the form
-  // dropdown options only.
   const severitiesQuery = useSeverities();
   const severityOptions = useMemo(
     () => severitiesQuery.data ?? [],
     [severitiesQuery.data]
   );
 
-  // Phase 14.6b — load rule types from the master table. Includes
-  // is_evaluable flag so the dropdown can warn when picking inert
-  // types (operator can save the rule but it'll never fire).
   const ruleTypesQuery = useRuleTypes();
   const ruleTypeOptions = useMemo(
     () => ruleTypesQuery.data ?? [],
@@ -108,9 +110,6 @@ export default function AlarmsRules() {
     ruleTypeOptions.find((rt) => rt.code === code)?.is_evaluable ??
     EVALUABLE_RULE_TYPES.includes(code as RuleType);
 
-  // Tag list for the picker. Tags rarely change so a fairly long
-  // staleTime is fine. If the list is huge in a customer install,
-  // we'd swap this for a search-as-you-type combobox.
   const tagsQuery = useQuery({
     queryKey: ["tags-all"],
     queryFn: () => api.get<TagOption[]>("/tags"),
@@ -121,12 +120,6 @@ export default function AlarmsRules() {
     const raw = tagsQuery.data ?? [];
     return [...raw].sort((a, b) => a.name.localeCompare(b.name));
   }, [tagsQuery.data]);
-
-  const tagNameById = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const t of tagOptions) m.set(t.id, t.name);
-    return m;
-  }, [tagOptions]);
 
   // ---- mutations ----
 
@@ -199,12 +192,8 @@ export default function AlarmsRules() {
   const handleSubmit = () => {
     setFormError(null);
 
-    // Light client-side validation before round-tripping to the API.
     if (!form.tag_id) return setFormError("Pick a tag.");
 
-    // Phase 14.9 — Boolean rule types don't use threshold or deadband.
-    // Form hides those inputs entirely; we default-fill them so the
-    // payload still satisfies the API's typed schema.
     const isBool = form.rule_type === "bool_true" || form.rule_type === "bool_false";
 
     let threshold: number;
@@ -224,9 +213,7 @@ export default function AlarmsRules() {
     const offDelay = parseInt(form.off_delay_sec, 10);
     if (!isFinite(offDelay) || offDelay < 0) return setFormError("Off-delay must be an integer >= 0.");
 
-    // Phase 14.7 — window_seconds only matters for deviation / rate_of_change.
-    // For other rule types we send null (the API ignores it).
-    const isWindowed = form.rule_type === "deviation" || form.rule_type === "rate_of_change";
+    const isWindowed = WINDOWED_RULE_TYPES.has(form.rule_type);
     let windowSeconds: number | null = null;
     if (isWindowed) {
       const ws = parseInt(form.window_seconds, 10);
@@ -253,7 +240,6 @@ export default function AlarmsRules() {
     if (form.id == null) {
       createMutation.mutate(body);
     } else {
-      // PATCH excludes tag_id (it's immutable by API design)
       const { tag_id: _omit, ...patchBody } = body;
       updateMutation.mutate({ id: form.id, body: patchBody });
     }
@@ -273,170 +259,212 @@ export default function AlarmsRules() {
   const rules = rulesQuery.data ?? [];
 
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center justify-between gap-3 flex-wrap">
-          <span className="flex items-center gap-2">
-            Alarm rules
-            <span className="text-xs text-muted-foreground font-normal">
-              {rules.length} configured
+    <>
+      <AlarmsBulkImport open={bulkOpen} onClose={() => setBulkOpen(false)} />
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-medium flex items-center justify-between gap-3 flex-wrap">
+            <span className="flex items-center gap-2">
+              Alarm rules
+              <span className="text-xs text-muted-foreground font-normal">
+                {rules.length} configured
+              </span>
+              {(rulesQuery.isFetching || updateMutation.isPending || deleteMutation.isPending) && (
+                <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
+              )}
             </span>
-            {(rulesQuery.isFetching || updateMutation.isPending || deleteMutation.isPending) && (
-              <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
+            {!formOpen && (
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
+                        onClick={() => setBulkOpen(true)}>
+                  <Upload className="h-3 w-3" />
+                  Bulk import
+                </Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
+                        onClick={() => downloadExport("csv")}
+                        disabled={rules.length === 0}
+                        title={rules.length === 0 ? "No rules to export" : "Download all alarm rules as CSV"}>
+                  <Download className="h-3 w-3" />
+                  Export CSV
+                </Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
+                        onClick={() => downloadExport("xlsx")}
+                        disabled={rules.length === 0}
+                        title={rules.length === 0 ? "No rules to export" : "Download all alarm rules as XLSX"}>
+                  <Download className="h-3 w-3" />
+                  Export XLSX
+                </Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
+                        onClick={openCreate}>
+                  <Plus className="h-3 w-3" />
+                  New rule
+                </Button>
+              </div>
             )}
-          </span>
-          {!formOpen && (
-            <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
-                    onClick={openCreate}>
-              <Plus className="h-3 w-3" />
-              New rule
-            </Button>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {formOpen && (
+            <RuleForm
+              form={form}
+              onChange={setForm}
+              error={formError}
+              saving={createMutation.isPending || updateMutation.isPending}
+              tagOptions={tagOptions}
+              severityOptions={severityOptions}
+              ruleTypeOptions={ruleTypeOptions}
+              onSubmit={handleSubmit}
+              onCancel={closeForm}
+              tagsLoading={tagsQuery.isLoading}
+            />
           )}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
-        {formOpen && (
-          <RuleForm
-            form={form}
-            onChange={setForm}
-            error={formError}
-            saving={createMutation.isPending || updateMutation.isPending}
-            tagOptions={tagOptions}
-            severityOptions={severityOptions}
-            ruleTypeOptions={ruleTypeOptions}
-            onSubmit={handleSubmit}
-            onCancel={closeForm}
-            tagsLoading={tagsQuery.isLoading}
-          />
-        )}
 
-        {rulesQuery.isLoading && (
-          <p className="text-xs text-muted-foreground py-6 px-3">Loading rules…</p>
-        )}
+          {rulesQuery.isLoading && (
+            <p className="text-xs text-muted-foreground py-6 px-3">Loading rules...</p>
+          )}
 
-        {rulesQuery.isError && (
-          <div className="flex items-start gap-2 text-xs text-destructive py-3 px-3">
-            <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-            <span>Failed to load: {(rulesQuery.error as Error)?.message}</span>
-          </div>
-        )}
+          {rulesQuery.isError && (
+            <div className="flex items-start gap-2 text-xs text-destructive py-3 px-3">
+              <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+              <span>Failed to load: {(rulesQuery.error as Error)?.message}</span>
+            </div>
+          )}
 
-        {rules.length === 0 && rulesQuery.data && (
-          <p className="text-xs text-muted-foreground py-8 px-3 text-center">
-            No alarm rules configured yet. Click <strong>New rule</strong> to add one.
-          </p>
-        )}
+          {rules.length === 0 && rulesQuery.data && (
+            <p className="text-xs text-muted-foreground py-8 px-3 text-center">
+              No alarm rules configured yet. Click <strong>New rule</strong> or <strong>Bulk import</strong> to add some.
+            </p>
+          )}
 
-        {rules.length > 0 && (
-          <div className="overflow-x-auto border-t border-border">
-            <table className="w-full text-xs">
-              <thead className="bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
-                <tr>
-                  <th className="text-left px-3 py-2 font-medium">Tag</th>
-                  <th className="text-left px-3 py-2 font-medium">Type</th>
-                  <th className="text-left px-3 py-2 font-medium">Severity</th>
-                  <th className="text-right px-3 py-2 font-medium">Threshold</th>
-                  <th className="text-right px-3 py-2 font-medium">Deadband</th>
-                  <th className="text-right px-3 py-2 font-medium" title="on_delay / off_delay seconds">Delays</th>
-                  <th className="text-center px-3 py-2 font-medium">Latched</th>
-                  <th className="text-center px-3 py-2 font-medium">Enabled</th>
-                  <th className="text-right px-3 py-2 font-medium">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rules.map((r) => (
-                  <tr key={r.id} className="border-t border-border hover:bg-secondary/30">
-                    <td className="px-3 py-1.5">{r.tag_name ?? `#${r.tag_id}`}</td>
-                    <td className="px-3 py-1.5">
-                      <Badge
-                        variant="outline"
-                        className={`text-[10px] font-mono ${
-                          ruleTypeIsEvaluable(r.rule_type)
-                            ? ""
-                            : "bg-amber-50 text-amber-800 border-amber-300"
-                        }`}
-                        title={
-                          ruleTypeIsEvaluable(r.rule_type)
-                            ? undefined
-                            : "Evaluator has no logic for this rule type — this rule will not fire."
-                        }
-                      >
-                        {ruleTypeLabel(r.rule_type)}
-                        {!ruleTypeIsEvaluable(r.rule_type) && " (inert)"}
-                      </Badge>
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <SeverityBadge code={r.severity} />
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums">
-                      {(r.rule_type === "bool_true" || r.rule_type === "bool_false")
-                        ? <span className="text-muted-foreground">n/a</span>
-                        : (r.rule_type === "deviation" || r.rule_type === "rate_of_change")
-                          ? (
-                            <span title={r.rule_type === "rate_of_change" ? "units/sec over window" : "max deviation from rolling mean"}>
-                              {r.threshold}
-                              <span className="text-[10px] text-muted-foreground ml-1">
-                                @ {r.window_seconds ?? 60}s
-                              </span>
-                            </span>
-                          )
-                          : r.threshold}
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">
-                      {(r.rule_type === "bool_true" || r.rule_type === "bool_false")
-                        ? "n/a"
-                        : r.deadband}
-                    </td>
-                    <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">
-                      {r.on_delay_sec}s / {r.off_delay_sec}s
-                    </td>
-                    <td className="px-3 py-1.5 text-center text-muted-foreground">
-                      {r.latched ? "✓" : "—"}
-                    </td>
-                    <td className="px-3 py-1.5 text-center">
-                      <button
-                        type="button"
-                        onClick={() => toggleEnabled(r)}
-                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
-                          r.enabled
-                            ? "bg-emerald-50 text-emerald-800 border border-emerald-300"
-                            : "bg-slate-100 text-slate-600 border border-slate-300"
-                        }`}
-                        title={r.enabled ? "Click to disable" : "Click to enable"}
-                      >
-                        <Power className="h-2.5 w-2.5" />
-                        {r.enabled ? "ON" : "OFF"}
-                      </button>
-                    </td>
-                    <td className="px-3 py-1.5 text-right">
-                      <div className="inline-flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => openEdit(r)}
-                          className="p-1 rounded hover:bg-secondary/60 text-muted-foreground hover:text-foreground"
-                          title="Edit"
-                        >
-                          <Pencil className="h-3 w-3" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDelete(r)}
-                          className="p-1 rounded hover:bg-red-100 text-muted-foreground hover:text-red-700"
-                          title="Delete"
-                        >
-                          <Trash2 className="h-3 w-3" />
-                        </button>
-                      </div>
-                    </td>
+          {rules.length > 0 && (
+            <div className="overflow-x-auto border-t border-border">
+              <table className="w-full text-xs">
+                <thead className="bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
+                  <tr>
+                    <th className="text-left px-3 py-2 font-medium">Tag</th>
+                    <th className="text-left px-3 py-2 font-medium">Type</th>
+                    <th className="text-left px-3 py-2 font-medium">Severity</th>
+                    <th className="text-right px-3 py-2 font-medium">Threshold</th>
+                    <th className="text-right px-3 py-2 font-medium">Deadband</th>
+                    <th className="text-right px-3 py-2 font-medium" title="on_delay / off_delay seconds">Delays</th>
+                    <th className="text-center px-3 py-2 font-medium">Latched</th>
+                    <th className="text-center px-3 py-2 font-medium">Enabled</th>
+                    <th className="text-right px-3 py-2 font-medium">Actions</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </CardContent>
-    </Card>
+                </thead>
+                <tbody>
+                  {rules.map((r) => (
+                    <tr key={r.id} className="border-t border-border hover:bg-secondary/30">
+                      <td className="px-3 py-1.5">{r.tag_name ?? `#${r.tag_id}`}</td>
+                      <td className="px-3 py-1.5">
+                        <Badge
+                          variant="outline"
+                          className={`text-[10px] font-mono ${
+                            ruleTypeIsEvaluable(r.rule_type)
+                              ? ""
+                              : "bg-amber-50 text-amber-800 border-amber-300"
+                          }`}
+                          title={
+                            ruleTypeIsEvaluable(r.rule_type)
+                              ? undefined
+                              : "Evaluator has no logic for this rule type - this rule will not fire."
+                          }
+                        >
+                          {ruleTypeLabel(r.rule_type)}
+                          {!ruleTypeIsEvaluable(r.rule_type) && " (inert)"}
+                        </Badge>
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <SeverityBadge code={r.severity} />
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums">
+                        {(r.rule_type === "bool_true" || r.rule_type === "bool_false")
+                          ? <span className="text-muted-foreground">n/a</span>
+                          : (WINDOWED_RULE_TYPES.has(r.rule_type))
+                            ? (
+                              <span title={thresholdHint(r.rule_type)}>
+                                {r.threshold}
+                                <span className="text-[10px] text-muted-foreground ml-1">
+                                  @ {r.window_seconds ?? 60}s
+                                </span>
+                              </span>
+                            )
+                            : r.threshold}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">
+                        {(r.rule_type === "bool_true" || r.rule_type === "bool_false")
+                          ? "n/a"
+                          : r.deadband}
+                      </td>
+                      <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground">
+                        {r.on_delay_sec}s / {r.off_delay_sec}s
+                      </td>
+                      <td className="px-3 py-1.5 text-center text-muted-foreground">
+                        {r.latched ? "Y" : "-"}
+                      </td>
+                      <td className="px-3 py-1.5 text-center">
+                        <button
+                          type="button"
+                          onClick={() => toggleEnabled(r)}
+                          className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
+                            r.enabled
+                              ? "bg-emerald-50 text-emerald-800 border border-emerald-300"
+                              : "bg-slate-100 text-slate-600 border border-slate-300"
+                          }`}
+                          title={r.enabled ? "Click to disable" : "Click to enable"}
+                        >
+                          <Power className="h-2.5 w-2.5" />
+                          {r.enabled ? "ON" : "OFF"}
+                        </button>
+                      </td>
+                      <td className="px-3 py-1.5 text-right">
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openEdit(r)}
+                            className="p-1 rounded hover:bg-secondary/60 text-muted-foreground hover:text-foreground"
+                            title="Edit"
+                          >
+                            <Pencil className="h-3 w-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(r)}
+                            className="p-1 rounded hover:bg-red-100 text-muted-foreground hover:text-red-700"
+                            title="Delete"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Hints
+// ---------------------------------------------------------------------------
+
+function thresholdHint(ruleType: string): string {
+  if (ruleType === "deviation") {
+    return "max deviation from rolling mean over the window";
+  }
+  if (ruleType === "rate_of_change") {
+    return "units/sec over the window";
+  }
+  if (ruleType === "frozen") {
+    return "max (max - min) over the window to count as frozen";
+  }
+  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -477,7 +505,6 @@ function RuleForm({
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-        {/* Tag */}
         <label className="flex flex-col gap-1 text-xs col-span-2">
           <span className="text-muted-foreground">Tag</span>
           <select
@@ -486,7 +513,7 @@ function RuleForm({
             disabled={editing || tagsLoading}
             className="h-8 text-xs bg-card border border-border rounded px-2 disabled:opacity-60"
           >
-            <option value="">{tagsLoading ? "Loading tags…" : "Select a tag…"}</option>
+            <option value="">{tagsLoading ? "Loading tags..." : "Select a tag..."}</option>
             {tagOptions.map((t) => (
               <option key={t.id} value={t.id}>{t.name}</option>
             ))}
@@ -498,7 +525,6 @@ function RuleForm({
           )}
         </label>
 
-        {/* Rule type */}
         <label className="flex flex-col gap-1 text-xs">
           <span className="text-muted-foreground">Type</span>
           <select
@@ -517,15 +543,14 @@ function RuleForm({
             if (!picked || picked.is_evaluable) return null;
             return (
               <span className="text-[10px] text-amber-700 leading-tight mt-0.5">
-                ⚠ The evaluator has no logic for this type. The rule can
-                be saved but will <strong>never fire</strong> until
+                Warning: the evaluator has no logic for this type. The rule
+                can be saved but will <strong>never fire</strong> until
                 evaluator support ships.
               </span>
             );
           })()}
         </label>
 
-        {/* Severity */}
         <label className="flex flex-col gap-1 text-xs">
           <span className="text-muted-foreground">Severity</span>
           <select
@@ -539,29 +564,33 @@ function RuleForm({
           </select>
         </label>
 
-        {/* Threshold + Deadband — hidden for boolean rule types since
-            the comparison is encoded by the type itself. Phase 14.9. */}
         {(() => {
           const isBool = form.rule_type === "bool_true" || form.rule_type === "bool_false";
           if (isBool) {
             return (
               <div className="col-span-2 text-[11px] text-muted-foreground bg-secondary/30 border border-border rounded px-2 py-1.5">
-                <strong>Boolean rule —</strong>{" "}
+                <strong>Boolean rule -</strong>{" "}
                 {form.rule_type === "bool_true"
-                  ? "fires when value ≠ 0 (asserted)."
+                  ? "fires when value != 0 (asserted)."
                   : "fires when value = 0 (absent)."}
                 {" "}Threshold / deadband not used.
                 The on-delay below acts as a debounce timer.
               </div>
             );
           }
+          // Frozen needs a different threshold label since the comparison is
+          // inverted (max delta to count as frozen, not min to count as active)
+          const isFrozen = form.rule_type === "frozen";
+          const thresholdLabel = isFrozen
+            ? "Threshold (max delta to count as frozen)"
+            : "Threshold";
           return (
             <>
               <label className="flex flex-col gap-1 text-xs">
-                <span className="text-muted-foreground">Threshold</span>
+                <span className="text-muted-foreground">{thresholdLabel}</span>
                 <Input value={form.threshold}
                        onChange={(e) => set("threshold", e.target.value)}
-                       placeholder="e.g. 100"
+                       placeholder={isFrozen ? "e.g. 0.5" : "e.g. 100"}
                        {...numericLikeProps} />
               </label>
               <label className="flex flex-col gap-1 text-xs">
@@ -578,16 +607,21 @@ function RuleForm({
           );
         })()}
 
-        {/* Window (seconds) — Phase 14.7. Shown only for deviation
-            and rate_of_change rules. Each gets its own threshold-unit
-            hint since the meaning of "threshold" differs by type. */}
         {(() => {
-          const isWindowed = form.rule_type === "deviation" ||
-                             form.rule_type === "rate_of_change";
-          if (!isWindowed) return null;
-          const hint = form.rule_type === "deviation"
-            ? "Rolling mean is computed over this window. Threshold is in tag units (alarm fires when |value - mean| > threshold)."
-            : "Slope is fitted over this window. Threshold is in tag-units per second (alarm fires when |slope| > threshold).";
+          if (!WINDOWED_RULE_TYPES.has(form.rule_type)) return null;
+          let hint = "";
+          if (form.rule_type === "deviation") {
+            hint = "Rolling mean is computed over this window. " +
+                   "Threshold is in tag units (alarm fires when " +
+                   "|value - mean| > threshold).";
+          } else if (form.rule_type === "rate_of_change") {
+            hint = "Slope is fitted over this window. Threshold is in " +
+                   "tag-units per second (alarm fires when |slope| > threshold).";
+          } else if (form.rule_type === "frozen") {
+            hint = "Range (max - min) is computed over this window. " +
+                   "Alarm fires when range <= threshold (value is stuck). " +
+                   "Requires >= 2 GOOD samples in the window.";
+          }
           return (
             <label className="flex flex-col gap-1 text-xs col-span-2">
               <span className="text-muted-foreground" title={hint}>
@@ -604,7 +638,6 @@ function RuleForm({
           );
         })()}
 
-        {/* On delay */}
         <label className="flex flex-col gap-1 text-xs">
           <span className="text-muted-foreground" title="Seconds the condition must persist before activation">
             On-delay (s)
@@ -615,7 +648,6 @@ function RuleForm({
                  {...numericLikeProps} />
         </label>
 
-        {/* Off delay */}
         <label className="flex flex-col gap-1 text-xs">
           <span className="text-muted-foreground" title="Seconds the clear condition must persist before deactivation">
             Off-delay (s)
@@ -626,7 +658,6 @@ function RuleForm({
                  {...numericLikeProps} />
         </label>
 
-        {/* Latched */}
         <label className="flex items-start gap-2 text-xs mt-4">
           <input type="checkbox"
                  checked={form.latched}
@@ -639,7 +670,6 @@ function RuleForm({
           </span>
         </label>
 
-        {/* Enabled */}
         <label className="flex items-start gap-2 text-xs mt-4">
           <input type="checkbox"
                  checked={form.enabled}
@@ -652,7 +682,6 @@ function RuleForm({
           </span>
         </label>
 
-        {/* Message template - spans the row */}
         <label className="flex flex-col gap-1 text-xs col-span-full">
           <span className="text-muted-foreground">
             Message template{" "}
@@ -699,7 +728,6 @@ function RuleForm({
 
 function errorText(e: unknown): string {
   if (e instanceof Error) return e.message;
-  // FastAPI errors come back with { detail: "..." }
   if (typeof e === "object" && e && "detail" in e) {
     const d = (e as { detail: unknown }).detail;
     if (typeof d === "string") return d;

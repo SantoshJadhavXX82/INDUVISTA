@@ -1,23 +1,20 @@
-"""Phase 15.1 - Calc definitions CRUD API.
+"""Phase 15.2 - Calc definitions CRUD API.
 
 Endpoints under /api/calc:
 
-  GET    /api/calc/block-types         - list registered block types
-                                         + their is_evaluable status
-  GET    /api/calc/definitions         - list all calc definitions
-  GET    /api/calc/definitions/{id}    - one definition
-  POST   /api/calc/definitions         - create
-  PATCH  /api/calc/definitions/{id}    - update block_type / config / enabled
-  DELETE /api/calc/definitions/{id}    - delete
+  GET    /api/calc/block-types               - list registered block types
+  GET    /api/calc/definitions               - list calc definitions (with stats)
+  GET    /api/calc/definitions/{id}          - one definition
+  GET    /api/calc/definitions/{id}/stats    - full execution stats row
+  POST   /api/calc/definitions               - create
+  PATCH  /api/calc/definitions/{id}          - update (rate, type, config, enabled)
+  DELETE /api/calc/definitions/{id}          - delete
 
-Validation done at save time:
-  - block_type must exist in calc_block_types and be is_evaluable
-  - block_config must satisfy the block class's validate_config()
-  - inputs must reference existing tags
-  - the resulting calc graph must remain acyclic
-
-The actual calc evaluation happens in the calc_evaluator worker;
-this API is purely for configuration.
+15.2 additions vs 15.1:
+  - execution_rate_ms field on create/update/response, validated
+    against the allowed industrial rate set
+  - execution stats joined into list/detail responses
+  - dedicated /stats endpoint for ops/admin views
 """
 
 from __future__ import annotations
@@ -27,7 +24,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -36,6 +33,13 @@ from app.workers.calc_blocks import get_block, BLOCK_REGISTRY
 
 
 router = APIRouter(prefix="/api/calc", tags=["calc"])
+
+
+# Mirror of the CHECK constraint in migration 0035. Keep these in sync.
+ALLOWED_EXECUTION_RATES_MS = (
+    100, 250, 500, 1000, 5000, 10000, 30000,
+    60000, 300000, 900000, 3600000,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -50,9 +54,24 @@ class BlockTypeResponse(BaseModel):
     description: str | None
     rank: int
     is_evaluable: bool
-    has_registry_entry: bool   # True if the Python registry has this code
+    has_registry_entry: bool
     created_at: datetime
     updated_at: datetime
+
+
+class ExecutionStatsResponse(BaseModel):
+    calc_def_id: int
+    last_executed_at: datetime | None
+    last_duration_ms: float | None
+    last_status: str
+    last_error_message: str | None
+    next_scheduled_at: datetime | None
+    consecutive_overruns: int
+    consecutive_errors: int
+    total_executions: int
+    total_overruns: int
+    total_errors: int
+    total_skips: int
 
 
 class CalcDefinitionResponse(BaseModel):
@@ -62,8 +81,16 @@ class CalcDefinitionResponse(BaseModel):
     block_type: str
     block_config: dict[str, Any]
     enabled: bool
+    execution_rate_ms: int
     created_at: datetime
     updated_at: datetime
+    # Joined stats (may be None for never-executed defs)
+    last_executed_at: datetime | None = None
+    last_duration_ms: float | None = None
+    last_status: str | None = None
+    total_executions: int = 0
+    total_overruns: int = 0
+    total_errors: int = 0
 
 
 class CalcDefinitionCreate(BaseModel):
@@ -71,17 +98,40 @@ class CalcDefinitionCreate(BaseModel):
     block_type: str = Field(..., min_length=1, max_length=64)
     block_config: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
+    execution_rate_ms: int = 1000
+
+    @field_validator("execution_rate_ms")
+    @classmethod
+    def _check_rate(cls, v: int) -> int:
+        if v not in ALLOWED_EXECUTION_RATES_MS:
+            raise ValueError(
+                f"execution_rate_ms must be one of {ALLOWED_EXECUTION_RATES_MS}, "
+                f"got {v}"
+            )
+        return v
 
 
 class CalcDefinitionUpdate(BaseModel):
-    # tag_id is immutable - delete + recreate if needed
     block_type: str | None = Field(None, min_length=1, max_length=64)
     block_config: dict[str, Any] | None = None
     enabled: bool | None = None
+    execution_rate_ms: int | None = None
+
+    @field_validator("execution_rate_ms")
+    @classmethod
+    def _check_rate(cls, v: int | None) -> int | None:
+        if v is None:
+            return v
+        if v not in ALLOWED_EXECUTION_RATES_MS:
+            raise ValueError(
+                f"execution_rate_ms must be one of {ALLOWED_EXECUTION_RATES_MS}, "
+                f"got {v}"
+            )
+        return v
 
 
 # ---------------------------------------------------------------------------
-# Validation helpers
+# Validation helpers (carried over from Phase 15.1)
 # ---------------------------------------------------------------------------
 
 def _validate_block(
@@ -91,16 +141,6 @@ def _validate_block(
     self_tag_id: int,
     self_calc_id: int | None,
 ) -> None:
-    """Raise HTTPException if the block_type / config combo can't be saved.
-
-    Checks:
-      1. block_type is registered (Python has a class) AND is_evaluable
-         in the catalog (the latter mirrors alarm_rule_types pattern).
-      2. block class accepts the config (validate_config didn't raise).
-      3. All input tag IDs exist in the tags table.
-      4. self_tag_id is not in its own inputs (trivial cycle).
-      5. The full calc graph remains acyclic after this save.
-    """
     block_cls = get_block(block_type)
     if block_cls is None:
         raise HTTPException(
@@ -138,7 +178,6 @@ def _validate_block(
             f"Calc cannot reference its own output tag (id={self_tag_id})."
         )
 
-    # All inputs must exist
     if inputs:
         existing = db.execute(
             text("SELECT id FROM tags WHERE id = ANY(:ids)"),
@@ -151,7 +190,6 @@ def _validate_block(
                 f"Input tag IDs do not exist: {sorted(missing)}"
             )
 
-    # Cycle detection across the full graph
     if _would_introduce_cycle(db, self_tag_id, self_calc_id, inputs):
         raise HTTPException(
             409,
@@ -166,23 +204,16 @@ def _would_introduce_cycle(
     self_calc_id: int | None,
     new_inputs: list[int],
 ) -> bool:
-    """Simulate the post-save graph and check for cycles.
-
-    Builds the edge set: for every calc def, edges from each input
-    tag_id to the def's output tag_id. Then DFS from each node to
-    detect back-edges.
-    """
     rows = db.execute(text("""
         SELECT id, tag_id, block_type, block_config
         FROM calc_definitions
         WHERE enabled = true
     """)).mappings().all()
 
-    # adjacency: input_tag_id -> [output_tag_id, ...]
     adj: dict[int, list[int]] = defaultdict(list)
     for r in rows:
         if self_calc_id is not None and r["id"] == self_calc_id:
-            continue  # excluding the row we're replacing
+            continue
         cls = get_block(r["block_type"])
         if cls is None:
             continue
@@ -193,11 +224,9 @@ def _would_introduce_cycle(
         except Exception:
             continue
 
-    # Add our prospective edges
     for inp in new_inputs:
         adj[inp].append(new_tag_id)
 
-    # DFS for cycles starting from new_tag_id
     WHITE, GRAY, BLACK = 0, 1, 2
     color: dict[int, int] = defaultdict(lambda: WHITE)
 
@@ -211,9 +240,6 @@ def _would_introduce_cycle(
         color[node] = BLACK
         return False
 
-    # We only need to check whether new_tag_id participates in a cycle.
-    # If reaching any GRAY ancestor is possible from new_tag_id, that's
-    # a cycle through it.
     return visit(new_tag_id)
 
 
@@ -237,14 +263,23 @@ def list_block_types(db: Annotated[Session, Depends(get_session)]):
 
 
 # ---------------------------------------------------------------------------
-# Calc definition endpoints
+# Calc definition endpoints (with joined stats)
 # ---------------------------------------------------------------------------
 
+# Joined SELECT used by both list and detail. LEFT JOIN to stats so
+# never-executed defs return null stats rather than disappearing.
 _LIST_SQL = """
     SELECT cd.id, cd.tag_id, t.name AS tag_name, cd.block_type,
-           cd.block_config, cd.enabled, cd.created_at, cd.updated_at
+           cd.block_config, cd.enabled, cd.execution_rate_ms,
+           cd.created_at, cd.updated_at,
+           ces.last_executed_at, ces.last_duration_ms,
+           COALESCE(ces.last_status, 'pending') AS last_status,
+           COALESCE(ces.total_executions, 0) AS total_executions,
+           COALESCE(ces.total_overruns, 0)   AS total_overruns,
+           COALESCE(ces.total_errors, 0)     AS total_errors
     FROM calc_definitions cd
     LEFT JOIN tags t ON t.id = cd.tag_id
+    LEFT JOIN calc_execution_stats ces ON ces.calc_def_id = cd.id
 """
 
 
@@ -268,12 +303,51 @@ def get_definition(
     return dict(row)
 
 
-@router.post("/definitions", response_model=CalcDefinitionResponse, status_code=201)
+@router.get(
+    "/definitions/{def_id}/stats",
+    response_model=ExecutionStatsResponse,
+)
+def get_stats(
+    def_id: int,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Full execution-stats row. Returns 404 if the def has never run
+    (and therefore no stats row exists yet)."""
+    exists = db.execute(
+        text("SELECT id FROM calc_definitions WHERE id = :id"),
+        {"id": def_id},
+    ).scalar_one_or_none()
+    if exists is None:
+        raise HTTPException(404, f"Calc definition {def_id} not found")
+
+    row = db.execute(
+        text("""
+            SELECT calc_def_id, last_executed_at, last_duration_ms,
+                   last_status, last_error_message, next_scheduled_at,
+                   consecutive_overruns, consecutive_errors,
+                   total_executions, total_overruns, total_errors,
+                   total_skips
+            FROM calc_execution_stats WHERE calc_def_id = :id
+        """),
+        {"id": def_id},
+    ).mappings().first()
+    if row is None:
+        raise HTTPException(
+            404,
+            f"Calc definition {def_id} has not executed yet; no stats row exists."
+        )
+    return dict(row)
+
+
+@router.post(
+    "/definitions",
+    response_model=CalcDefinitionResponse,
+    status_code=201,
+)
 def create_definition(
     body: CalcDefinitionCreate,
     db: Annotated[Session, Depends(get_session)],
 ):
-    # Tag must exist
     exists = db.execute(
         text("SELECT id FROM tags WHERE id = :id"),
         {"id": body.tag_id},
@@ -281,7 +355,6 @@ def create_definition(
     if exists is None:
         raise HTTPException(400, f"Tag {body.tag_id} does not exist")
 
-    # Tag must not already have a calc definition
     has_calc = db.execute(
         text("SELECT id FROM calc_definitions WHERE tag_id = :id"),
         {"id": body.tag_id},
@@ -297,13 +370,17 @@ def create_definition(
 
     try:
         db.execute(text("""
-            INSERT INTO calc_definitions (tag_id, block_type, block_config, enabled)
-            VALUES (:tag_id, :block_type, CAST(:block_config AS jsonb), :enabled)
+            INSERT INTO calc_definitions
+                (tag_id, block_type, block_config, enabled, execution_rate_ms)
+            VALUES
+                (:tag_id, :block_type, CAST(:block_config AS jsonb),
+                 :enabled, :rate)
         """), {
             "tag_id": body.tag_id,
             "block_type": body.block_type,
             "block_config": _to_jsonb(body.block_config),
             "enabled": body.enabled,
+            "rate": body.execution_rate_ms,
         })
         db.commit()
     except Exception:
@@ -317,14 +394,20 @@ def create_definition(
     return get_definition(def_id=new_id, db=db)
 
 
-@router.patch("/definitions/{def_id}", response_model=CalcDefinitionResponse)
+@router.patch(
+    "/definitions/{def_id}",
+    response_model=CalcDefinitionResponse,
+)
 def update_definition(
     def_id: int,
     body: CalcDefinitionUpdate,
     db: Annotated[Session, Depends(get_session)],
 ):
     existing = db.execute(
-        text("SELECT id, tag_id, block_type, block_config FROM calc_definitions WHERE id = :id"),
+        text("""
+            SELECT id, tag_id, block_type, block_config, execution_rate_ms
+            FROM calc_definitions WHERE id = :id
+        """),
         {"id": def_id},
     ).mappings().first()
     if existing is None:
@@ -334,11 +417,12 @@ def update_definition(
     if not fields:
         return get_definition(def_id, db)
 
-    # Re-validate with the merged config
-    final_block_type = fields.get("block_type", existing["block_type"])
-    final_config = fields.get("block_config", existing["block_config"] or {})
-    _validate_block(db, final_block_type, final_config,
-                    self_tag_id=existing["tag_id"], self_calc_id=def_id)
+    # Re-validate the block whenever type or config change.
+    if "block_type" in fields or "block_config" in fields:
+        final_block_type = fields.get("block_type", existing["block_type"])
+        final_config = fields.get("block_config", existing["block_config"] or {})
+        _validate_block(db, final_block_type, final_config,
+                        self_tag_id=existing["tag_id"], self_calc_id=def_id)
 
     set_clauses = []
     params: dict[str, Any] = {"id": def_id}
@@ -388,13 +472,6 @@ def delete_definition(
     return None
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 def _to_jsonb(d: dict[str, Any]) -> str:
-    """Serialise a Python dict for the JSONB column. SQLAlchemy/psycopg2
-    accepts a str cast to ::jsonb when needed; we keep it simple by
-    using json.dumps so the SQL stays portable across drivers."""
     import json
     return json.dumps(d)

@@ -12,3 +12,9 @@ pydantic-settings==2.6.0
 pymodbus==3.7.4
 redis==5.0.8
 psutil==6.1.0
+
+# Phase 14.11 - bulk import for alarm rules.
+# openpyxl is pure-Python with no compiled deps. python-multipart is
+# required by FastAPI for parsing multipart uploads (file fields).
+openpyxl==3.1.5
+python-multipart==0.0.20
