@@ -25,6 +25,8 @@ import Trend from "@/pages/Trend";
 import Alarms from "@/pages/Alarms";
 import AlarmSeveritiesAdmin from "@/pages/AlarmSeveritiesAdmin";
 import AlarmRuleTypesAdmin from "@/pages/AlarmRuleTypesAdmin";
+// Phase 15.3 / 16.0b - Calc blocks admin
+import CalcDefinitionsAdmin from "@/pages/CalcDefinitionsAdmin";
 
 export default function App() {
   return (
@@ -42,6 +44,8 @@ export default function App() {
         <Route path="/alarms" element={<Alarms />} />
         <Route path="/global/alarm-severities" element={<AlarmSeveritiesAdmin />} />
         <Route path="/global/alarm-types" element={<AlarmRuleTypesAdmin />} />
+        {/* Phase 15.3 / 16.0b — Calc blocks admin */}
+        <Route path="/global/calc-blocks" element={<CalcDefinitionsAdmin />} />
 
         {/* Phase 8.5 — Modbus TCP/IP tools grouped under /modbus */}
         <Route path="/modbus" element={<ModbusLayout />}>

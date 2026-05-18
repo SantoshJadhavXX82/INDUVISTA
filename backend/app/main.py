@@ -1,6 +1,6 @@
 """InduVista FastAPI app.
 
-Phase 0–2 deliverables:  /, /health
+Phase 0-2 deliverables:  /, /health
 Phase 3:                 /api/protocol-connectors, /api/channels,
                           /api/devices, /api/register-blocks, /api/tags
 Phase 5:                 /api/diagnostics/*
@@ -32,10 +32,6 @@ from app.api import (
 )
 
 
-# Phase 7 E1d — system heartbeat. Captured at module import so it persists
-# across requests. Each /health call increments the cycle counter, giving
-# external monitors a monotonic value to watch (so they can detect when the
-# API process freezes vs when it's simply unreachable).
 _APP_STARTED_AT_MONO = time.monotonic()
 _APP_STARTED_AT_ISO = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 _HEALTH_CYCLE_COUNT = 0
@@ -62,13 +58,7 @@ def root() -> dict[str, str]:
 
 @app.get("/health")
 def health(db: Annotated[Session, Depends(get_session)]) -> dict[str, object]:
-    """Liveness + readiness in one endpoint.
-
-    - Confirms the DB pool can hand out a working connection.
-    - Reports DB round-trip latency.
-    - Reports the current Alembic revision.
-    Returns HTTP 503 if the DB is unreachable; otherwise 200.
-    """
+    """Liveness + readiness in one endpoint."""
     start = time.perf_counter()
     try:
         db.execute(text("SELECT 1"))
@@ -94,9 +84,6 @@ def health(db: Annotated[Session, Depends(get_session)]) -> dict[str, object]:
         "role": settings.node_role,
         "db_latency_ms": round(db_latency_ms, 2),
         "migration_version": migration_version,
-        # Phase 7 E1d — system heartbeat. uptime_sec increases monotonically;
-        # cycle_count increments on every /health call. External monitors can
-        # detect a frozen API process by watching cycle_count.
         "uptime_sec": round(time.monotonic() - _APP_STARTED_AT_MONO, 1),
         "started_at": _APP_STARTED_AT_ISO,
         "cycle_count": _next_health_cycle(),
@@ -119,20 +106,20 @@ app.include_router(tags.router)
 app.include_router(diagnostics.router)
 # Phase 6 router
 app.include_router(live.router)
-# Phase 7 Batch 2 router — Frame Inspector
+# Phase 7 Batch 2 router - Frame Inspector
 app.include_router(frames.router)
-# Phase 8.1 router — engineering units master
+# Phase 8.1 router - engineering units master
 app.include_router(engineering_units.router)
-# Phase 8.2 router — groups master
+# Phase 8.2 router - groups master
 app.include_router(groups.router)
-# Phase 8.3 router — named sets master
+# Phase 8.3 router - named sets master
 app.include_router(named_sets.router)
-# Phase 8.5 router — tag writes + audit journal
+# Phase 8.5 router - tag writes + audit journal
 app.include_router(writes.router)
-# Phase 12.3 router — pair tags (duty/standby logical tags)
+# Phase 12.3 router - pair tags (duty/standby logical tags)
 from app.api import pair_tags as _pair_tags
 app.include_router(_pair_tags.router)
-# Phase 12.2 router — system settings (duty/standby value convention)
+# Phase 12.2 router - system settings (duty/standby value convention)
 from app.api import settings as _settings
 app.include_router(_settings.router)
 
@@ -149,3 +136,15 @@ app.include_router(_alarms.router)
 app.include_router(_alarm_severities.router)
 app.include_router(_alarm_rule_types.router)
 app.include_router(_calc.router)
+
+# Phase 14.11 - bulk import for alarm rules (CSV/XLSX upload)
+from app.api import alarms_import as _alarms_import
+app.include_router(_alarms_import.router)
+
+# Phase 14.12 - bulk export for alarm rules (CSV/XLSX download)
+from app.api import alarms_export as _alarms_export, calc_output_tags, calc_current_values
+from app.api import calc_schemas
+app.include_router(_alarms_export.router)
+app.include_router(calc_schemas.router)
+app.include_router(calc_output_tags.router)
+app.include_router(calc_current_values.router)

@@ -52,3 +52,6 @@ graphify-out/
 .graphify_*
 
 test-results-ui/
+
+# Patch-script backups
+*.bak_*

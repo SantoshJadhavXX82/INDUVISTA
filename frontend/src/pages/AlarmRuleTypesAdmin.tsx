@@ -1,26 +1,27 @@
 /**
- * Phase 14.6b — Alarm Rule Types admin page.
+ * Phase 14.6b - Alarm Rule Types admin page.
  *
- * Lives at /global/alarm-types. Lets operators extend the alarm
- * rule-type vocabulary beyond the built-in 6 (hi_hi/hi/lo/lo_lo/
- * deviation/rate_of_change) without touching code.
+ * Lives at /global/alarm-types. Read-mostly view of the alarm rule
+ * type vocabulary.
  *
- * Important "honesty" point in the UI:
- *   `is_evaluable` is a system-managed flag — only migrations flip it.
- *   The 4 level types (hi_hi/hi/lo/lo_lo) are evaluable. The 2 advanced
- *   types (deviation/rate_of_change) are NOT evaluable until phase 14.7
- *   ships their math. Custom types added by operators are always
- *   created with is_evaluable=false — they're for organisational
- *   taxonomy, not for adding new alarm logic. Each row shows its
- *   evaluable status prominently so operators see which types will
- *   actually fire alarms.
+ * Phase 14.12 update: the "New rule type" button has been removed.
+ * Custom rule types added through this UI were always created with
+ * is_evaluable=false (no Python evaluator existed for them), so
+ * rules referencing them never fired - a silent footgun. New rule
+ * types are now introduced exclusively via database migrations
+ * paired with a Python evaluator class in
+ * app/workers/alarm_evaluator.py (see Phase 14.10 frozen + spike
+ * as the worked example).
  *
- * Layout mirrors AlarmSeveritiesAdmin closely.
+ * Operators can still edit label / description / rank of existing
+ * rule types and delete custom (non-system, unused) ones - useful
+ * for cleaning up legacy entries that may have been created before
+ * this restriction landed.
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Pencil, Trash2, X, Save, AlertTriangle, RefreshCw,
+  Pencil, Trash2, X, Save, AlertTriangle, RefreshCw,
   ListChecks, CheckCircle2, MinusCircle,
 } from "lucide-react";
 
@@ -31,45 +32,27 @@ import { Input } from "@/components/ui/input";
 
 import { useRuleTypes, RULE_TYPES_QUERY_KEY } from "@/lib/useRuleTypes";
 import type {
-  AlarmRuleType, AlarmRuleTypeCreate, AlarmRuleTypeUpdate,
+  AlarmRuleType, AlarmRuleTypeUpdate,
 } from "@/types/alarmRuleTypes";
 
 interface FormState {
-  id: number | null;
+  id: number;
   code: string;
   label: string;
   description: string;
   rank: string;
 }
 
-const EMPTY_FORM: FormState = {
-  id: null,
-  code: "",
-  label: "",
-  description: "",
-  rank: "",
-};
-
 export default function AlarmRuleTypesAdmin() {
   const qc = useQueryClient();
   const [formOpen, setFormOpen] = useState(false);
-  const [form, setForm] = useState<FormState>(EMPTY_FORM);
+  const [form, setForm] = useState<FormState | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
   const rtQuery = useRuleTypes();
   const rows = useMemo(() => rtQuery.data ?? [], [rtQuery.data]);
 
-  // ---- mutations ----
-
-  const createMutation = useMutation({
-    mutationFn: (payload: AlarmRuleTypeCreate) =>
-      api.post<AlarmRuleType>("/alarms/rule-types", payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: RULE_TYPES_QUERY_KEY });
-      closeForm();
-    },
-    onError: (e: unknown) => setFormError(errorText(e)),
-  });
+  // ---- mutations (edit + delete only; create removed in Phase 14.12) ----
 
   const updateMutation = useMutation({
     mutationFn: ({ id, body }: { id: number; body: AlarmRuleTypeUpdate }) =>
@@ -88,13 +71,6 @@ export default function AlarmRuleTypesAdmin() {
 
   // ---- form helpers ----
 
-  const openCreate = () => {
-    const maxRank = rows.length > 0 ? Math.max(...rows.map((r) => r.rank)) : 0;
-    setForm({ ...EMPTY_FORM, rank: String(maxRank + 1) });
-    setFormError(null);
-    setFormOpen(true);
-  };
-
   const openEdit = (rt: AlarmRuleType) => {
     setForm({
       id: rt.id,
@@ -110,12 +86,13 @@ export default function AlarmRuleTypesAdmin() {
   const closeForm = () => {
     setFormOpen(false);
     setFormError(null);
+    setForm(null);
   };
 
   const handleSubmit = () => {
+    if (!form) return;
     setFormError(null);
 
-    const editing = form.id != null;
     const rank = parseInt(form.rank, 10);
     if (!isFinite(rank) || rank < 1 || rank > 1000) {
       return setFormError("Rank must be an integer between 1 and 1000.");
@@ -124,29 +101,14 @@ export default function AlarmRuleTypesAdmin() {
       return setFormError("Label is required.");
     }
 
-    if (editing) {
-      updateMutation.mutate({
-        id: form.id!,
-        body: {
-          label: form.label.trim(),
-          description: form.description.trim() || null,
-          rank,
-        },
-      });
-    } else {
-      if (!/^[a-z][a-z0-9_]*$/.test(form.code)) {
-        return setFormError(
-          "Code must start with a lowercase letter and contain only " +
-          "lowercase letters, digits, and underscores."
-        );
-      }
-      createMutation.mutate({
-        code: form.code,
+    updateMutation.mutate({
+      id: form.id,
+      body: {
         label: form.label.trim(),
         description: form.description.trim() || null,
         rank,
-      });
-    }
+      },
+    });
   };
 
   const handleDelete = (rt: AlarmRuleType) => {
@@ -172,22 +134,16 @@ export default function AlarmRuleTypesAdmin() {
                 <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />
               )}
             </span>
-            {!formOpen && (
-              <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
-                      onClick={openCreate}>
-                <Plus className="h-3 w-3" />
-                New rule type
-              </Button>
-            )}
+            {/* "New rule type" button removed in Phase 14.12 - new types ship via migrations. */}
           </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
-          {formOpen && (
+          {formOpen && form && (
             <RuleTypeForm
               form={form}
               onChange={setForm}
               error={formError}
-              saving={createMutation.isPending || updateMutation.isPending}
+              saving={updateMutation.isPending}
               onSubmit={handleSubmit}
               onCancel={closeForm}
             />
@@ -195,7 +151,7 @@ export default function AlarmRuleTypesAdmin() {
 
           {rtQuery.isLoading && (
             <p className="text-xs text-muted-foreground py-6 px-3">
-              Loading rule types…
+              Loading rule types...
             </p>
           )}
 
@@ -216,7 +172,8 @@ export default function AlarmRuleTypesAdmin() {
                     <th className="text-left px-3 py-2 font-medium">Label</th>
                     <th className="text-left px-3 py-2 font-medium">Description</th>
                     <th className="text-center px-3 py-2 font-medium">Type</th>
-                    <th className="text-center px-3 py-2 font-medium" title="Whether the evaluator has logic for this type">
+                    <th className="text-center px-3 py-2 font-medium"
+                        title="Whether the evaluator has logic for this type">
                       Evaluator
                     </th>
                     <th className="text-right px-3 py-2 font-medium">In use</th>
@@ -241,18 +198,17 @@ export default function AlarmRuleTypesAdmin() {
 
       <div className="px-1 text-[11px] text-muted-foreground space-y-1">
         <p>
-          <strong>System</strong> rule types are seeded with the system
-          and cannot be deleted, but their label / description / rank can
-          be customised. Custom rule types can be added freely for
-          organisational taxonomy.
+          <strong>New rule types are introduced via database migrations</strong>{" "}
+          paired with a Python evaluator class. Creating them through the
+          UI was removed because rules using non-evaluable types never
+          fire - it was an operator footgun. Edit / delete here is
+          preserved for housekeeping of label / description / rank on
+          existing rows.
         </p>
         <p>
           <strong>Evaluator</strong> status reflects whether the alarm
-          evaluator has matching logic. Rules using non-evaluable types
-          can be configured and saved, but they will <em>not fire</em>
-          until evaluator support ships (deviation + rate-of-change
-          arrive in phase 14.7). Operator-added custom types are always
-          non-evaluable.
+          evaluator has matching Python logic. Non-evaluable types are
+          taxonomy-only; any rules referencing them will not fire.
         </p>
       </div>
     </div>
@@ -272,7 +228,7 @@ function RuleTypeRow({
 }) {
   const deleteBlocked = rt.is_system || rt.in_use_count > 0;
   const deleteReason = rt.is_system
-    ? "System rule type — cannot delete"
+    ? "System rule type - cannot delete"
     : rt.in_use_count > 0
       ? `Used by ${rt.in_use_count} rule${rt.in_use_count === 1 ? "" : "s"}`
       : "Delete";
@@ -286,7 +242,7 @@ function RuleTypeRow({
       <td className="px-3 py-1.5 font-medium">{rt.label}</td>
       <td className="px-3 py-1.5 text-muted-foreground max-w-[300px]"
           title={rt.description ?? ""}>
-        <span className="line-clamp-2">{rt.description ?? "—"}</span>
+        <span className="line-clamp-2">{rt.description ?? "-"}</span>
       </td>
       <td className="px-3 py-1.5 text-center">
         {rt.is_system ? (
@@ -302,13 +258,13 @@ function RuleTypeRow({
       <td className="px-3 py-1.5 text-center">
         {rt.is_evaluable ? (
           <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-300"
-                title="Evaluator has logic — rules of this type will fire when their conditions are met">
+                title="Evaluator has logic - rules of this type will fire when their conditions are met">
             <CheckCircle2 className="h-2.5 w-2.5" />
             evaluable
           </span>
         ) : (
           <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300"
-                title="Evaluator has no logic for this type — rules can be configured but will never fire">
+                title="Evaluator has no logic for this type - rules can be configured but will never fire">
             <MinusCircle className="h-2.5 w-2.5" />
             inert
           </span>
@@ -343,7 +299,7 @@ function RuleTypeRow({
 }
 
 // ---------------------------------------------------------------------------
-// Inline create/edit form
+// Inline edit form (create flow removed in Phase 14.12).
 // ---------------------------------------------------------------------------
 
 function RuleTypeForm({
@@ -359,13 +315,11 @@ function RuleTypeForm({
   const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
     onChange({ ...form, [k]: v });
 
-  const editing = form.id != null;
-
   return (
     <div className="border-b border-border bg-secondary/20 p-4">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-sm font-medium">
-          {editing ? `Edit rule type '${form.code}'` : "New rule type"}
+          Edit rule type '{form.code}'
         </h3>
         <button type="button" onClick={onCancel}
                 className="text-muted-foreground hover:text-foreground">
@@ -378,21 +332,12 @@ function RuleTypeForm({
           <span className="text-muted-foreground">Code</span>
           <Input
             value={form.code}
-            onChange={(e) => set("code", e.target.value)}
-            placeholder="e.g. oscillation, frozen_value"
-            disabled={editing}
+            disabled
             className="h-8 text-xs font-mono"
-            maxLength={50}
           />
-          {editing ? (
-            <span className="text-[10px] text-muted-foreground">
-              Code is immutable.
-            </span>
-          ) : (
-            <span className="text-[10px] text-muted-foreground">
-              Lowercase letters, digits, underscores. Must start with a letter.
-            </span>
-          )}
+          <span className="text-[10px] text-muted-foreground">
+            Code is immutable.
+          </span>
         </label>
 
         <label className="flex flex-col gap-1 text-xs">
@@ -400,7 +345,7 @@ function RuleTypeForm({
           <Input
             value={form.label}
             onChange={(e) => set("label", e.target.value)}
-            placeholder="e.g. Oscillation, Frozen Value"
+            placeholder="e.g. High-High, Frozen"
             className="h-8 text-xs"
             maxLength={100}
           />
@@ -436,20 +381,6 @@ function RuleTypeForm({
         </label>
       </div>
 
-      {!editing && (
-        <div className="mt-3 flex items-start gap-2 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded p-2">
-          <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
-          <span>
-            Custom rule types are created with{" "}
-            <strong>is_evaluable = false</strong>. Operators can save
-            rules using this type, but the evaluator has no logic for it
-            and those rules will never fire. Custom types are useful for
-            organising / labelling rules — not for adding new alarm
-            behaviour.
-          </span>
-        </div>
-      )}
-
       {error && (
         <div className="mt-3 flex items-start gap-2 text-xs text-destructive">
           <AlertTriangle className="h-4 w-4 flex-shrink-0" />
@@ -469,7 +400,7 @@ function RuleTypeForm({
           ) : (
             <Save className="h-3 w-3" />
           )}
-          {editing ? "Save changes" : "Create rule type"}
+          Save changes
         </Button>
       </div>
     </div>

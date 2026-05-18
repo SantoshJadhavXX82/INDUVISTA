@@ -91,8 +91,8 @@ class DeviceResponse(BaseModel):
     channel_name: str
     description: str | None
     protocol: str
-    host: str
-    port: int
+    host: str | None
+    port: int | None
     unit_id: int
     duty_role: str | None
     stale_after_sec: int
