@@ -1,14 +1,16 @@
 """CRUD endpoints for channels (and a read-only protocol_connectors helper).
+Phase 16.0h - audit() calls on every mutating endpoint.
 
 Channels reference protocol_connectors by code (string). The POST endpoint
-auto-upserts the connector if it doesn't exist — saves the caller from a
-pre-flight POST against a near-fixed list.
+auto-upserts the connector if it doesn't exist - the audit details note
+whether the connector was 'created' or 'reused' so a future "where did this
+mystery protocol_connector come from?" query has an answer.
 """
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +18,8 @@ from sqlalchemy.orm import Session
 
 from app.api._helpers import handle_integrity_error, sql_col
 from app.db import get_session
+from app.utils.audit import audit, AuditEvent
+
 
 router = APIRouter(prefix="/api", tags=["channels"])
 
@@ -66,7 +70,34 @@ _CHANNEL_SELECT = """
 
 
 # ---------------------------------------------------------------------------
-# Protocol connectors (read-only listing for ergonomics)
+# Audit helpers
+# ---------------------------------------------------------------------------
+
+
+def _summarize_ch(row) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "description": row.get("description"),
+        "transport": row.get("transport"),
+        "protocol_connector": row.get("protocol_connector"),
+        "enabled": row.get("enabled"),
+    }
+
+
+def _full_ch(row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row.get("description"),
+        "transport": row.get("transport"),
+        "protocol_connector_id": row.get("protocol_connector_id"),
+        "protocol_connector": row.get("protocol_connector"),
+        "enabled": row.get("enabled"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Protocol connectors (read-only)
 # ---------------------------------------------------------------------------
 
 @router.get("/protocol-connectors", response_model=list[ProtocolConnectorResponse])
@@ -78,7 +109,7 @@ def list_protocol_connectors(db: Annotated[Session, Depends(get_session)]):
 
 
 # ---------------------------------------------------------------------------
-# Channels
+# Channels: list + get (read-only)
 # ---------------------------------------------------------------------------
 
 @router.get("/channels", response_model=list[ChannelResponse])
@@ -98,21 +129,51 @@ def get_channel(channel_id: int, db: Annotated[Session, Depends(get_session)]):
     return dict(row)
 
 
+# ---------------------------------------------------------------------------
+# Channels: create / update / delete (audited)
+# ---------------------------------------------------------------------------
+
 @router.post("/channels", response_model=ChannelResponse, status_code=201)
 def create_channel(
     body: ChannelCreate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    # Auto-upsert the protocol_connector if it doesn't exist yet.
-    pc_id = db.execute(
-        text("""
-            INSERT INTO protocol_connectors (code, name, description)
-            VALUES (:code, :title, :title || ' protocol connector')
-            ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name
-            RETURNING id
-        """),
-        {"code": body.protocol_connector, "title": body.protocol_connector.title()},
-    ).scalar_one()
+    target_label = body.name
+
+    # Protocol_connector auto-upsert split into explicit SELECT-then-INSERT
+    # so we know whether we created a new one or reused an existing row.
+    existing_pc = db.execute(
+        text("SELECT id FROM protocol_connectors WHERE code = :code"),
+        {"code": body.protocol_connector},
+    ).scalar()
+
+    if existing_pc is not None:
+        pc_id = existing_pc
+        pc_action = "reused"
+    else:
+        try:
+            pc_id = db.execute(
+                text("""
+                    INSERT INTO protocol_connectors (code, name, description)
+                    VALUES (:code, :title, :title || ' protocol connector')
+                    RETURNING id
+                """),
+                {"code": body.protocol_connector, "title": body.protocol_connector.title()},
+            ).scalar_one()
+            pc_action = "created"
+        except Exception as e:
+            db.rollback()
+            audit(AuditEvent(
+                action="channel.create",
+                target_type="channel",
+                target_label=target_label,
+                summary=f"INSERT failed during protocol_connector upsert",
+                status="error",
+                error_message=f"{type(e).__name__}: {e}",
+                details={"request": body.model_dump()},
+            ), request)
+            raise
 
     try:
         new_id = db.execute(
@@ -131,7 +192,45 @@ def create_channel(
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        handle_integrity_error(e, "channel")
+        # Categorize for audit before letting handle_integrity_error raise.
+        msg = str(e.orig).lower() if hasattr(e, "orig") else str(e).lower()
+        if "unique" in msg or "duplicate" in msg:
+            audit(AuditEvent(
+                action="channel.create",
+                target_type="channel",
+                target_label=target_label,
+                summary=f"Denied: channel '{body.name}' already exists",
+                status="denied",
+                error_message="duplicate name",
+                details={"request": body.model_dump(), "protocol_connector_action": pc_action},
+            ), request)
+        else:
+            audit(AuditEvent(
+                action="channel.create",
+                target_type="channel",
+                target_label=target_label,
+                summary="INSERT failed (IntegrityError)",
+                status="error",
+                error_message=str(e.orig),
+                details={"request": body.model_dump(), "protocol_connector_action": pc_action},
+            ), request)
+        try:
+            handle_integrity_error(e, "channel")
+        except HTTPException:
+            raise
+        # If the helper returned without raising, raise a generic 400.
+        raise HTTPException(400, f"Database constraint violation: {e.orig}")
+
+    audit(AuditEvent(
+        action="channel.create",
+        target_type="channel",
+        target_id=new_id,
+        target_label=target_label,
+        summary=f"Created channel '{body.name}' "
+                f"(transport={body.transport}, connector={body.protocol_connector}/{pc_action})",
+        details={**body.model_dump(), "protocol_connector_action": pc_action,
+                 "protocol_connector_id": pc_id},
+    ), request)
 
     return get_channel(new_id, db)
 
@@ -140,44 +239,190 @@ def create_channel(
 def update_channel(
     channel_id: int,
     body: ChannelUpdate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
     updates = body.model_dump(exclude_unset=True)
+    is_toggle = (len(updates) == 1 and "enabled" in updates)
+    action = "channel.toggle" if is_toggle else "channel.update"
+
+    # Pre-fetch existing for before-snapshot AND to handle 404 cleanly.
+    existing = db.execute(
+        text(_CHANNEL_SELECT + " WHERE c.id = :id"),
+        {"id": channel_id},
+    ).mappings().first()
+    if not existing:
+        audit(AuditEvent(
+            action=action,
+            target_type="channel",
+            target_id=channel_id,
+            summary=f"Denied: channel {channel_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": updates},
+        ), request)
+        raise HTTPException(404, f"channel {channel_id} not found")
+
+    target_label = existing["name"]
+
     if not updates:
+        audit(AuditEvent(
+            action=action,
+            target_type="channel",
+            target_id=channel_id,
+            target_label=target_label,
+            summary="Denied: no fields to update",
+            status="denied",
+            error_message="empty PATCH body",
+        ), request)
         raise HTTPException(400, "no fields to update")
 
     set_clauses = ", ".join(f"{sql_col(k)} = :{k}" for k in updates)
-    updates["id"] = channel_id
+    params = {**updates, "id": channel_id}
 
     try:
-        result = db.execute(
+        db.execute(
             text(f"UPDATE channels SET {set_clauses} WHERE id = :id"),
-            updates,
+            params,
         )
-        if result.rowcount == 0:
-            raise HTTPException(404, f"channel {channel_id} not found")
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        handle_integrity_error(e, "channel")
+        msg = str(e.orig).lower() if hasattr(e, "orig") else str(e).lower()
+        if "unique" in msg or "duplicate" in msg:
+            audit(AuditEvent(
+                action=action,
+                target_type="channel",
+                target_id=channel_id,
+                target_label=target_label,
+                summary="Denied: update caused unique-constraint violation",
+                status="denied",
+                error_message="duplicate value",
+                details={"request": updates, "before": _summarize_ch(existing)},
+            ), request)
+        else:
+            audit(AuditEvent(
+                action=action,
+                target_type="channel",
+                target_id=channel_id,
+                target_label=target_label,
+                summary="UPDATE failed (IntegrityError)",
+                status="error",
+                error_message=str(e.orig),
+                details={"request": updates, "before": _summarize_ch(existing)},
+            ), request)
+        try:
+            handle_integrity_error(e, "channel")
+        except HTTPException:
+            raise
+        raise HTTPException(400, f"Database constraint violation: {e.orig}")
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action=action,
+            target_type="channel",
+            target_id=channel_id,
+            target_label=target_label,
+            summary="UPDATE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": updates, "before": _summarize_ch(existing)},
+        ), request)
+        raise
+
+    if is_toggle:
+        new_state = "Enabled" if updates["enabled"] else "Disabled"
+        summary = f"{new_state} channel '{existing['name']}'"
+    else:
+        summary = f"Updated channel '{existing['name']}' ({', '.join(updates.keys())})"
+
+    audit(AuditEvent(
+        action=action,
+        target_type="channel",
+        target_id=channel_id,
+        target_label=target_label,
+        summary=summary,
+        details={
+            "changed_fields": list(updates.keys()),
+            "request": updates,
+            "before": _summarize_ch(existing),
+        },
+    ), request)
 
     return get_channel(channel_id, db)
 
 
 @router.delete("/channels/{channel_id}", status_code=204)
-def delete_channel(channel_id: int, db: Annotated[Session, Depends(get_session)]):
+def delete_channel(
+    channel_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+):
+    # Pre-fetch for 404 + before-snapshot.
+    existing = db.execute(
+        text(_CHANNEL_SELECT + " WHERE c.id = :id"),
+        {"id": channel_id},
+    ).mappings().first()
+    if not existing:
+        audit(AuditEvent(
+            action="channel.delete",
+            target_type="channel",
+            target_id=channel_id,
+            summary=f"Denied: channel {channel_id} not found",
+            status="denied",
+            error_message="not found",
+        ), request)
+        raise HTTPException(404, f"channel {channel_id} not found")
+
+    target_label = existing["name"]
+
+    # Pre-count devices referencing this channel for friendlier audit detail.
+    device_count = db.execute(
+        text("SELECT COUNT(*) FROM devices WHERE channel_id = :id"),
+        {"id": channel_id},
+    ).scalar() or 0
+
     try:
-        result = db.execute(
+        db.execute(
             text("DELETE FROM channels WHERE id = :id"),
             {"id": channel_id},
         )
-        if result.rowcount == 0:
-            raise HTTPException(404, f"channel {channel_id} not found")
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        # Channel has devices referencing it — 409 conflict.
+        audit(AuditEvent(
+            action="channel.delete",
+            target_type="channel",
+            target_id=channel_id,
+            target_label=target_label,
+            summary=f"Denied: channel '{existing['name']}' has {device_count} device(s) referencing it",
+            status="denied",
+            error_message=f"FK violation: devices_count={device_count}",
+            details={"before": _full_ch(existing), "device_count": device_count},
+        ), request)
         raise HTTPException(
             409,
             f"channel {channel_id} cannot be deleted because devices reference it",
         )
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="channel.delete",
+            target_type="channel",
+            target_id=channel_id,
+            target_label=target_label,
+            summary="DELETE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"before": _full_ch(existing)},
+        ), request)
+        raise
+
+    audit(AuditEvent(
+        action="channel.delete",
+        target_type="channel",
+        target_id=channel_id,
+        target_label=target_label,
+        summary=f"Deleted channel '{existing['name']}' (transport={existing.get('transport')})",
+        details={"before": _full_ch(existing)},
+    ), request)

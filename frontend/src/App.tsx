@@ -27,6 +27,8 @@ import AlarmSeveritiesAdmin from "@/pages/AlarmSeveritiesAdmin";
 import AlarmRuleTypesAdmin from "@/pages/AlarmRuleTypesAdmin";
 // Phase 15.3 / 16.0b - Calc blocks admin
 import CalcDefinitionsAdmin from "@/pages/CalcDefinitionsAdmin";
+// Phase 16.0g - Audit log viewer
+import AuditLog from "@/pages/AuditLog";
 
 export default function App() {
   return (
@@ -46,6 +48,8 @@ export default function App() {
         <Route path="/global/alarm-types" element={<AlarmRuleTypesAdmin />} />
         {/* Phase 15.3 / 16.0b — Calc blocks admin */}
         <Route path="/global/calc-blocks" element={<CalcDefinitionsAdmin />} />
+        {/* Phase 16.0g — Audit log viewer */}
+        <Route path="/audit-log" element={<AuditLog />} />
 
         {/* Phase 8.5 — Modbus TCP/IP tools grouped under /modbus */}
         <Route path="/modbus" element={<ModbusLayout />}>

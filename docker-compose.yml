@@ -69,6 +69,7 @@ services:
       - ./backend/app:/app/app
       # Mounted read-only so `docker compose run backend python -m app.seed`
       # can read the canonical tag config. The seeder NEVER writes here.
+      - ./backend/alembic:/app/alembic
       - ./config:/app/config:ro
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 

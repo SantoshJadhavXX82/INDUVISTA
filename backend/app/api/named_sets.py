@@ -1,33 +1,35 @@
 """CRUD endpoints for the named_sets master + per-set values.
+Phase 16.0h - audit() calls on every mutating endpoint.
 
 Named sets translate raw integer/boolean register values into human-readable
-text — e.g. a tag returning `1` displays as "Running" when assigned to the
-MOTOR_STATE named set. The raw value remains the canonical CV; the named
-set only changes how it is rendered in UI / reports / trends.
+text. The raw value remains canonical; the named set only changes display.
 
 Architecture:
-  GET    /api/named-sets            list (includes value count)
-  GET    /api/named-sets/{id}       single (includes full values list)
-  POST   /api/named-sets            create the parent only (values via PUT)
-  PATCH  /api/named-sets/{id}       update metadata only
-  DELETE /api/named-sets/{id}       refused if is_system or in_use_count>0
-  PUT    /api/named-sets/{id}/values   atomic replacement of the values list
+  GET    /api/named-sets            list
+  GET    /api/named-sets/{id}       one (with full values)
+  POST   /api/named-sets            create   [named_set.create]
+  PATCH  /api/named-sets/{id}       update   [named_set.update or .toggle]
+  DELETE /api/named-sets/{id}       delete   [named_set.delete]
+  PUT    /api/named-sets/{id}/values   atomic values replace [named_set.values_replace]
 
-The PUT-replace pattern for values keeps the API simple: the UI sends the
-desired full list, the server reconciles. No partial-update endpoints.
+The values replace audit captures both old AND new value lists so the
+change can be reconstructed at any future time.
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.utils.audit import audit, AuditEvent
+
 
 router = APIRouter(prefix="/api/named-sets", tags=["named-sets"])
 
@@ -38,11 +40,10 @@ router = APIRouter(prefix="/api/named-sets", tags=["named-sets"])
 
 
 class NamedSetValueInput(BaseModel):
-    raw_value: int = Field(..., description="Integer raw value from the device")
+    raw_value: int
     display_text: str = Field(..., min_length=1, max_length=128)
     display_order: int = 0
-    color: str | None = Field(None, max_length=16,
-                              description="Optional UI color hint (e.g. 'red', '#ef4444')")
+    color: str | None = Field(None, max_length=16)
 
 
 class NamedSetValueResponse(NamedSetValueInput):
@@ -50,8 +51,7 @@ class NamedSetValueResponse(NamedSetValueInput):
 
 
 class NamedSetCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=128,
-                      description="UPPERCASE_SNAKE_CASE conventional, e.g. MOTOR_STATE")
+    name: str = Field(..., min_length=1, max_length=128)
     description: str | None = None
     enabled: bool = True
 
@@ -70,12 +70,9 @@ class NamedSetResponse(BaseModel):
     enabled: bool
     created_at: datetime
     updated_at: datetime
-    value_count: int = Field(0, description="Number of values in the set")
-    in_use_count: int = Field(0, description="Number of tags using this set")
-    values: list[NamedSetValueResponse] = Field(
-        default_factory=list,
-        description="Full list of value→text mappings (only populated on GET-by-id)",
-    )
+    value_count: int = Field(0)
+    in_use_count: int = Field(0)
+    values: list[NamedSetValueResponse] = Field(default_factory=list)
 
 
 class NamedSetValuesReplaceRequest(BaseModel):
@@ -83,7 +80,43 @@ class NamedSetValuesReplaceRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# List + get
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _summarize_ns(row) -> dict[str, Any]:
+    return {
+        "name": row["name"],
+        "description": row.get("description"),
+        "enabled": row.get("enabled"),
+        "is_system": row.get("is_system"),
+    }
+
+
+def _full_ns(row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "description": row.get("description"),
+        "enabled": row.get("enabled"),
+        "is_system": row["is_system"],
+        "value_count": row.get("value_count"),
+        "in_use_count": row.get("in_use_count"),
+    }
+
+
+def _fetch_values_list(db: Session, set_id: int) -> list[dict]:
+    rows = db.execute(text("""
+        SELECT raw_value, display_text, display_order, color
+        FROM named_set_values
+        WHERE named_set_id = :id
+        ORDER BY display_order, raw_value
+    """), {"id": set_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# List + get (read-only)
 # ---------------------------------------------------------------------------
 
 
@@ -92,13 +125,8 @@ def list_named_sets(
     db: Annotated[Session, Depends(get_session)],
     enabled: bool | None = Query(None),
     search: str | None = Query(None),
-    include_values: bool = Query(
-        False,
-        description="If true, every set includes its full values list. Off by "
-                    "default — list responses are kept small.",
-    ),
+    include_values: bool = Query(False),
 ):
-    """List all named sets, with counts. Sorted by name."""
     sql = """
         SELECT ns.id, ns.name, ns.description, ns.is_system, ns.enabled,
                ns.created_at, ns.updated_at,
@@ -107,8 +135,7 @@ def list_named_sets(
         FROM named_sets ns
         LEFT JOIN (
             SELECT named_set_id, COUNT(*) AS value_count
-            FROM named_set_values
-            GROUP BY named_set_id
+            FROM named_set_values GROUP BY named_set_id
         ) v ON v.named_set_id = ns.id
         LEFT JOIN (
             SELECT named_set_id, COUNT(*) AS in_use_count
@@ -129,7 +156,6 @@ def list_named_sets(
     rows = [dict(r) for r in db.execute(text(sql), params).mappings().all()]
 
     if include_values and rows:
-        # Single batch query for values keyed by named_set_id
         ids = [r["id"] for r in rows]
         vrows = db.execute(text("""
             SELECT id, named_set_id, raw_value, display_text,
@@ -176,16 +202,18 @@ def get_named_set(set_id: int, db: Annotated[Session, Depends(get_session)]):
 
 
 # ---------------------------------------------------------------------------
-# Create / update / delete
+# Create / update / delete (audited)
 # ---------------------------------------------------------------------------
 
 
 @router.post("", response_model=NamedSetResponse, status_code=201)
 def create_named_set(
     body: NamedSetCreate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Create a new (non-system) named set. Values are added separately via PUT."""
+    target_label = body.name
+
     try:
         new_id = db.execute(text("""
             INSERT INTO named_sets (name, description, is_system, enabled)
@@ -197,8 +225,35 @@ def create_named_set(
         db.rollback()
         msg = str(e.orig).lower() if hasattr(e, "orig") else str(e).lower()
         if "unique" in msg or "duplicate" in msg:
+            audit(AuditEvent(
+                action="named_set.create",
+                target_type="named_set",
+                target_label=target_label,
+                summary=f"Denied: named set '{body.name}' already exists",
+                status="denied",
+                error_message="duplicate name",
+                details={"request": body.model_dump()},
+            ), request)
             raise HTTPException(409, f"A named set called '{body.name}' already exists")
+        audit(AuditEvent(
+            action="named_set.create",
+            target_type="named_set",
+            target_label=target_label,
+            summary="INSERT failed (unclassified IntegrityError)",
+            status="error",
+            error_message=str(e.orig),
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(400, f"Database constraint violation: {e.orig}")
+
+    audit(AuditEvent(
+        action="named_set.create",
+        target_type="named_set",
+        target_id=new_id,
+        target_label=target_label,
+        summary=f"Created named set '{body.name}'",
+        details=body.model_dump(),
+    ), request)
 
     return get_named_set(new_id, db)
 
@@ -207,24 +262,46 @@ def create_named_set(
 def update_named_set(
     set_id: int,
     body: NamedSetUpdate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    existing = db.execute(
-        text("SELECT id FROM named_sets WHERE id = :id"),
-        {"id": set_id},
-    ).mappings().first()
+    updates = body.model_dump(exclude_unset=True)
+    is_toggle = (len(updates) == 1 and "enabled" in updates)
+    action = "named_set.toggle" if is_toggle else "named_set.update"
+
+    existing = db.execute(text("""
+        SELECT id, name, description, enabled, is_system
+        FROM named_sets WHERE id = :id
+    """), {"id": set_id}).mappings().first()
     if not existing:
+        audit(AuditEvent(
+            action=action,
+            target_type="named_set",
+            target_id=set_id,
+            summary=f"Denied: named set {set_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": updates},
+        ), request)
         raise HTTPException(404, f"Named set {set_id} not found")
 
-    updates = body.model_dump(exclude_unset=True)
+    target_label = existing["name"]
+
     if not updates:
+        audit(AuditEvent(
+            action=action,
+            target_type="named_set",
+            target_id=set_id,
+            target_label=target_label,
+            summary="Denied: no fields provided",
+            status="denied",
+            error_message="empty PATCH body",
+        ), request)
         raise HTTPException(400, "No changes provided")
 
     set_clauses = [f"{k} = :{k}" for k in updates]
     set_clauses.append("updated_at = NOW()")
-    sql = (
-        f"UPDATE named_sets SET {', '.join(set_clauses)} WHERE id = :id"
-    )
+    sql = f"UPDATE named_sets SET {', '.join(set_clauses)} WHERE id = :id"
     try:
         db.execute(text(sql), {**updates, "id": set_id})
         db.commit()
@@ -232,47 +309,143 @@ def update_named_set(
         db.rollback()
         msg = str(e.orig).lower() if hasattr(e, "orig") else str(e).lower()
         if "unique" in msg or "duplicate" in msg:
+            audit(AuditEvent(
+                action=action,
+                target_type="named_set",
+                target_id=set_id,
+                target_label=target_label,
+                summary=f"Denied: name '{updates.get('name')}' collides with another named set",
+                status="denied",
+                error_message="duplicate name",
+                details={"request": updates, "before": _summarize_ns(existing)},
+            ), request)
             raise HTTPException(409, f"Another named set with name '{updates.get('name')}' exists")
+        audit(AuditEvent(
+            action=action,
+            target_type="named_set",
+            target_id=set_id,
+            target_label=target_label,
+            summary="UPDATE failed",
+            status="error",
+            error_message=str(e.orig),
+            details={"request": updates, "before": _summarize_ns(existing)},
+        ), request)
         raise HTTPException(400, f"Database constraint violation: {e.orig}")
+
+    if is_toggle:
+        new_state = "Enabled" if updates["enabled"] else "Disabled"
+        summary = f"{new_state} named set '{existing['name']}'"
+    else:
+        summary = f"Updated named set '{existing['name']}' ({', '.join(updates.keys())})"
+
+    audit(AuditEvent(
+        action=action,
+        target_type="named_set",
+        target_id=set_id,
+        target_label=target_label,
+        summary=summary,
+        details={
+            "changed_fields": list(updates.keys()),
+            "request": updates,
+            "before": _summarize_ns(existing),
+        },
+    ), request)
 
     return get_named_set(set_id, db)
 
 
 @router.delete("/{set_id}", status_code=204)
-def delete_named_set(set_id: int, db: Annotated[Session, Depends(get_session)]):
-    """Delete a named set.
-
-    Refused if:
-      - is_system is true (seeded set — disable instead)
-      - any tag uses this set (reassign first)
-    """
+def delete_named_set(
+    set_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+):
     row = db.execute(text("""
-        SELECT ns.is_system,
+        SELECT ns.id, ns.name, ns.description, ns.is_system, ns.enabled,
+               COALESCE((SELECT COUNT(*) FROM named_set_values
+                         WHERE named_set_id = ns.id), 0) AS value_count,
                COALESCE((SELECT COUNT(*) FROM tags
                          WHERE named_set_id = ns.id), 0) AS in_use_count
         FROM named_sets ns WHERE ns.id = :id
     """), {"id": set_id}).mappings().first()
     if not row:
+        audit(AuditEvent(
+            action="named_set.delete",
+            target_type="named_set",
+            target_id=set_id,
+            summary=f"Denied: named set {set_id} not found",
+            status="denied",
+            error_message="not found",
+        ), request)
         raise HTTPException(404, f"Named set {set_id} not found")
 
+    target_label = row["name"]
+
     if row["is_system"]:
+        audit(AuditEvent(
+            action="named_set.delete",
+            target_type="named_set",
+            target_id=set_id,
+            target_label=target_label,
+            summary=f"Denied: '{row['name']}' is a system-seeded named set",
+            status="denied",
+            error_message="system-seeded named sets cannot be deleted",
+            details={"before": _full_ns(row)},
+        ), request)
         raise HTTPException(
             409,
             "System-seeded named sets cannot be deleted. Disable it instead.",
         )
+
     if row["in_use_count"] > 0:
+        audit(AuditEvent(
+            action="named_set.delete",
+            target_type="named_set",
+            target_id=set_id,
+            target_label=target_label,
+            summary=f"Denied: '{row['name']}' is referenced by {row['in_use_count']} tag(s)",
+            status="denied",
+            error_message=f"in_use_count={row['in_use_count']}",
+            details={"before": _full_ns(row)},
+        ), request)
         raise HTTPException(
             409,
             f"{row['in_use_count']} tag(s) still reference this named set. "
             f"Reassign or clear them first.",
         )
 
-    db.execute(text("DELETE FROM named_sets WHERE id = :id"), {"id": set_id})
-    db.commit()
+    # Capture values list for the audit before they cascade-delete.
+    values_before = _fetch_values_list(db, set_id)
+
+    try:
+        db.execute(text("DELETE FROM named_sets WHERE id = :id"), {"id": set_id})
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="named_set.delete",
+            target_type="named_set",
+            target_id=set_id,
+            target_label=target_label,
+            summary="DELETE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"before": _full_ns(row), "values_before": values_before},
+        ), request)
+        raise
+
+    audit(AuditEvent(
+        action="named_set.delete",
+        target_type="named_set",
+        target_id=set_id,
+        target_label=target_label,
+        summary=f"Deleted named set '{row['name']}' ({len(values_before)} value mappings)",
+        details={"before": _full_ns(row), "values_before": values_before},
+    ), request)
 
 
 # ---------------------------------------------------------------------------
-# Atomic values replacement
+# Atomic values replacement (audited with full before/after)
 # ---------------------------------------------------------------------------
 
 
@@ -280,51 +453,87 @@ def delete_named_set(set_id: int, db: Annotated[Session, Depends(get_session)]):
 def replace_named_set_values(
     set_id: int,
     body: NamedSetValuesReplaceRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
     """Replace the full set of values atomically.
 
-    The UI sends the desired complete list; the server deletes existing rows
-    and inserts the new ones in one transaction. No incremental updates —
-    keeps the API simple and avoids partial-state bugs.
-
-    Duplicate raw_value within the request is rejected with 400.
+    Audit captures both the OLD values list and the NEW values list so
+    the change can be diffed and reconstructed at any future time.
     """
-    existing = db.execute(
-        text("SELECT id FROM named_sets WHERE id = :id"),
-        {"id": set_id},
-    ).mappings().first()
+    existing = db.execute(text("""
+        SELECT id, name FROM named_sets WHERE id = :id
+    """), {"id": set_id}).mappings().first()
     if not existing:
+        audit(AuditEvent(
+            action="named_set.values_replace",
+            target_type="named_set",
+            target_id=set_id,
+            summary=f"Denied: named set {set_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": [v.model_dump() for v in body.values]},
+        ), request)
         raise HTTPException(404, f"Named set {set_id} not found")
 
-    # Reject duplicate raw_values in the request
+    target_label = existing["name"]
+    new_values_dump = [v.model_dump() for v in body.values]
+
+    # Reject duplicate raw_values in the request.
     seen = set()
     for v in body.values:
         if v.raw_value in seen:
+            audit(AuditEvent(
+                action="named_set.values_replace",
+                target_type="named_set",
+                target_id=set_id,
+                target_label=target_label,
+                summary=f"Denied: duplicate raw_value {v.raw_value} in request",
+                status="denied",
+                error_message=f"duplicate raw_value {v.raw_value}",
+                details={"request": new_values_dump},
+            ), request)
             raise HTTPException(
-                400, f"Duplicate raw_value {v.raw_value} in request — each must be unique"
+                400, f"Duplicate raw_value {v.raw_value} in request - each must be unique"
             )
         seen.add(v.raw_value)
 
-    db.execute(
-        text("DELETE FROM named_set_values WHERE named_set_id = :id"),
-        {"id": set_id},
-    )
-    if body.values:
-        db.execute(text("""
-            INSERT INTO named_set_values
-                (named_set_id, raw_value, display_text, display_order, color)
-            SELECT :id,
-                   v.raw_value, v.display_text, v.display_order, v.color
-            FROM jsonb_to_recordset(CAST(:values AS jsonb)) AS v(
-                raw_value INT, display_text TEXT,
-                display_order INT, color TEXT
-            )
-        """), {
-            "id": set_id,
-            "values": __import__("json").dumps([v.model_dump() for v in body.values]),
-        })
-    db.commit()
+    # Capture old values for audit before destroying them.
+    values_before = _fetch_values_list(db, set_id)
+
+    try:
+        db.execute(
+            text("DELETE FROM named_set_values WHERE named_set_id = :id"),
+            {"id": set_id},
+        )
+        if body.values:
+            db.execute(text("""
+                INSERT INTO named_set_values
+                    (named_set_id, raw_value, display_text, display_order, color)
+                SELECT :id,
+                       v.raw_value, v.display_text, v.display_order, v.color
+                FROM jsonb_to_recordset(CAST(:values AS jsonb)) AS v(
+                    raw_value INT, display_text TEXT,
+                    display_order INT, color TEXT
+                )
+            """), {"id": set_id, "values": json.dumps(new_values_dump)})
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="named_set.values_replace",
+            target_type="named_set",
+            target_id=set_id,
+            target_label=target_label,
+            summary="values_replace failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={
+                "request": new_values_dump,
+                "values_before": values_before,
+            },
+        ), request)
+        raise
 
     rows = db.execute(text("""
         SELECT id, raw_value, display_text, display_order, color
@@ -332,4 +541,23 @@ def replace_named_set_values(
         WHERE named_set_id = :id
         ORDER BY display_order, raw_value
     """), {"id": set_id}).mappings().all()
-    return [dict(r) for r in rows]
+    values_after = [dict(r) for r in rows]
+
+    audit(AuditEvent(
+        action="named_set.values_replace",
+        target_type="named_set",
+        target_id=set_id,
+        target_label=target_label,
+        summary=f"Replaced values of '{existing['name']}': "
+                f"{len(values_before)} -> {len(values_after)} mapping(s)",
+        details={
+            "values_before": values_before,
+            "values_after": [
+                {k: v for k, v in r.items() if k != "id"} for r in values_after
+            ],
+            "count_before": len(values_before),
+            "count_after": len(values_after),
+        },
+    ), request)
+
+    return values_after

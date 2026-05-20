@@ -142,9 +142,33 @@ from app.api import alarms_import as _alarms_import
 app.include_router(_alarms_import.router)
 
 # Phase 14.12 - bulk export for alarm rules (CSV/XLSX download)
-from app.api import alarms_export as _alarms_export, calc_output_tags, calc_current_values
+from app.api import alarms_export as _alarms_export, calc_output_tags, calc_current_values, audit_log
 from app.api import calc_schemas
+from app.api import computed_devices
+from app.api import computed_tags
+from app.api.preview import router as preview_router
+from app.utils.audit import ensure_audit_schema
 app.include_router(_alarms_export.router)
 app.include_router(calc_schemas.router)
 app.include_router(calc_output_tags.router)
 app.include_router(calc_current_values.router)
+app.include_router(audit_log.router)
+app.include_router(computed_devices.router)
+app.include_router(computed_tags.router)
+app.include_router(preview_router)
+
+@app.on_event("startup")
+def _audit_schema_startup() -> None:
+    # Phase 16.0g: create audit_log table + hypertable + retention on
+    # backend startup. Idempotent. Wrapped so a misconfigured audit DB
+    # cannot crash the backend - audit failures degrade gracefully and
+    # log loudly so operators notice.
+    try:
+        ensure_audit_schema()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(
+            "AUDIT SCHEMA SETUP FAILED at startup: %s. "
+            "Backend continues, but audit will not be recorded until resolved.",
+            e,
+        )

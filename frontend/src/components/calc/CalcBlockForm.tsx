@@ -1,25 +1,35 @@
 /**
- * Phase 16.0b - Schema-driven calc block form.
+ * Phase 17.0a - Schema-driven calc block form (with frontend overrides).
+ * Phase 17.0b - Adds live preview chip after the form fields.
  *
- * Single entry point: pass a block code + the current draft of
- * block_config + an onChange callback. The form looks up the schema
- * via useBlockSchemas() and renders one field per schema entry using
- * FieldRenderer from ./fields.
+ * Same entry contract as Phase 16.0b: pass blockCode + blockConfig +
+ * onChange, the form looks up the backend schema and renders one
+ * field per schema entry via FieldRenderer.
  *
- * The form is uncontrolled-from-the-outside-but-controlled-from-the-
- * parent: parent owns blockConfig state, form just edits it.
+ * Phase 17.0a change: applies BLOCK_SCHEMA_OVERRIDES from
+ * lib/blockSchemaOverrides.ts to the fetched schema's fields BEFORE
+ * rendering. This lets us override generic labels ("Left Operand"
+ * -> "Minuend") and upgrade tag_ref fields to tag_or_constant per
+ * block-type without changing the backend.
  *
- * Empty block_config draft is fine on first render - field components
- * handle missing keys gracefully and produce a config that the
- * backend will then validate via the block's validate_config(). The
- * UI provides hints (required markers, dtype filters, min/max) but
- * the BACKEND is the authoritative validator.
+ * Phase 17.0b change: renders <BlockPreviewChip /> at the bottom of
+ * the form. The chip shows the predicted block output value in real
+ * time as the user edits config (stateless blocks run in-browser via
+ * blockPreview.ts; stateful blocks debounce 300ms and call
+ * /api/computed-tags/preview).
+ *
+ * The override is pure: it returns a new array. The original schema
+ * from react-query's cache is not mutated, so other consumers (if any)
+ * see the unmodified backend schema.
  */
+import { useMemo } from "react";
 import { AlertTriangle, Loader2 } from "lucide-react";
 
 import { useBlockSchemas } from "@/lib/useBlockSchemas";
+import { applyBlockOverrides } from "@/lib/blockSchemaOverrides";
 import type { BlockConfigDraft } from "@/types/calcBlockSchemas";
 import { FieldRenderer } from "./fields";
+import { BlockPreviewChip } from "./BlockPreviewChip";
 
 
 interface CalcBlockFormProps {
@@ -34,11 +44,20 @@ export function CalcBlockForm({
 }: CalcBlockFormProps) {
   const schemas = useBlockSchemas();
 
+  // Pure derivation: apply frontend overrides to the backend-fetched
+  // schema's fields. Recomputed only when the schema or blockCode
+  // changes.
+  const effectiveFields = useMemo(() => {
+    const schema = schemas.data?.[blockCode];
+    if (!schema) return [];
+    return applyBlockOverrides(blockCode, schema.fields);
+  }, [schemas.data, blockCode]);
+
   if (schemas.isLoading) {
     return (
       <p className="text-xs text-muted-foreground flex items-center gap-2 py-4">
         <Loader2 className="h-3 w-3 animate-spin" />
-        Loading block schemas…
+        Loading block schemas...
       </p>
     );
   }
@@ -70,8 +89,8 @@ export function CalcBlockForm({
         <AlertTriangle className="h-3 w-3 flex-shrink-0 mt-0.5" />
         <span>
           No schema available for block type <code>{blockCode}</code>. You
-          can still create this calc via POST /api/calc/definitions with
-          a hand-written block_config.
+          can still create this calc via POST /api/computed-tags with a
+          hand-written block_config.
         </span>
       </div>
     );
@@ -84,7 +103,7 @@ export function CalcBlockForm({
           {schema.description}
         </p>
       )}
-      {schema.fields.map((field) => (
+      {effectiveFields.map((field) => (
         <FieldRenderer
           key={field.key}
           field={field}
@@ -92,6 +111,7 @@ export function CalcBlockForm({
           onChange={onChange}
         />
       ))}
+      <BlockPreviewChip blockCode={blockCode} blockConfig={blockConfig} />
     </div>
   );
 }

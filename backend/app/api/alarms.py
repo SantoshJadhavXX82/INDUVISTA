@@ -1,4 +1,5 @@
-"""Phase 14.2 — Alarms API.
+"""Phase 14.2 - Alarms API.
+Phase 16.0h - audit() calls on every mutating endpoint.
 
 CRUD on alarm rules plus the operational views that drive the Alarms
 page: currently-active list, historical event log, and the
@@ -12,55 +13,55 @@ events. This module is read/write for rule config, read-only for state
 Endpoints
 ---------
 
-  POST   /api/alarms/rules                 create a rule
-  GET    /api/alarms/rules                 list rules (filter: tag, severity, enabled)
+  POST   /api/alarms/rules                 create rule         [alarm_rule.create]
+  GET    /api/alarms/rules                 list rules
   GET    /api/alarms/rules/{rule_id}       get one rule
-  PATCH  /api/alarms/rules/{rule_id}       update rule
-  DELETE /api/alarms/rules/{rule_id}       delete rule (cascades state row,
-                                           preserves event history)
+  PATCH  /api/alarms/rules/{rule_id}       update rule         [alarm_rule.update or .toggle]
+  DELETE /api/alarms/rules/{rule_id}       delete rule         [alarm_rule.delete]
   GET    /api/alarms/active                currently active alarms
-  GET    /api/alarms/history               event log (paginated, filterable)
-  POST   /api/alarms/rules/{rule_id}/ack   acknowledge an active alarm
+  GET    /api/alarms/history               event log
+  POST   /api/alarms/rules/{rule_id}/ack       acknowledge     [alarm.ack]
+  GET    /api/alarms/shelved               currently shelved rules
+  POST   /api/alarms/rules/{rule_id}/shelve    mute rule       [alarm.shelve]
+  POST   /api/alarms/rules/{rule_id}/unshelve  unmute rule     [alarm.unshelve]
 
 Notes
 -----
 
   - severity vocabulary: critical / high / medium / low / info
   - rule types: hi_hi, hi, lo, lo_lo, deviation, rate_of_change
-  - user_id on ack is accepted but not authenticated — auth lands in a
+  - user_id on ack is accepted but not authenticated - auth lands in a
     later phase. For now it's a hint that gets stored on the event
     and on alarm_state.last_ack_user_id.
-  - updated_at is bumped automatically by a DB trigger; the API never
-    has to set it manually on UPDATE.
+  - updated_at is bumped automatically by a DB trigger.
+
+  16.0h: every mutating endpoint writes to audit_log (separate DB) in
+  addition to its existing behavior. alarm_events keeps the operational
+  per-rule history; audit_log is the cross-resource compliance log.
 """
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.utils.audit import audit, AuditEvent
 
 
 router = APIRouter(prefix="/api/alarms", tags=["alarms"])
 
 
 # ---------------------------------------------------------------------------
-# Vocabularies — must match the CHECK constraints in migration 0028
+# Vocabularies
 # ---------------------------------------------------------------------------
 
 RuleType = str
-# Phase 14.6b — RuleType is now a free-form string validated by FK to
-# alarm_rule_types.code at DB level. Same rationale as Severity.
-# Phase 14.6 — Severity is now a free-form string validated by FK to
-# alarm_severities.code at DB level. The Literal type can't enumerate
-# user-extensible vocabularies, so we accept any string here and let
-# the alarm_rules_severity_fk constraint reject unknown codes.
 Severity = str
 EventType = Literal[
     "activated", "cleared",
@@ -74,9 +75,6 @@ StateValue = Literal[
     "shelved", "disabled",
 ]
 
-# Which states count as "active" for the operator-facing list. Excludes
-# `normal` (boring), `shelved` (operator muted them), and `disabled`
-# (operator turned the rule off).
 ACTIVE_STATES = ("active_unack", "active_ack", "inactive_unack")
 
 
@@ -89,42 +87,16 @@ class AlarmRuleCreate(BaseModel):
     rule_type: RuleType
     severity:  Severity = "high"
     threshold: float
-    deadband:  float = Field(0.0, ge=0.0,
-                             description="Process value must move beyond "
-                                         "(threshold +/- deadband) before "
-                                         "the state can flip")
-    on_delay_sec:  int = Field(0, ge=0,
-                               description="Hold the trigger condition for this "
-                                           "many seconds before activating "
-                                           "(chatter filter)")
-    off_delay_sec: int = Field(0, ge=0,
-                               description="Hold the clear condition for this "
-                                           "many seconds before deactivating")
-    latched: bool = Field(False,
-                          description="If true, an active alarm stays active "
-                                      "until acknowledged even if the value "
-                                      "returns to normal")
+    deadband:  float = Field(0.0, ge=0.0)
+    on_delay_sec:  int = Field(0, ge=0)
+    off_delay_sec: int = Field(0, ge=0)
+    latched: bool = False
     enabled: bool = True
-    message_template: str | None = Field(
-        None, max_length=500,
-        description="Optional message rendered when the alarm fires. "
-                    "Supports {tag_name}, {value}, {threshold} substitutions "
-                    "in the evaluator.",
-    )
-    # Phase 14.7 — Rolling window used by deviation and rate_of_change.
-    # Ignored by other rule types. NULL = evaluator default (60s).
-    window_seconds: int | None = Field(
-        None, ge=1, le=86400,
-        description="Rolling window in seconds. Used by deviation "
-                    "(value compared against rolling mean) and "
-                    "rate_of_change (least-squares slope). Ignored by "
-                    "other rule types. NULL falls back to 60s.",
-    )
+    message_template: str | None = Field(None, max_length=500)
+    window_seconds: int | None = Field(None, ge=1, le=86400)
 
 
 class AlarmRuleUpdate(BaseModel):
-    # tag_id is intentionally NOT updatable — changing the tag would
-    # invalidate the event history. Delete + recreate instead.
     rule_type: RuleType | None = None
     severity:  Severity  | None = None
     threshold: float | None = None
@@ -156,7 +128,6 @@ class AlarmRuleResponse(BaseModel):
 
 
 class AlarmActive(BaseModel):
-    """One row in the operator's currently-active alarms list."""
     rule_id: int
     tag_id: int
     tag_name: str
@@ -170,9 +141,6 @@ class AlarmActive(BaseModel):
     current_quality: int | None
     last_ack_user_id: int | None
     last_ack_time: datetime | None
-    # Phase 14.4 — shelve fields, NULL for non-shelved rows. Including
-    # them in the active shape too (not just /shelved) so a single client
-    # type covers both views.
     shelved_until: datetime | None = None
     shelve_user_id: int | None = None
     message_template: str | None
@@ -192,22 +160,12 @@ class AlarmEventResponse(BaseModel):
 
 
 class AckRequest(BaseModel):
-    user_id: int | None = Field(
-        None,
-        description="Operator's user id, if available. Stored on the event "
-                    "and on alarm_state.last_ack_user_id. Auth wiring "
-                    "comes in a later phase.",
-    )
+    user_id: int | None = Field(None)
     comment: str | None = Field(None, max_length=500)
 
 
 class ShelveRequest(BaseModel):
-    """Mute a rule for a fixed duration. The evaluator auto-unshelves
-    when `shelved_until` expires; the operator can unshelve early."""
-    duration_minutes: int = Field(
-        ..., ge=1, le=43_200,
-        description="How long to mute the rule, in minutes. Max 30 days.",
-    )
+    duration_minutes: int = Field(..., ge=1, le=43_200)
     user_id: int | None = None
     comment: str | None = Field(None, max_length=500)
 
@@ -218,16 +176,25 @@ class UnshelveRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Rules CRUD
+# Rules CRUD (audited - Phase 16.0h)
 # ---------------------------------------------------------------------------
 
 @router.post("/rules", response_model=AlarmRuleResponse, status_code=201)
 def create_rule(
     body: AlarmRuleCreate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Create an alarm rule. The DB trigger auto-creates the matching
-    alarm_state row in `normal` state; no explicit insert needed here."""
+    """Create an alarm rule. DB trigger auto-creates alarm_state row."""
+
+    # Pre-fetch tag name for audit context. Soft-fail if missing.
+    tag_row = db.execute(
+        text("SELECT name FROM tags WHERE id = :id"),
+        {"id": body.tag_id},
+    ).mappings().first()
+    tag_name = tag_row["name"] if tag_row else f"tag#{body.tag_id} (missing)"
+    target_label = f"{tag_name} {body.rule_type}"
+
     try:
         row = db.execute(text("""
             INSERT INTO alarm_rules (
@@ -248,34 +215,96 @@ def create_rule(
     except IntegrityError as e:
         db.rollback()
         msg = str(e.orig).lower()
+
         if "alarm_rules_unique_basic" in msg:
+            audit(AuditEvent(
+                action="alarm_rule.create",
+                target_type="alarm_rule",
+                target_label=target_label,
+                summary=f"Denied: '{body.rule_type}' rule already exists on {tag_name}",
+                status="denied",
+                error_message="duplicate rule for tag",
+                details={"request": body.model_dump()},
+            ), request)
             raise HTTPException(
                 409,
                 f"A '{body.rule_type}' rule already exists for tag "
                 f"{body.tag_id}. The four level types (hi_hi, hi, lo, lo_lo) "
                 f"are mutually exclusive per tag.",
             )
+
         if "alarm_rules_severity_fk" in msg or (
             "foreign key" in msg and "severity" in msg
         ):
+            audit(AuditEvent(
+                action="alarm_rule.create",
+                target_type="alarm_rule",
+                target_label=target_label,
+                summary=f"Denied: unknown severity '{body.severity}'",
+                status="denied",
+                error_message=f"unknown severity: {body.severity}",
+                details={"request": body.model_dump()},
+            ), request)
             raise HTTPException(
                 400,
                 f"Unknown severity '{body.severity}'. Add it under "
                 f"Setup > Alarm Severities first, or pick an existing one.",
             )
+
         if "alarm_rules_rule_type_fk" in msg or (
             "foreign key" in msg and "rule_type" in msg
         ):
+            audit(AuditEvent(
+                action="alarm_rule.create",
+                target_type="alarm_rule",
+                target_label=target_label,
+                summary=f"Denied: unknown rule_type '{body.rule_type}'",
+                status="denied",
+                error_message=f"unknown rule_type: {body.rule_type}",
+                details={"request": body.model_dump()},
+            ), request)
             raise HTTPException(
                 400,
                 f"Unknown rule type '{body.rule_type}'. Add it under "
                 f"Setup > Alarm Types first, or pick an existing one.",
             )
+
         if "foreign key" in msg or "tags" in msg:
+            audit(AuditEvent(
+                action="alarm_rule.create",
+                target_type="alarm_rule",
+                target_label=target_label,
+                summary=f"Denied: tag {body.tag_id} does not exist",
+                status="denied",
+                error_message="tag not found",
+                details={"request": body.model_dump()},
+            ), request)
             raise HTTPException(
                 422, f"tag_id {body.tag_id} does not exist",
             )
+
+        # Unclassified IntegrityError.
+        audit(AuditEvent(
+            action="alarm_rule.create",
+            target_type="alarm_rule",
+            target_label=target_label,
+            summary="INSERT failed (unclassified IntegrityError)",
+            status="error",
+            error_message=str(e.orig),
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(400, f"Constraint violation: {e.orig}")
+
+    # Success.
+    audit(AuditEvent(
+        action="alarm_rule.create",
+        target_type="alarm_rule",
+        target_id=row["id"],
+        target_label=target_label,
+        summary=f"Created {body.rule_type} alarm on {tag_name} "
+                f"(severity={body.severity}, threshold={body.threshold})",
+        details=body.model_dump() | {"tag_name": tag_name},
+    ), request)
 
     return _attach_tag_name(db, dict(row))
 
@@ -287,8 +316,6 @@ def list_rules(
     severity: Severity | None = Query(None),
     enabled:  bool | None = Query(None),
 ):
-    """List rules, sorted by tag name then rule type. Filters are
-    independent — pass any combination."""
     sql = """
         SELECT r.id, r.tag_id, t.name AS tag_name, r.rule_type, r.severity,
                r.threshold, r.deadband, r.on_delay_sec, r.off_delay_sec,
@@ -337,19 +364,47 @@ def get_rule(
 def update_rule(
     rule_id: int,
     body: AlarmRuleUpdate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Partial update. Anything you don't include stays as it was.
-    `updated_at` is bumped by the DB trigger, not by the API."""
-    exists = db.execute(
-        text("SELECT id FROM alarm_rules WHERE id = :id"),
-        {"id": rule_id},
-    ).scalar()
-    if exists is None:
+    """Partial update. Anything you don't include stays as it was."""
+    updates = body.model_dump(exclude_unset=True)
+    is_toggle = (len(updates) == 1 and "enabled" in updates)
+    action = "alarm_rule.toggle" if is_toggle else "alarm_rule.update"
+
+    # Pre-fetch full existing row for 404 + before-snapshot.
+    existing = db.execute(text("""
+        SELECT r.id, r.tag_id, t.name AS tag_name, r.rule_type, r.severity,
+               r.threshold, r.deadband, r.on_delay_sec, r.off_delay_sec,
+               r.latched, r.enabled, r.message_template, r.window_seconds
+        FROM alarm_rules r
+        LEFT JOIN tags t ON t.id = r.tag_id
+        WHERE r.id = :id
+    """), {"id": rule_id}).mappings().first()
+    if existing is None:
+        audit(AuditEvent(
+            action=action,
+            target_type="alarm_rule",
+            target_id=rule_id,
+            summary=f"Denied: alarm rule {rule_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": updates},
+        ), request)
         raise HTTPException(404, f"Alarm rule {rule_id} not found")
 
-    updates = body.model_dump(exclude_unset=True)
+    target_label = f"{existing['tag_name']} {existing['rule_type']}"
+
     if not updates:
+        audit(AuditEvent(
+            action=action,
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary="Denied: no fields provided",
+            status="denied",
+            error_message="empty PATCH body",
+        ), request)
         raise HTTPException(400, "No fields provided")
 
     set_clauses = [f"{k} = :{k}" for k in updates]
@@ -367,29 +422,69 @@ def update_rule(
     except IntegrityError as e:
         db.rollback()
         msg = str(e.orig).lower()
+
+        denied_reason = None
+        http_status = 400
+        http_detail = f"Constraint violation: {e.orig}"
+
         if "alarm_rules_unique_basic" in msg:
-            raise HTTPException(
-                409,
+            denied_reason = "rule_type collision with existing rule"
+            http_status = 409
+            http_detail = (
                 "Updating rule_type would collide with an existing rule of "
-                "the same type on this tag.",
+                "the same type on this tag."
             )
-        if "alarm_rules_severity_fk" in msg or (
+        elif "alarm_rules_severity_fk" in msg or (
             "foreign key" in msg and "severity" in msg
         ):
-            raise HTTPException(
-                400,
-                f"Unknown severity. Add it under Setup > Alarm "
-                f"Severities first, or pick an existing one.",
+            denied_reason = "unknown severity"
+            http_detail = (
+                "Unknown severity. Add it under Setup > Alarm "
+                "Severities first, or pick an existing one."
             )
-        if "alarm_rules_rule_type_fk" in msg or (
+        elif "alarm_rules_rule_type_fk" in msg or (
             "foreign key" in msg and "rule_type" in msg
         ):
-            raise HTTPException(
-                400,
-                f"Unknown rule type. Add it under Setup > Alarm "
-                f"Types first, or pick an existing one.",
+            denied_reason = "unknown rule_type"
+            http_detail = (
+                "Unknown rule type. Add it under Setup > Alarm "
+                "Types first, or pick an existing one."
             )
-        raise HTTPException(400, f"Constraint violation: {e.orig}")
+
+        audit(AuditEvent(
+            action=action,
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary=f"Denied: {denied_reason or 'constraint violation'}",
+            status="denied" if denied_reason else "error",
+            error_message=str(e.orig),
+            details={"request": updates, "before": _summarize_rule(existing)},
+        ), request)
+        raise HTTPException(http_status, http_detail)
+
+    # Success.
+    if is_toggle:
+        new_state = "Enabled" if updates["enabled"] else "Disabled"
+        summary = f"{new_state} {existing['rule_type']} alarm on {existing['tag_name']}"
+    else:
+        summary = (
+            f"Updated {existing['rule_type']} alarm on {existing['tag_name']} "
+            f"({', '.join(updates.keys())})"
+        )
+
+    audit(AuditEvent(
+        action=action,
+        target_type="alarm_rule",
+        target_id=rule_id,
+        target_label=target_label,
+        summary=summary,
+        details={
+            "changed_fields": list(updates.keys()),
+            "request": updates,
+            "before": _summarize_rule(existing),
+        },
+    ), request)
 
     return _attach_tag_name(db, dict(row))
 
@@ -397,22 +492,67 @@ def update_rule(
 @router.delete("/rules/{rule_id}", status_code=204)
 def delete_rule(
     rule_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Delete a rule. The matching alarm_state row cascades automatically;
-    the event history in alarm_events is preserved (no FK to alarm_rules
-    by design)."""
-    result = db.execute(
-        text("DELETE FROM alarm_rules WHERE id = :id"),
-        {"id": rule_id},
-    )
-    if result.rowcount == 0:
+    """Delete a rule. alarm_state cascades; alarm_events history is preserved."""
+
+    # Pre-fetch full row for compliance before-state.
+    existing = db.execute(text("""
+        SELECT r.id, r.tag_id, t.name AS tag_name, r.rule_type, r.severity,
+               r.threshold, r.deadband, r.on_delay_sec, r.off_delay_sec,
+               r.latched, r.enabled, r.message_template, r.window_seconds,
+               r.created_at, r.updated_at
+        FROM alarm_rules r
+        LEFT JOIN tags t ON t.id = r.tag_id
+        WHERE r.id = :id
+    """), {"id": rule_id}).mappings().first()
+    if existing is None:
+        audit(AuditEvent(
+            action="alarm_rule.delete",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            summary=f"Denied: alarm rule {rule_id} not found",
+            status="denied",
+            error_message="not found",
+        ), request)
         raise HTTPException(404, f"Alarm rule {rule_id} not found")
-    db.commit()
+
+    target_label = f"{existing['tag_name']} {existing['rule_type']}"
+
+    try:
+        db.execute(
+            text("DELETE FROM alarm_rules WHERE id = :id"),
+            {"id": rule_id},
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="alarm_rule.delete",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary="DELETE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"before": _full_rule(existing)},
+        ), request)
+        raise
+
+    audit(AuditEvent(
+        action="alarm_rule.delete",
+        target_type="alarm_rule",
+        target_id=rule_id,
+        target_label=target_label,
+        summary=f"Deleted {existing['rule_type']} alarm on {existing['tag_name']} "
+                f"(severity={existing['severity']})",
+        details={"before": _full_rule(existing)},
+    ), request)
 
 
 # ---------------------------------------------------------------------------
-# Active alarms view
+# Active alarms view (read-only, not audited)
 # ---------------------------------------------------------------------------
 
 @router.get("/active", response_model=list[AlarmActive])
@@ -420,12 +560,6 @@ def list_active(
     db: Annotated[Session, Depends(get_session)],
     severity: Severity | None = Query(None),
 ):
-    """Currently active alarms. State must be one of:
-    active_unack, active_ack, inactive_unack.
-
-    Sorted with the loudest first: severity desc, then most-recent change.
-    """
-    # Severity ordering for the sort key — critical loudest, info quietest.
     sql = """
         SELECT s.rule_id,
                r.tag_id, t.name AS tag_name,
@@ -447,8 +581,6 @@ def list_active(
         sql += " AND r.severity = :severity"
         params["severity"] = severity
 
-    # Severity sort: map to integer so ORDER BY does the right thing
-    # without needing a CASE expression on every row.
     sql += """
         ORDER BY
             CASE r.severity
@@ -466,7 +598,7 @@ def list_active(
 
 
 # ---------------------------------------------------------------------------
-# Event history
+# Event history (read-only)
 # ---------------------------------------------------------------------------
 
 @router.get("/history", response_model=list[AlarmEventResponse])
@@ -475,17 +607,10 @@ def list_history(
     rule_id:    int | None = Query(None),
     tag_id:     int | None = Query(None),
     event_type: EventType | None = Query(None),
-    start:      datetime | None = Query(None, description="ISO timestamp (inclusive)"),
-    end:        datetime | None = Query(None, description="ISO timestamp (exclusive)"),
+    start:      datetime | None = Query(None),
+    end:        datetime | None = Query(None),
     limit:      int = Query(100, ge=1, le=1000),
 ):
-    """Event log, newest first. All filters combine with AND. Returns up
-    to `limit` rows (default 100, hard cap 1000).
-
-    Pagination strategy: pass `end` = previous batch's oldest event_time
-    to walk backwards. id is unique within a chunk so ties on event_time
-    are stable.
-    """
     sql = """
         SELECT e.id, e.rule_id, e.tag_id, t.name AS tag_name,
                e.event_time, e.event_type, e.value, e.quality,
@@ -517,13 +642,14 @@ def list_history(
 
 
 # ---------------------------------------------------------------------------
-# Acknowledge action
+# Operational actions: ack / shelve / unshelve - all audited
 # ---------------------------------------------------------------------------
 
 @router.post("/rules/{rule_id}/ack", response_model=AlarmEventResponse, status_code=201)
 def ack_rule(
     rule_id: int,
     body: AckRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
     """Acknowledge an active alarm.
@@ -533,32 +659,54 @@ def ack_rule(
       inactive_unack -> normal            (alarm cleared and now acked)
       anything else  -> 409 Conflict      (nothing to ack)
 
-    Writes an `acked` event with the value/quality at ack time so the
-    history shows what the operator saw when they pressed the button.
+    Both transitions audit as `alarm.ack` with details.transition
+    capturing which state moved to which.
     """
     state_row = db.execute(text("""
-        SELECT s.state, s.current_value, s.current_quality, r.tag_id
+        SELECT s.state, s.current_value, s.current_quality,
+               r.tag_id, r.rule_type, r.severity,
+               t.name AS tag_name
         FROM alarm_state s
         JOIN alarm_rules r ON r.id = s.rule_id
+        LEFT JOIN tags t ON t.id = r.tag_id
         WHERE s.rule_id = :rule_id
     """), {"rule_id": rule_id}).mappings().first()
 
     if state_row is None:
+        audit(AuditEvent(
+            action="alarm.ack",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            summary=f"Denied: alarm rule {rule_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(404, f"Alarm rule {rule_id} not found")
 
+    target_label = f"{state_row['tag_name']} {state_row['rule_type']}"
     current = state_row["state"]
+
     if current == "active_unack":
         new_state = "active_ack"
     elif current == "inactive_unack":
         new_state = "normal"
     else:
+        audit(AuditEvent(
+            action="alarm.ack",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary=f"Denied: nothing to ack (state={current})",
+            status="denied",
+            error_message=f"state '{current}' is not ackable",
+            details={"request": body.model_dump(), "state": current},
+        ), request)
         raise HTTPException(
             409,
             f"Rule {rule_id} is in state '{current}'; nothing to acknowledge.",
         )
 
-    # Update state + insert event + commit in one transaction. If either
-    # fails, neither side persists.
     try:
         db.execute(text("""
             UPDATE alarm_state
@@ -591,24 +739,43 @@ def ack_rule(
             "comment": body.comment,
         }).mappings().first()
         db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
+        audit(AuditEvent(
+            action="alarm.ack",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary="ack failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": body.model_dump(), "transition": f"{current}->{new_state}"},
+        ), request)
         raise
 
-    # Attach tag_name for the response.
+    audit(AuditEvent(
+        action="alarm.ack",
+        target_type="alarm_rule",
+        target_id=rule_id,
+        target_label=target_label,
+        summary=f"Acknowledged {state_row['rule_type']} alarm on "
+                f"{state_row['tag_name']} ({current} -> {new_state})",
+        details={
+            "transition": f"{current} -> {new_state}",
+            "value_at_ack": state_row["current_value"],
+            "quality_at_ack": state_row["current_quality"],
+            "operator_note": body.comment,
+            "user_id": body.user_id,
+            "severity": state_row["severity"],
+            "alarm_event_id": event["id"],
+        },
+    ), request)
+
     return _attach_tag_name(db, dict(event), tag_id_field="tag_id")
 
 
-# ---------------------------------------------------------------------------
-# Shelve / unshelve actions  (Phase 14.4)
-# ---------------------------------------------------------------------------
-
 @router.get("/shelved", response_model=list[AlarmActive])
 def list_shelved(db: Annotated[Session, Depends(get_session)]):
-    """Currently-shelved rules. Same response shape as /active so the
-    frontend can render them with shared code, but filtered to
-    state='shelved'. Sorted by earliest shelve expiry (the operator
-    cares which mute is about to lift)."""
     sql = """
         SELECT s.rule_id,
                r.tag_id, t.name AS tag_name,
@@ -635,23 +802,45 @@ def list_shelved(db: Annotated[Session, Depends(get_session)]):
 def shelve_rule(
     rule_id: int,
     body: ShelveRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Mute a rule for `duration_minutes`. Allowed from any state EXCEPT
-    `disabled` (re-enable the rule first). Re-shelving an already-shelved
-    rule resets the expiry to the new duration (operator extends the
-    mute without having to unshelve first)."""
+    """Mute a rule for `duration_minutes`."""
     state_row = db.execute(text("""
-        SELECT s.state, s.current_value, s.current_quality, r.tag_id
+        SELECT s.state, s.current_value, s.current_quality,
+               r.tag_id, r.rule_type, r.severity,
+               t.name AS tag_name
         FROM alarm_state s
         JOIN alarm_rules r ON r.id = s.rule_id
+        LEFT JOIN tags t ON t.id = r.tag_id
         WHERE s.rule_id = :rule_id
     """), {"rule_id": rule_id}).mappings().first()
 
     if state_row is None:
+        audit(AuditEvent(
+            action="alarm.shelve",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            summary=f"Denied: alarm rule {rule_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(404, f"Alarm rule {rule_id} not found")
 
+    target_label = f"{state_row['tag_name']} {state_row['rule_type']}"
+
     if state_row["state"] == "disabled":
+        audit(AuditEvent(
+            action="alarm.shelve",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary="Denied: rule is disabled (can't shelve)",
+            status="denied",
+            error_message="rule disabled",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(
             409,
             f"Rule {rule_id} is disabled; re-enable before shelving.",
@@ -691,9 +880,36 @@ def shelve_rule(
                        or f"shelved for {body.duration_minutes} min",
         }).mappings().first()
         db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
+        audit(AuditEvent(
+            action="alarm.shelve",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary="shelve failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": body.model_dump()},
+        ), request)
         raise
+
+    audit(AuditEvent(
+        action="alarm.shelve",
+        target_type="alarm_rule",
+        target_id=rule_id,
+        target_label=target_label,
+        summary=f"Shelved {state_row['rule_type']} alarm on "
+                f"{state_row['tag_name']} for {body.duration_minutes} min",
+        details={
+            "duration_minutes": body.duration_minutes,
+            "previous_state": state_row["state"],
+            "operator_note": body.comment,
+            "user_id": body.user_id,
+            "severity": state_row["severity"],
+            "alarm_event_id": event["id"],
+        },
+    ), request)
 
     return _attach_tag_name(db, dict(event), tag_id_field="tag_id")
 
@@ -703,22 +919,45 @@ def shelve_rule(
 def unshelve_rule(
     rule_id: int,
     body: UnshelveRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """End a shelve early. Transitions state back to `normal`; the
-    evaluator's next tick will re-evaluate the current value and
-    re-alarm if appropriate (subject to on_delay)."""
+    """End a shelve early."""
     state_row = db.execute(text("""
-        SELECT s.state, s.current_value, s.current_quality, r.tag_id
+        SELECT s.state, s.current_value, s.current_quality,
+               r.tag_id, r.rule_type, r.severity,
+               t.name AS tag_name
         FROM alarm_state s
         JOIN alarm_rules r ON r.id = s.rule_id
+        LEFT JOIN tags t ON t.id = r.tag_id
         WHERE s.rule_id = :rule_id
     """), {"rule_id": rule_id}).mappings().first()
 
     if state_row is None:
+        audit(AuditEvent(
+            action="alarm.unshelve",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            summary=f"Denied: alarm rule {rule_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(404, f"Alarm rule {rule_id} not found")
 
+    target_label = f"{state_row['tag_name']} {state_row['rule_type']}"
+
     if state_row["state"] != "shelved":
+        audit(AuditEvent(
+            action="alarm.unshelve",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary=f"Denied: rule not shelved (state={state_row['state']})",
+            status="denied",
+            error_message=f"state '{state_row['state']}' is not shelved",
+            details={"request": body.model_dump(), "state": state_row["state"]},
+        ), request)
         raise HTTPException(
             409,
             f"Rule {rule_id} is in state '{state_row['state']}'; "
@@ -754,9 +993,34 @@ def unshelve_rule(
             "comment": body.comment,
         }).mappings().first()
         db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
+        audit(AuditEvent(
+            action="alarm.unshelve",
+            target_type="alarm_rule",
+            target_id=rule_id,
+            target_label=target_label,
+            summary="unshelve failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": body.model_dump()},
+        ), request)
         raise
+
+    audit(AuditEvent(
+        action="alarm.unshelve",
+        target_type="alarm_rule",
+        target_id=rule_id,
+        target_label=target_label,
+        summary=f"Unshelved {state_row['rule_type']} alarm on "
+                f"{state_row['tag_name']}",
+        details={
+            "operator_note": body.comment,
+            "user_id": body.user_id,
+            "severity": state_row["severity"],
+            "alarm_event_id": event["id"],
+        },
+    ), request)
 
     return _attach_tag_name(db, dict(event), tag_id_field="tag_id")
 
@@ -770,8 +1034,7 @@ def _attach_tag_name(
     row: dict,
     tag_id_field: str = "tag_id",
 ) -> dict:
-    """Populate `tag_name` on a row dict from the tags table. Cheap
-    follow-up query keeps the main INSERT/UPDATE SQL simple."""
+    """Populate `tag_name` on a row dict from the tags table."""
     tag_id = row.get(tag_id_field)
     if tag_id is None:
         row["tag_name"] = None
@@ -782,3 +1045,37 @@ def _attach_tag_name(
     ).scalar()
     row["tag_name"] = name
     return row
+
+
+def _summarize_rule(row) -> dict[str, Any]:
+    """Compact before-state for update audits."""
+    return {
+        "tag_id": row["tag_id"],
+        "tag_name": row["tag_name"],
+        "rule_type": row["rule_type"],
+        "severity": row["severity"],
+        "threshold": float(row["threshold"]) if row["threshold"] is not None else None,
+        "enabled": row["enabled"],
+        "latched": row["latched"],
+    }
+
+
+def _full_rule(row) -> dict[str, Any]:
+    """Full before-state for delete audits. 365-day retention in audit DB."""
+    return {
+        "id": row["id"],
+        "tag_id": row["tag_id"],
+        "tag_name": row["tag_name"],
+        "rule_type": row["rule_type"],
+        "severity": row["severity"],
+        "threshold": float(row["threshold"]) if row["threshold"] is not None else None,
+        "deadband": float(row["deadband"]) if row["deadband"] is not None else None,
+        "on_delay_sec": row["on_delay_sec"],
+        "off_delay_sec": row["off_delay_sec"],
+        "latched": row["latched"],
+        "enabled": row["enabled"],
+        "message_template": row["message_template"],
+        "window_seconds": row["window_seconds"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }

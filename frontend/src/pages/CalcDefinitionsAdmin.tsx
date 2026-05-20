@@ -1,22 +1,39 @@
 /**
- * Phase 15.3 - Calc Blocks admin page.
- * Phase 16.0b - Adds schema-driven "New calculation" modal.
- * Phase 16.0c - Adds Value column, Edit/Delete/Toggle actions.
+ * Phase 17.0b - Computed Tags admin page.
+ *
+ * Adds visual indicators for external output targets:
+ *   - Row: small "→ device/tag" badge next to the tag name
+ *   - Detail panel: explicit Output target rows
+ *
+ * Listing is grouped by Computed Device with collapse/expand. Each
+ * device section has a per-device "+ tag" button which opens
+ * CreateCalcModal pre-selected to that device.
+ *
+ * Header includes a "Manage Computed Devices" button that opens
+ * ComputedDevicesModal for device CRUD.
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Calculator, RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, Clock, Zap, Power, Plus, Pencil, Trash2, Loader2,
+  Settings, FolderOpen, Folder, ArrowRight,
 } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
-import { useCalcDefinitions, useBlockTypes } from "@/lib/useCalcDefinitions";
-import type { CalcDefinition, BlockType } from "@/types/calcDefinitions";
+import {
+  useCalcDefinitions, useBlockTypes, useComputedDevices,
+  CALC_DEFINITIONS_QUERY_KEY,
+} from "@/lib/useCalcDefinitions";
+import type {
+  CalcDefinition, BlockType, ComputedDevice,
+} from "@/types/calcDefinitions";
 
 import { CreateCalcModal } from "@/components/calc/CreateCalcModal";
+import { ComputedDevicesModal } from "@/components/calc/ComputedDevicesModal";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 
 const STATUS_STYLES: Record<string, string> = {
@@ -43,22 +60,16 @@ const CATEGORY_STYLES: Record<string, string> = {
 };
 
 
-// ---------------------------------------------------------------------------
-// Hook: poll current values for all output tags every 2 seconds
-// ---------------------------------------------------------------------------
-
 interface CurrentValueRecord {
   value: number | null;
   quality: number | null;
   ts: string | null;
 }
-
 interface CurrentValuesResponse {
   values: Record<string, CurrentValueRecord>;
   _source?: string;
   _note?: string;
 }
-
 function useCurrentValues() {
   return useQuery<CurrentValuesResponse>({
     queryKey: ["calc-current-values"],
@@ -75,6 +86,7 @@ function useCurrentValues() {
 
 export default function CalcDefinitionsAdmin() {
   const defs = useCalcDefinitions();
+  const devices = useComputedDevices();
   const types = useBlockTypes();
   const values = useCurrentValues();
   const qc = useQueryClient();
@@ -83,75 +95,70 @@ export default function CalcDefinitionsAdmin() {
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [filterEnabledOnly, setFilterEnabledOnly] = useState(false);
   const [filterSearch, setFilterSearch] = useState("");
+
+  const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
   const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [devicesModalOpen, setDevicesModalOpen] = useState(false);
   const [editingCalc, setEditingCalc] = useState<CalcDefinition | null>(null);
+  const [initialDeviceId, setInitialDeviceId] = useState<number | null>(null);
 
-  // Mutation: toggle enabled. PUTs the full def with `enabled` flipped.
+  const [pendingToggle, setPendingToggle] = useState<CalcDefinition | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<CalcDefinition | null>(null);
+
   const toggleMutation = useMutation({
-    mutationFn: async (def: CalcDefinition) => {
-      const body = {
-        tag_id: def.tag_id,
-        block_type: def.block_type,
-        block_config: def.block_config,
-        execution_rate_ms: def.execution_rate_ms,
-        enabled: !def.enabled,
-      };
-      const res = await fetch(`/api/calc/definitions/${def.id}`, {
-        method: "PUT",
+    mutationFn: async (d: CalcDefinition) => {
+      const res = await fetch(`/api/computed-tags/${d.id}`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ enabled: !d.enabled }),
       });
       if (!res.ok) {
-        const detail = await res.text();
-        throw new Error(`Toggle failed (HTTP ${res.status}): ${detail}`);
+        throw new Error(`Toggle failed (HTTP ${res.status}): ${await res.text()}`);
       }
       return res.json();
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["calc-definitions"] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: CALC_DEFINITIONS_QUERY_KEY }),
     onError: (err: Error) => alert(err.message),
   });
 
-  // Mutation: delete.
   const deleteMutation = useMutation({
-    mutationFn: async (def: CalcDefinition) => {
-      const res = await fetch(`/api/calc/definitions/${def.id}`, {
-        method: "DELETE",
-      });
+    mutationFn: async (d: CalcDefinition) => {
+      const res = await fetch(`/api/computed-tags/${d.id}`, { method: "DELETE" });
       if (!res.ok && res.status !== 204) {
-        const detail = await res.text();
-        throw new Error(`Delete failed (HTTP ${res.status}): ${detail}`);
+        throw new Error(`Delete failed (HTTP ${res.status}): ${await res.text()}`);
       }
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["calc-definitions"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: CALC_DEFINITIONS_QUERY_KEY });
+      qc.invalidateQueries({ queryKey: ["computed-devices"] });
+    },
     onError: (err: Error) => alert(err.message),
   });
-
-  function handleDelete(def: CalcDefinition) {
-    const tagName = def.tag_name ?? `tag #${def.tag_id}`;
-    const ok = window.confirm(
-      `Delete calc #${def.id} (${def.block_type} → ${tagName})?\n\n` +
-      `The output tag itself will NOT be deleted; only the calculation` +
-      ` definition is removed. The tag's last value will remain in history.`
-    );
-    if (!ok) return;
-    deleteMutation.mutate(def);
-  }
 
   function handleEdit(def: CalcDefinition) {
     setEditingCalc(def);
+    setInitialDeviceId(null);
     setModalOpen(true);
   }
 
-  function handleCreate() {
+  function handleCreateGlobal() {
     setEditingCalc(null);
+    setInitialDeviceId(null);
+    setModalOpen(true);
+  }
+
+  function handleCreateInDevice(deviceId: number) {
+    setEditingCalc(null);
+    setInitialDeviceId(deviceId);
     setModalOpen(true);
   }
 
   function handleModalClose() {
     setModalOpen(false);
     setEditingCalc(null);
+    setInitialDeviceId(null);
   }
 
   const typeByCode = useMemo(() => {
@@ -178,7 +185,9 @@ export default function CalcDefinitionsAdmin() {
       }
       if (search) {
         const hay = (
-          (d.tag_name ?? "") + " " + d.block_type + " " + (d.id?.toString() ?? "")
+          (d.name ?? "") + " " + d.block_type + " " +
+          (d.device_name ?? "") + " " + (d.id?.toString() ?? "") + " " +
+          (d.output_tag_name ?? "") + " " + (d.output_device_name ?? "")
         ).toLowerCase();
         if (!hay.includes(search)) return false;
       }
@@ -186,13 +195,30 @@ export default function CalcDefinitionsAdmin() {
     });
   }, [defs.data, filterCategory, filterStatus, filterEnabledOnly, filterSearch, typeByCode]);
 
-  const valueLookup = values.data?.values ?? {};
+  const groupedByDevice = useMemo(() => {
+    const map = new Map<number, CalcDefinition[]>();
+    for (const d of filtered) {
+      if (!map.has(d.device_id)) map.set(d.device_id, []);
+      map.get(d.device_id)!.push(d);
+    }
+    for (const arr of map.values()) {
+      arr.sort((a, b) => a.name.localeCompare(b.name));
+    }
+    return map;
+  }, [filtered]);
 
-  if (defs.isLoading) {
+  const allDevices = useMemo(() => {
+    return [...(devices.data ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  }, [devices.data]);
+
+  const valueLookup = values.data?.values ?? {};
+  const totalCount = defs.data?.length ?? 0;
+
+  if (defs.isLoading || devices.isLoading) {
     return (
       <div className="p-6 flex items-center justify-center text-muted-foreground">
         <RefreshCw className="h-4 w-4 animate-spin mr-2" />
-        Loading calc definitions...
+        Loading computed tags…
       </div>
     );
   }
@@ -204,7 +230,7 @@ export default function CalcDefinitionsAdmin() {
           <CardContent className="p-4 flex items-start gap-2">
             <AlertTriangle className="h-4 w-4 text-destructive flex-shrink-0 mt-0.5" />
             <div className="text-sm">
-              <div className="font-medium">Failed to load calc definitions</div>
+              <div className="font-medium">Failed to load computed tags</div>
               <pre className="text-xs text-muted-foreground mt-1">{String(defs.error)}</pre>
             </div>
           </CardContent>
@@ -219,28 +245,42 @@ export default function CalcDefinitionsAdmin() {
         <CardHeader className="flex flex-row items-center justify-between py-3 px-4 border-b border-border">
           <div className="flex items-center gap-2">
             <Calculator className="h-4 w-4" />
-            <CardTitle className="text-sm">Calc Blocks</CardTitle>
+            <CardTitle className="text-sm">Computed Tags</CardTitle>
             <span className="text-[11px] text-muted-foreground">
-              {filtered.length} of {defs.data?.length ?? 0}
+              {filtered.length} of {totalCount} · {allDevices.length} device{allDevices.length !== 1 ? "s" : ""}
             </span>
           </div>
-          <button
-            type="button"
-            onClick={handleCreate}
-            className="text-xs px-2.5 py-1 rounded bg-primary text-primary-foreground
-                       hover:bg-primary/90 inline-flex items-center gap-1.5"
-          >
-            <Plus className="h-3 w-3" />
-            New calculation
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setDevicesModalOpen(true)}
+              className="text-xs px-2.5 py-1 rounded border border-border
+                         hover:bg-secondary inline-flex items-center gap-1.5"
+            >
+              <Settings className="h-3 w-3" />
+              Manage Computed Devices
+            </button>
+            <button
+              type="button"
+              onClick={handleCreateGlobal}
+              disabled={allDevices.filter((d) => d.enabled).length === 0}
+              title={allDevices.filter((d) => d.enabled).length === 0
+                ? "Create a Computed Device first"
+                : "Create a new computed tag"}
+              className="text-xs px-2.5 py-1 rounded bg-primary text-primary-foreground
+                         hover:bg-primary/90 disabled:opacity-30 inline-flex items-center gap-1.5"
+            >
+              <Plus className="h-3 w-3" />
+              New computed tag
+            </button>
+          </div>
         </CardHeader>
 
         <CardContent className="p-3">
-          {/* Filter bar */}
           <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
             <Input
-              placeholder="Search tag, type, id..."
-              className="h-7 w-48 text-xs"
+              placeholder="Search name, type, device, target…"
+              className="h-7 w-56 text-xs"
               value={filterSearch}
               onChange={(e) => setFilterSearch(e.target.value)}
             />
@@ -276,48 +316,52 @@ export default function CalcDefinitionsAdmin() {
             </label>
           </div>
 
-          {filtered.length === 0 ? (
-            <div className="text-xs text-muted-foreground italic py-4 text-center">
-              No calc definitions match the current filters.
+          {allDevices.length === 0 ? (
+            <div className="text-center py-10 border border-dashed border-border rounded">
+              <Calculator className="h-8 w-8 mx-auto mb-2 text-muted-foreground" />
+              <div className="text-sm font-medium mb-1">No Computed Devices yet</div>
+              <p className="text-xs text-muted-foreground mb-3 max-w-md mx-auto">
+                A computed tag must live on a Computed Device. Create one first.
+              </p>
+              <button
+                type="button"
+                onClick={() => setDevicesModalOpen(true)}
+                className="text-xs px-3 py-1.5 rounded bg-primary text-primary-foreground
+                           hover:bg-primary/90 inline-flex items-center gap-1.5"
+              >
+                <Plus className="h-3 w-3" />
+                Create your first Computed Device
+              </button>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border text-muted-foreground text-[10px] uppercase tracking-wider">
-                    <th className="w-4 p-0"></th>
-                    <th className="text-right px-2 py-2 font-medium">ID</th>
-                    <th className="text-left px-3 py-2 font-medium">Output tag</th>
-                    <th className="text-left px-3 py-2 font-medium">Block type</th>
-                    <th className="text-right px-3 py-2 font-medium">Rate</th>
-                    <th className="text-right px-3 py-2 font-medium">Current value</th>
-                    <th className="text-center px-3 py-2 font-medium">Status</th>
-                    <th className="text-right px-3 py-2 font-medium">Last run</th>
-                    <th className="text-right px-3 py-2 font-medium">Runs</th>
-                    <th className="text-right px-3 py-2 font-medium">Errors</th>
-                    <th className="text-center px-3 py-2 font-medium">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((d) => (
-                    <CalcDefRow
-                      key={d.id}
-                      def={d}
-                      type={typeByCode.get(d.block_type)}
-                      expanded={expandedId === d.id}
-                      currentValue={valueLookup[String(d.tag_id)]}
-                      onToggle={() =>
-                        setExpandedId(expandedId === d.id ? null : d.id)
-                      }
-                      onToggleEnabled={() => toggleMutation.mutate(d)}
-                      onEdit={() => handleEdit(d)}
-                      onDelete={() => handleDelete(d)}
-                      toggling={toggleMutation.isPending && toggleMutation.variables?.id === d.id}
-                      deleting={deleteMutation.isPending && deleteMutation.variables?.id === d.id}
-                    />
-                  ))}
-                </tbody>
-              </table>
+            <div className="space-y-3">
+              {allDevices.map((device) => (
+                <DeviceGroup
+                  key={device.id}
+                  device={device}
+                  defs={groupedByDevice.get(device.id) ?? []}
+                  collapsed={collapsed[device.id] ?? false}
+                  onToggleCollapse={() =>
+                    setCollapsed({ ...collapsed, [device.id]: !(collapsed[device.id] ?? false) })
+                  }
+                  typeByCode={typeByCode}
+                  valueLookup={valueLookup}
+                  expandedId={expandedId}
+                  onToggleExpanded={setExpandedId}
+                  onCreateHere={() => handleCreateInDevice(device.id)}
+                  onEdit={handleEdit}
+                  onToggleEnabled={(d) => setPendingToggle(d)}
+                  onDelete={(d) => setPendingDelete(d)}
+                  toggling={toggleMutation.isPending ? toggleMutation.variables?.id : null}
+                  deleting={deleteMutation.isPending ? deleteMutation.variables?.id : null}
+                />
+              ))}
+
+              {filtered.length === 0 && allDevices.length > 0 && (
+                <div className="text-xs text-muted-foreground italic text-center py-3">
+                  No computed tags match the current filters.
+                </div>
+              )}
             </div>
           )}
         </CardContent>
@@ -326,18 +370,10 @@ export default function CalcDefinitionsAdmin() {
       <div className="px-1 text-[11px] text-muted-foreground space-y-1">
         <p>
           <strong>Current value</strong> column polls every 2 seconds from{" "}
-          <code className="text-[10px]">/api/calc/current-values</code>
-          {values.data?._source && (
-            <> (source: <code>{values.data._source}</code>)</>
-          )}
-          {values.data?._note && (
-            <span className="text-amber-600"> · {values.data._note}</span>
-          )}.
-        </p>
-        <p>
-          <strong>Actions.</strong> Edit reopens the form for changes;
-          delete removes the calc definition only (the output tag stays).
-          Toggle uses PUT to flip the enabled flag.
+          <code className="text-[10px]">/api/calc/current-values</code>.
+          {" "}For calcs with external output, the Value cell shows the
+          internal anchor's last value (typically NULL — values flow to the
+          external tag instead).
         </p>
       </div>
 
@@ -345,6 +381,81 @@ export default function CalcDefinitionsAdmin() {
         open={modalOpen}
         onClose={handleModalClose}
         existingCalc={editingCalc}
+        initialDeviceId={initialDeviceId}
+      />
+      <ComputedDevicesModal
+        open={devicesModalOpen}
+        onClose={() => setDevicesModalOpen(false)}
+      />
+
+      <ConfirmDialog
+        open={!!pendingToggle}
+        title={
+          pendingToggle?.enabled
+            ? `Disable computed tag #${pendingToggle?.id}?`
+            : `Enable computed tag #${pendingToggle?.id}?`
+        }
+        description={
+          pendingToggle?.enabled ? (
+            <>
+              The calculation <strong>{pendingToggle?.block_type}</strong> writing to{" "}
+              <strong>
+                {pendingToggle?.output_tag_id != null
+                  ? `${pendingToggle.output_device_name} / ${pendingToggle.output_tag_name}`
+                  : pendingToggle?.name ?? `tag #${pendingToggle?.id}`}
+              </strong>{" "}
+              will stop being evaluated. History is preserved.
+            </>
+          ) : (
+            <>
+              The calculation <strong>{pendingToggle?.block_type}</strong> will resume every{" "}
+              {pendingToggle ? Math.round(pendingToggle.execution_rate_ms / 1000) : "?"}s.
+            </>
+          )
+        }
+        confirmLabel={pendingToggle?.enabled ? "Disable" : "Enable"}
+        severity={pendingToggle?.enabled ? "warning" : "normal"}
+        busy={toggleMutation.isPending}
+        onConfirm={() => {
+          if (pendingToggle) {
+            toggleMutation.mutate(pendingToggle, {
+              onSettled: () => setPendingToggle(null),
+            });
+          }
+        }}
+        onCancel={() => setPendingToggle(null)}
+      />
+
+      <ConfirmDialog
+        open={!!pendingDelete}
+        title={`Delete computed tag "${pendingDelete?.name}"?`}
+        description={
+          <>
+            Computed tag <strong>{pendingDelete?.name}</strong> (<strong>{pendingDelete?.block_type}</strong>){" "}
+            will be removed permanently — including its definition, execution stats, and historical values.
+            {pendingDelete?.output_tag_id != null && (
+              <>
+                <br />
+                The external output target{" "}
+                <strong>{pendingDelete.output_device_name} / {pendingDelete.output_tag_name}</strong>{" "}
+                will continue to exist but will no longer receive values from this calc.
+              </>
+            )}
+            <br />
+            <span className="text-destructive">This cannot be undone.</span>
+          </>
+        }
+        confirmLabel="Delete"
+        severity="destructive"
+        busy={deleteMutation.isPending}
+        onConfirm={() => {
+          if (pendingDelete) {
+            deleteMutation.mutate(pendingDelete, {
+              onSettled: () => setPendingDelete(null),
+            });
+          }
+        }}
+        onCancel={() => setPendingDelete(null)}
       />
     </div>
   );
@@ -352,17 +463,134 @@ export default function CalcDefinitionsAdmin() {
 
 
 // ---------------------------------------------------------------------------
-// Row + detail panel
+// Device group section
+// ---------------------------------------------------------------------------
+
+interface DeviceGroupProps {
+  device: ComputedDevice;
+  defs: CalcDefinition[];
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  typeByCode: Map<string, BlockType>;
+  valueLookup: Record<string, CurrentValueRecord>;
+  expandedId: number | null;
+  onToggleExpanded: (id: number | null) => void;
+  onCreateHere: () => void;
+  onEdit: (d: CalcDefinition) => void;
+  onToggleEnabled: (d: CalcDefinition) => void;
+  onDelete: (d: CalcDefinition) => void;
+  toggling: number | null | undefined;
+  deleting: number | null | undefined;
+}
+
+function DeviceGroup({
+  device, defs, collapsed, onToggleCollapse,
+  typeByCode, valueLookup, expandedId, onToggleExpanded,
+  onCreateHere, onEdit, onToggleEnabled, onDelete,
+  toggling, deleting,
+}: DeviceGroupProps) {
+  return (
+    <div className="border border-border rounded">
+      <div className="flex items-center justify-between px-3 py-2 bg-secondary/20 border-b border-border">
+        <button
+          type="button"
+          onClick={onToggleCollapse}
+          className="flex items-center gap-2 text-xs font-medium hover:text-foreground"
+        >
+          {collapsed
+            ? <Folder className="h-3.5 w-3.5 text-muted-foreground" />
+            : <FolderOpen className="h-3.5 w-3.5 text-muted-foreground" />
+          }
+          {collapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+          <span>{device.name}</span>
+          <span className="text-[10px] text-muted-foreground">
+            ({defs.length} of {device.computed_tag_count})
+          </span>
+          {!device.enabled && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-300">
+              device disabled
+            </span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={onCreateHere}
+          disabled={!device.enabled}
+          title={device.enabled ? "Add a computed tag to this device" : "Enable the device first"}
+          className="text-[10px] px-2 py-0.5 rounded border border-border
+                     hover:bg-card disabled:opacity-30 inline-flex items-center gap-1"
+        >
+          <Plus className="h-2.5 w-2.5" />
+          tag
+        </button>
+      </div>
+
+      {!collapsed && (
+        defs.length === 0 ? (
+          <div className="text-[11px] text-muted-foreground italic px-3 py-3">
+            {device.computed_tag_count === 0
+              ? "No computed tags on this device yet."
+              : "No tags on this device match the current filters."}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead>
+                <tr className="text-muted-foreground text-[10px] uppercase tracking-wider border-b border-border">
+                  <th className="w-4 p-0"></th>
+                  <th className="text-right px-2 py-2 font-medium">ID</th>
+                  <th className="text-left px-3 py-2 font-medium">Tag name</th>
+                  <th className="text-left px-3 py-2 font-medium">Block type</th>
+                  <th className="text-right px-3 py-2 font-medium">Rate</th>
+                  <th className="text-right px-3 py-2 font-medium">Value</th>
+                  <th className="text-center px-3 py-2 font-medium">Status</th>
+                  <th className="text-right px-3 py-2 font-medium">Last run</th>
+                  <th className="text-center px-3 py-2 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {defs.map((d) => (
+                  <CalcDefRow
+                    key={d.id}
+                    def={d}
+                    type={typeByCode.get(d.block_type)}
+                    expanded={expandedId === d.id}
+                    currentValue={valueLookup[String(d.id)]}
+                    externalValue={d.output_tag_id != null
+                      ? valueLookup[String(d.output_tag_id)] : undefined}
+                    onToggle={() =>
+                      onToggleExpanded(expandedId === d.id ? null : d.id)
+                    }
+                    onToggleEnabled={() => onToggleEnabled(d)}
+                    onEdit={() => onEdit(d)}
+                    onDelete={() => onDelete(d)}
+                    toggling={toggling === d.id}
+                    deleting={deleting === d.id}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Per-tag row + detail panel
 // ---------------------------------------------------------------------------
 
 function CalcDefRow({
-  def, type, expanded, currentValue, onToggle,
+  def, type, expanded, currentValue, externalValue, onToggle,
   onToggleEnabled, onEdit, onDelete, toggling, deleting,
 }: {
   def: CalcDefinition;
   type: BlockType | undefined;
   expanded: boolean;
   currentValue: CurrentValueRecord | undefined;
+  externalValue: CurrentValueRecord | undefined;
   onToggle: () => void;
   onToggleEnabled: () => void;
   onEdit: () => void;
@@ -377,28 +605,32 @@ function CalcDefRow({
     : "bg-slate-50";
 
   const rateLabel = formatRate(def.execution_rate_ms);
-  const lastRun = def.last_executed_at ? relativeTime(def.last_executed_at) : "-";
+  const lastRun = def.last_executed_at ? relativeTime(def.last_executed_at) : "—";
 
-  // Format the current-value cell. Quality 192 = GOOD_NON_SPECIFIC, 0-127 = BAD.
-  const cv = currentValue;
+  const isExternal = def.output_tag_id != null;
+  // For display: prefer the external value when in external mode, since
+  // the internal anchor will be NULL.
+  const displayedValue = isExternal ? externalValue : currentValue;
+
   const valueDisplay = (() => {
-    if (!cv) return <span className="text-muted-foreground">-</span>;
-    if (cv.value === null || cv.value === undefined) {
+    if (!displayedValue) return <span className="text-muted-foreground">—</span>;
+    if (displayedValue.value === null || displayedValue.value === undefined) {
       return (
-        <span className="text-amber-600" title={cv.quality != null ? `quality ${cv.quality}` : "no value"}>
+        <span className="text-amber-600"
+              title={displayedValue.quality != null ? `quality ${displayedValue.quality}` : "no value"}>
           BAD
         </span>
       );
     }
     const isBoolish = def.block_type.match(/^(GT|LT|EQ|NE|GE|LE|AND|OR|NOT|TON|TOF|TP|R_TRIG|F_TRIG|SR|RS)$/);
     const formatted = isBoolish
-      ? (cv.value > 0.5 ? "TRUE" : "FALSE")
-      : (Math.abs(cv.value) >= 0.01 && Math.abs(cv.value) < 1e9
-          ? cv.value.toFixed(4)
-          : cv.value.toExponential(3));
-    const tooltip = cv.ts
-      ? `last written ${relativeTime(cv.ts)} (quality ${cv.quality ?? "?"})`
-      : `quality ${cv.quality ?? "?"}`;
+      ? (displayedValue.value > 0.5 ? "TRUE" : "FALSE")
+      : (Math.abs(displayedValue.value) >= 0.01 && Math.abs(displayedValue.value) < 1e9
+          ? displayedValue.value.toFixed(4)
+          : displayedValue.value.toExponential(3));
+    const tooltip = displayedValue.ts
+      ? `last written ${relativeTime(displayedValue.ts)} (quality ${displayedValue.quality ?? "?"})${isExternal ? " — read from external target" : ""}`
+      : `quality ${displayedValue.quality ?? "?"}`;
     return (
       <span className="font-mono tabular-nums" title={tooltip}>
         {formatted}
@@ -408,17 +640,28 @@ function CalcDefRow({
 
   return (
     <>
-      <tr
-        className="border-t border-border hover:bg-secondary/30"
-      >
+      <tr className="border-t border-border hover:bg-secondary/30">
         <td className="px-1 text-muted-foreground cursor-pointer" onClick={onToggle}>
           {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         </td>
         <td className="px-2 py-1.5 text-right tabular-nums text-muted-foreground cursor-pointer" onClick={onToggle}>
           {def.id}
         </td>
-        <td className="px-3 py-1.5 font-medium cursor-pointer" onClick={onToggle}>
-          {def.tag_name ?? <span className="text-muted-foreground italic">(unresolved tag #{def.tag_id})</span>}
+        <td className="px-3 py-1.5 cursor-pointer" onClick={onToggle}>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium">{def.name}</span>
+            <span className="text-[10px] text-muted-foreground font-mono">{def.data_type}</span>
+            {isExternal && (
+              <span
+                className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded
+                           bg-violet-50 text-violet-800 border border-violet-300 font-mono"
+                title={`Writes to ${def.output_device_name} / ${def.output_tag_name}`}
+              >
+                <ArrowRight className="h-2.5 w-2.5" />
+                {def.output_device_name}/{def.output_tag_name}
+              </span>
+            )}
+          </div>
         </td>
         <td className="px-3 py-1.5 cursor-pointer" onClick={onToggle}>
           <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded border ${catCls}`}
@@ -440,17 +683,6 @@ function CalcDefRow({
         </td>
         <td className="px-3 py-1.5 text-right text-muted-foreground tabular-nums cursor-pointer" onClick={onToggle}>
           {lastRun}
-        </td>
-        <td className="px-3 py-1.5 text-right tabular-nums text-muted-foreground cursor-pointer" onClick={onToggle}>
-          {def.total_executions}
-        </td>
-        <td
-          className={`px-3 py-1.5 text-right tabular-nums cursor-pointer ${
-            def.total_errors > 0 ? "text-red-600 font-medium" : "text-muted-foreground"
-          }`}
-          onClick={onToggle}
-        >
-          {def.total_errors}
         </td>
         <td className="px-3 py-1.5">
           <div className="flex items-center justify-center gap-1">
@@ -495,7 +727,7 @@ function CalcDefRow({
       </tr>
       {expanded && (
         <tr className="border-t border-border bg-secondary/15">
-          <td colSpan={11} className="p-4">
+          <td colSpan={9} className="p-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
@@ -507,24 +739,64 @@ function CalcDefRow({
               </div>
               <div>
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
-                  Stats
+                  Stats & routing
                 </div>
                 <table className="text-xs">
                   <tbody>
-                    <tr><td className="pr-3 text-muted-foreground">Total executions</td><td className="tabular-nums">{def.total_executions}</td></tr>
-                    <tr><td className="pr-3 text-muted-foreground">Total overruns</td><td className={`tabular-nums ${def.total_overruns > 0 ? "text-amber-600" : ""}`}>{def.total_overruns}</td></tr>
-                    <tr><td className="pr-3 text-muted-foreground">Total errors</td><td className={`tabular-nums ${def.total_errors > 0 ? "text-red-600" : ""}`}>{def.total_errors}</td></tr>
-                    <tr><td className="pr-3 text-muted-foreground">Output tag ID</td><td className="tabular-nums">{def.tag_id}</td></tr>
-                    <tr><td className="pr-3 text-muted-foreground">Current value</td><td className="tabular-nums font-mono">
-                      {currentValue?.value != null
-                        ? currentValue.value.toString()
-                        : <span className="text-muted-foreground">-</span>}
-                      {currentValue?.ts && (
-                        <span className="ml-2 text-[10px] text-muted-foreground">
-                          {relativeTime(currentValue.ts)}
-                        </span>
-                      )}
-                    </td></tr>
+                    <tr><td className="pr-3 text-muted-foreground">Last status</td><td>{def.last_status ?? "pending"}</td></tr>
+                    <tr><td className="pr-3 text-muted-foreground">Last duration</td><td className="tabular-nums">{def.last_duration_ms != null ? `${def.last_duration_ms.toFixed(3)} ms` : "—"}</td></tr>
+                    <tr><td className="pr-3 text-muted-foreground">Last error</td><td className="text-[10px]">{def.last_error_message ?? "—"}</td></tr>
+                    <tr><td className="pr-3 text-muted-foreground">Tag id</td><td className="tabular-nums">{def.id}</td></tr>
+                    <tr><td className="pr-3 text-muted-foreground">Device</td><td className="text-[10px]">{def.device_name} (#{def.device_id})</td></tr>
+                    <tr><td className="pr-3 text-muted-foreground">Data type</td><td className="text-[10px] font-mono">{def.data_type}</td></tr>
+                    {/* Phase 17.0b - output routing */}
+                    <tr>
+                      <td className="pr-3 text-muted-foreground">Output target</td>
+                      <td className="text-[10px]">
+                        {isExternal ? (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded
+                                           bg-violet-50 text-violet-800 border border-violet-300 font-mono">
+                            external <ArrowRight className="h-2.5 w-2.5" />{" "}
+                            {def.output_device_name} / {def.output_tag_name} (#{def.output_tag_id})
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground italic">
+                            internal (writes to own tag #{def.id})
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                    {def.description && (
+                      <tr><td className="pr-3 text-muted-foreground">Description</td><td className="text-[10px]">{def.description}</td></tr>
+                    )}
+                    <tr>
+                      <td className="pr-3 text-muted-foreground">Internal value</td>
+                      <td className="tabular-nums font-mono text-[10px]">
+                        {currentValue?.value != null
+                          ? currentValue.value.toString()
+                          : <span className="text-muted-foreground">—</span>}
+                        {currentValue?.ts && (
+                          <span className="ml-2 text-[10px] text-muted-foreground">
+                            {relativeTime(currentValue.ts)}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                    {isExternal && (
+                      <tr>
+                        <td className="pr-3 text-muted-foreground">External value</td>
+                        <td className="tabular-nums font-mono text-[10px]">
+                          {externalValue?.value != null
+                            ? externalValue.value.toString()
+                            : <span className="text-muted-foreground">—</span>}
+                          {externalValue?.ts && (
+                            <span className="ml-2 text-[10px] text-muted-foreground">
+                              {relativeTime(externalValue.ts)}
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    )}
                     <tr><td className="pr-3 text-muted-foreground">Created</td><td className="text-[10px]">{new Date(def.created_at).toLocaleString()}</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Updated</td><td className="text-[10px]">{new Date(def.updated_at).toLocaleString()}</td></tr>
                   </tbody>

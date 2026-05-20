@@ -1,42 +1,53 @@
-"""Pair tag endpoints — Phase 12.3.
+"""Pair tag endpoints - Phase 12.3.
+Phase 16.0h - audit() call on POST /regenerate.
 
 A pair tag is a virtual tag spanning the two halves of a duty/standby
 device pair. Its live value resolves dynamically to whichever side is
 currently the duty (per devices.duty_role).
 
 Auto-generation:
-  POST /api/devices/{id}/pair  → after pair commit, auto_create_pair_tags()
+  POST /api/devices/{id}/pair  -> after pair commit, auto_create_pair_tags()
                                   inserts pair_tags for every (name, data_type)
                                   match across the two devices.
-  POST /api/devices/{id}/unpair → before unpair commit, auto_delete_pair_tags()
+  POST /api/devices/{id}/unpair -> before unpair commit, auto_delete_pair_tags()
                                    removes pair_tags for the pair.
 
 Manual control:
-  GET  /api/pair-tags                — list all pair tags
-  GET  /api/pair-tags/live           — live values resolved to current duty
-  POST /api/pair-tags/regenerate     — refresh all pair tags (e.g. after
-                                       adding tags to a paired device)
-  POST /api/pair-tags/regenerate/{pair_id}  — refresh one pair
+  GET  /api/pair-tags                - list all pair tags (read-only)
+  GET  /api/pair-tags/live           - live values resolved to current duty
+  POST /api/pair-tags/regenerate     - refresh all pair tags [pair_tag.regenerate]
+
+Helper functions auto_create_pair_tags() and auto_delete_pair_tags() are
+called from devices.py during /pair and /unpair operations. They are not
+audited here - devices.py audits them as part of device.pair / device.unpair
+events with the pair_tag counts in the details.
 """
 from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.utils.audit import audit, AuditEvent
+
 
 router = APIRouter(prefix="/api", tags=["pair-tags"])
 
 
 # ---------------------------------------------------------------------------
-# Helpers — used both by these endpoints AND by the /pair, /unpair endpoints
-# in devices.py. Defined as standalone functions so devices.py can call them
-# inside the same DB transaction as the pairing change itself.
+# Helpers - called both from these endpoints AND from devices.py /pair, /unpair.
+# Audit responsibility:
+#   - When called from here (regenerate_all_pair_tags), the audit happens
+#     in the endpoint with action='pair_tag.regenerate'.
+#   - When called from devices.py /pair or /unpair, the audit happens in
+#     devices.py with action='device.pair' / 'device.unpair' and the counts
+#     embedded in details. Don't audit twice.
 # ---------------------------------------------------------------------------
+
 
 def _canonical_pair(a: int, b: int) -> tuple[int, int]:
     """Return (a, b) with a < b. pair_tags stores rows in canonical order
@@ -46,15 +57,15 @@ def _canonical_pair(a: int, b: int) -> tuple[int, int]:
 
 
 def auto_create_pair_tags(db: Session, device_a: int, device_b: int) -> int:
-    """Create one pair_tag row per (name, data_type)-matching tag pair across
-    the two devices. Returns the number of rows inserted.
+    """Create one pair_tag row per (name, data_type)-matching tag pair
+    across the two devices. Returns the number of rows inserted.
 
     Called by POST /devices/{id}/pair AFTER the devices.duty_role and
     redundant_device_id columns have been updated, but BEFORE the commit.
     The atomicity matters: if pair_tag creation fails, the whole pairing
     operation rolls back.
 
-    ON CONFLICT DO NOTHING is defensive — if someone calls /pair twice in
+    ON CONFLICT DO NOTHING is defensive - if someone calls /pair twice in
     a row, the second call is a no-op rather than an error.
     """
     primary, partner = _canonical_pair(device_a, device_b)
@@ -99,6 +110,7 @@ def auto_delete_pair_tags(db: Session, device_a: int, device_b: int) -> int:
 # Response models
 # ---------------------------------------------------------------------------
 
+
 class PairTagResponse(BaseModel):
     id: int
     name: str
@@ -115,12 +127,6 @@ class PairTagResponse(BaseModel):
 
 
 class PairTagLive(BaseModel):
-    """One row per pair tag, with the value resolved to whichever side is
-    currently duty.
-
-    `kind` is always 'pair' — this lets the frontend merge pair tags into
-    the same list as LiveTag rows and differentiate them by inspecting
-    one field rather than two endpoints' worth of types."""
     kind: str = "pair"
     pair_tag_id: int
     tag_name: str
@@ -128,21 +134,16 @@ class PairTagLive(BaseModel):
     function_code: int
     address: int
     engineering_unit: str | None
-    # The "active" side is whichever is currently duty.
     active_device_id: int | None
     active_device_name: str | None
     active_tag_id: int | None
-    # Both sides of the pair for context — UI shows "duty: X, standby: Y".
     primary_device_id: int
     primary_device_name: str
     primary_device_duty_role: str
     partner_device_id: int
     partner_device_name: str
     partner_device_duty_role: str
-    # Phase 12.5 — pair is in manual override if EITHER side is set.
     pair_manual_override: bool
-    # Live value from the active side (NULL if neither side is duty,
-    # which only happens if the schema invariant is broken).
     value_double: float | None
     value_text: str | None
     time: str | None
@@ -158,15 +159,12 @@ class RegenerateResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Read-only endpoints (not audited)
 # ---------------------------------------------------------------------------
+
 
 @router.get("/pair-tags", response_model=list[PairTagResponse])
 def list_pair_tags(db: Annotated[Session, Depends(get_session)]):
-    """List every pair tag with the current duty_role of both sides.
-
-    Useful for the pair-tag management view; for live values use
-    /pair-tags/live which joins against latest_tag_values."""
     rows = db.execute(
         text("""
             SELECT
@@ -189,16 +187,6 @@ def list_pair_tags(db: Annotated[Session, Depends(get_session)]):
 
 @router.get("/pair-tags/live", response_model=list[PairTagLive])
 def list_pair_tags_live(db: Annotated[Session, Depends(get_session)]):
-    """Live values for every pair tag, resolved to whichever side is duty.
-
-    The CASE expression in the SELECT decides which side is active:
-      - primary is duty   → use primary
-      - partner is duty   → use partner
-      - neither is duty   → use primary as a fallback (shouldn't happen
-                            given the ck_devices_duty_role_consistency
-                            constraint, but we don't NULL the row out
-                            because that would hide the pair tag entirely)
-    """
     rows = db.execute(
         text("""
             SELECT
@@ -215,7 +203,6 @@ def list_pair_tags_live(db: Annotated[Session, Depends(get_session)]):
                 dq.name AS partner_device_name,
                 dq.duty_role AS partner_device_duty_role,
                 (dp.manual_override OR dq.manual_override) AS pair_manual_override,
-                -- Active side resolution
                 CASE
                     WHEN dp.duty_role = 'duty' THEN pt.primary_device_id
                     WHEN dq.duty_role = 'duty' THEN pt.partner_device_id
@@ -242,9 +229,6 @@ def list_pair_tags_live(db: Annotated[Session, Depends(get_session)]):
             JOIN devices dp ON dp.id = pt.primary_device_id
             JOIN devices dq ON dq.id = pt.partner_device_id
             LEFT JOIN engineering_units eu ON eu.id = ta.engineering_unit_id
-            -- Resolve the active tag's latest value (LEFT JOIN — pair tags
-            -- whose active side has never been polled still show up with
-            -- NULL value, rather than disappearing from the list).
             LEFT JOIN latest_tag_values lv
                 ON lv.tag_id = CASE
                     WHEN dp.duty_role = 'duty' THEN pt.primary_tag_id
@@ -264,19 +248,23 @@ def list_pair_tags_live(db: Annotated[Session, Depends(get_session)]):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Mutating endpoint (audited)
+# ---------------------------------------------------------------------------
+
+
 @router.post("/pair-tags/regenerate", response_model=RegenerateResponse)
-def regenerate_all_pair_tags(db: Annotated[Session, Depends(get_session)]):
+def regenerate_all_pair_tags(
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+):
     """Recompute pair_tags for every paired device.
 
-    Use when tags have been added or renamed on a paired device after the
-    initial pairing. The function:
-      1. For each pair, runs the auto_create logic (idempotent: new matches
-         are added, existing rows are left alone via ON CONFLICT).
-      2. Removes orphan pair_tags whose underlying primary_tag_id or
-         partner_tag_id no longer match by name (e.g. someone renamed
-         one side and the pair is no longer canonical).
+    Audited as 'pair_tag.regenerate' - a system-wide maintenance op.
+    Summary captures (pairs_processed, created, deleted_orphans) so a
+    future "when did regeneration last actually do something?" question
+    can be answered from the audit log alone.
     """
-    # Find every paired-device couple, in canonical order (lower id first).
     pairs = db.execute(
         text("""
             SELECT DISTINCT
@@ -288,29 +276,61 @@ def regenerate_all_pair_tags(db: Annotated[Session, Depends(get_session)]):
         """)
     ).mappings().all()
 
-    created_total = 0
-    for p in pairs:
-        created_total += auto_create_pair_tags(
-            db, p["primary_device_id"], p["partner_device_id"]
+    pair_list = [
+        {"primary": p["primary_device_id"], "partner": p["partner_device_id"]}
+        for p in pairs
+    ]
+
+    try:
+        created_total = 0
+        for p in pairs:
+            created_total += auto_create_pair_tags(
+                db, p["primary_device_id"], p["partner_device_id"]
+            )
+
+        # Orphan cleanup: pair_tags whose primary_tag and partner_tag no
+        # longer agree on (name, data_type). This catches renames.
+        deleted = db.execute(
+            text("""
+                DELETE FROM pair_tags pt
+                USING tags ta, tags tb
+                WHERE ta.id = pt.primary_tag_id
+                  AND tb.id = pt.partner_tag_id
+                  AND (ta.name <> pt.name
+                       OR tb.name <> pt.name
+                       OR ta.data_type <> tb.data_type)
+            """)
         )
+        deleted_orphans = deleted.rowcount or 0
 
-    # Orphan cleanup: pair_tags whose primary_tag and partner_tag no
-    # longer agree on (name, data_type). This catches renames.
-    deleted = db.execute(
-        text("""
-            DELETE FROM pair_tags pt
-            USING tags ta, tags tb
-            WHERE ta.id = pt.primary_tag_id
-              AND tb.id = pt.partner_tag_id
-              AND (ta.name <> pt.name
-                   OR tb.name <> pt.name
-                   OR ta.data_type <> tb.data_type)
-        """)
-    )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="pair_tag.regenerate",
+            target_type="pair_tag",
+            summary="Regenerate failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"pairs_attempted": pair_list},
+        ), request)
+        raise
 
-    db.commit()
+    audit(AuditEvent(
+        action="pair_tag.regenerate",
+        target_type="pair_tag",
+        summary=f"Regenerated pair_tags: {len(pairs)} pair(s) processed, "
+                f"{created_total} created, {deleted_orphans} orphan(s) removed",
+        details={
+            "pairs_processed": len(pairs),
+            "pairs": pair_list,
+            "created": created_total,
+            "deleted_orphans": deleted_orphans,
+        },
+    ), request)
+
     return {
         "pairs_processed": len(pairs),
         "created": created_total,
-        "deleted_orphans": deleted.rowcount or 0,
+        "deleted_orphans": deleted_orphans,
     }
