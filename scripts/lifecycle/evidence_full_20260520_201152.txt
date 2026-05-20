@@ -1,0 +1,29 @@
+# INDUVISTA Lifecycle Smoke Test — evidence log
+# Date: 2026-05-20 20:16:09
+# Result: 22 pass, 3 fail, 0 skip (255.9s)
+
+PASS: calc_evaluator: all 6 hardening markers present -- signal.signal(signal.SIGTERM, signal.signal(signal.SIGINT, while not _shutting_down, ...
+PASS: alarm_evaluator: all 6 hardening markers present -- signal.signal(signal.SIGTERM, signal.signal(signal.SIGINT, while not _should_stop, ...
+PASS: modbus_supervisor: all 4 hardening markers present -- add_signal_handler, stop_event.set(), stopped cleanly, ...
+PASS: docker-compose.yml: stop_grace_period set on 3+ workers -- found 3 occurrences
+PASS: docker-compose.yml: services wait for migrate completion -- found in 4 service definition(s)
+PASS: calc_evaluator: container running -- uptime=4.1s, container=svj_calc_evaluator
+PASS: alarm_evaluator: container running -- uptime=5.2s, container=svj_alarm_evaluator
+PASS: modbus_worker: container running -- uptime=5.3s, container=svj_modbus_worker
+PASS: calc_evaluator: 'starting' marker emitted -- WARMUP_SEC=3.0
+PASS: calc_evaluator: 'warm-up complete' marker emitted -- after WARMUP_SEC delay
+PASS: alarm_evaluator: 'starting' marker emitted -- WARMUP_SEC=3.0
+PASS: alarm_evaluator: 'warm-up complete' marker emitted -- after WARMUP_SEC delay
+PASS: modbus_supervisor: 'starting' marker emitted
+PASS: modbus_supervisor: 'tasks-started' marker emitted
+FAIL: calc_evaluator: timestamp parse failed
+FAIL: alarm_evaluator: timestamp parse failed
+PASS: calc_evaluator: 'stopped cleanly' marker emitted -- stop_elapsed=2.70s, captured groups=('1', '29')
+PASS: alarm_evaluator: 'stopped cleanly' marker emitted -- stop_elapsed=2.12s, captured groups=('14', '56')
+PASS: modbus_supervisor: 'stopped cleanly' marker emitted -- stop_elapsed=4.51s, captured groups=('0',)
+PASS: calc_evaluator: SIGTERM-to-exit latency within budget -- latency=2.0ms, threshold=1500ms, wall=2.52s (mostly docker orchestration)
+PASS: alarm_evaluator: SIGTERM-to-exit latency within budget -- latency=1.0ms, threshold=1500ms, wall=2.07s (mostly docker orchestration)
+FAIL: calc_evaluator: SIGKILL caused excessive data loss -- before_kill=421 → after_kill=403 (lost 18 samples; expected ≤5)
+PASS: calc_evaluator: resumed writing after restart -- 72 samples in 10s post-restart
+PASS: CTU counter preserved across restart -- before=0 → after=0 (Δ=0)
+PASS: Burn-in: 5 cycles completed without error accumulation -- each cycle: stop → start → warm-up → evaluating

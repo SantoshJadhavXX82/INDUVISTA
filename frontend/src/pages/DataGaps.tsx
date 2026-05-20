@@ -17,6 +17,7 @@ import { Search, Play } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { type LiveTag } from "@/types/api";
 import { Card, CardContent } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -101,14 +102,10 @@ export default function DataGaps() {
 
   return (
     <div className="space-y-4 max-w-5xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Data Gaps</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Find intervals where a tag wasn't being sampled. Useful for debugging
-          connectivity issues, validating stale-detection thresholds, and
-          quantifying historical uptime.
-        </p>
-      </div>
+      <PageHeader
+        title="Data gaps"
+        subtitle="Find intervals where a tag wasn't being sampled — debug connectivity, validate stale-detection thresholds, quantify uptime"
+      />
 
       <Card>
         <CardContent className="p-4 space-y-3">

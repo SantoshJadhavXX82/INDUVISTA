@@ -15,6 +15,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { CheckCircle2, AlertTriangle, XCircle, Activity, RefreshCw, Cpu, HardDrive, Gauge as GaugeIcon, AlertOctagon } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatFloat } from "@/lib/format";
 import {
   type DiagnosticsSummary,
   type WorkerDeviceStatus,
@@ -914,11 +915,6 @@ function formatUptime(sec: number): string {
 }
 
 function formatNumber(n: number): string {
-  const abs = Math.abs(n);
-  if (abs === 0) return "0";
-  if (abs < 0.01) return n.toExponential(2);
-  if (abs >= 10000) return n.toFixed(0);
-  if (abs >= 100) return n.toFixed(1);
-  if (abs >= 1) return n.toFixed(2);
-  return n.toFixed(3);
+  // Use the central formatter — same display rules everywhere.
+  return formatFloat(n);
 }

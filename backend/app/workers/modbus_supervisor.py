@@ -179,7 +179,17 @@ def load_polling_config() -> list[dict]:
 
 
 def _run_stale_check(eng) -> int:
-    """SQL UPDATE that downgrades VALID rows past their stale threshold."""
+    """SQL UPDATE that downgrades VALID rows past their stale threshold.
+
+    Phase 17 — writable tags are exempt. These are command/setpoint
+    registers that sit at the same value indefinitely by design (a start
+    command stays at 1 until cleared). The worker often doesn't poll
+    them at all, so their latest_tag_values row stays at the seed time
+    forever. Sweeping them to ST_STALE produces false positives that
+    bury real comm/timeout problems in the noise. Heartbeat-monitored
+    writable tags still get their own freshness check via the worker's
+    HEARTBEAT_FROZEN code path.
+    """
     with eng.begin() as conn:
         result = conn.execute(text("""
             UPDATE latest_tag_values lv
@@ -187,6 +197,7 @@ def _run_stale_check(eng) -> int:
             FROM tags t
             JOIN devices d ON d.id = t.device_id
             WHERE lv.tag_id = t.id
+              AND t.writable = false
               AND lv.st >= 128
               AND lv.time < NOW() - (d.stale_after_sec * INTERVAL '1 second')
         """))
@@ -1532,7 +1543,10 @@ async def worker_manager(
 async def main():
     historian = HistorianWriter(engine)
     buffer_path = Path(os.environ.get("SF_BUFFER_PATH", "/data/sf_buffer.db"))
-    log.info("Local store-and-forward buffer: %s", buffer_path)
+    log.info(
+        "modbus_supervisor starting (sf_buffer=%s)",
+        buffer_path,
+    )
     sf_buffer = LocalBuffer(buffer_path)
     backlog = sf_buffer.count()
     if backlog > 0:
@@ -1544,8 +1558,16 @@ async def main():
     loop = asyncio.get_running_loop()
 
     def _shutdown(signame: str):
-        log.info("Received %s, stopping ...", signame)
-        stop_event.set()
+        # Idempotent. asyncio's add_signal_handler can fire multiple
+        # times in rapid succession (e.g. SIGTERM then SIGINT during
+        # docker stop). Second-and-later calls are no-ops because
+        # Event.set() is idempotent.
+        if not stop_event.is_set():
+            log.info(
+                "modbus_supervisor: %s received; draining workers and exiting cleanly",
+                signame,
+            )
+            stop_event.set()
 
     for signame in ("SIGINT", "SIGTERM"):
         try:
@@ -1554,6 +1576,8 @@ async def main():
                 lambda s=signame: _shutdown(s),
             )
         except NotImplementedError:
+            # Windows asyncio doesn't support add_signal_handler;
+            # the synchronous KeyboardInterrupt path below catches Ctrl+C.
             pass
 
     tasks = [
@@ -1562,13 +1586,22 @@ async def main():
         asyncio.create_task(replay_loop(sf_buffer, historian, stop_event)),
         asyncio.create_task(buffer_status_loop(sf_buffer, stop_event)),
     ]
-    log.info("Started worker manager + stale detection + replay + buffer status")
+    log.info("modbus_supervisor: started worker manager + stale detection + replay + buffer status")
     await asyncio.gather(*tasks)
+
+    # All tasks have observed stop_event and exited cleanly.
+    final_backlog = sf_buffer.count()
+    log.info(
+        "modbus_supervisor: stopped cleanly (final sf_buffer backlog: %d sample(s))",
+        final_backlog,
+    )
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log.info("Interrupted, exiting.")
+        # Hit during the asyncio.run() bootstrap before signal handler
+        # was installed (very narrow window) — still log cleanly.
+        log.info("modbus_supervisor: interrupted before signal handler installed, exiting.")
         sys.exit(0)

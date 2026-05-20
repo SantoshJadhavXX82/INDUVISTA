@@ -21,6 +21,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { RotateCcw, Loader2 } from "lucide-react";
 import { blockInputs, GOOD_NON_SPECIFIC } from "@/lib/blockPreview";
+import { formatFloat } from "@/lib/format";
 
 
 /** Named-input ordering per stateful block code. Matches the order
@@ -317,9 +318,6 @@ function StepBtn({
 
 function formatVal(v: number): string {
   if (!Number.isFinite(v)) return String(v);
-  if (Number.isInteger(v) && Math.abs(v) < 1e6) return String(v);
-  if (Math.abs(v) >= 0.001 && Math.abs(v) < 1e6) {
-    return v.toFixed(3).replace(/\.?0+$/, "");
-  }
-  return v.toExponential(3);
+  // Use the central formatter — same display rules everywhere.
+  return formatFloat(v);
 }

@@ -36,11 +36,15 @@ interface CalcBlockFormProps {
   blockCode: string;
   blockConfig: BlockConfigDraft;
   onChange: (next: BlockConfigDraft) => void;
+  /** When true, the preview chip renders in read-only mode (no
+   *  override inputs). The block-config fields themselves remain
+   *  editable — only the live-value simulator is disabled. */
+  isEditMode?: boolean;
 }
 
 
 export function CalcBlockForm({
-  blockCode, blockConfig, onChange,
+  blockCode, blockConfig, onChange, isEditMode = false,
 }: CalcBlockFormProps) {
   const schemas = useBlockSchemas();
 
@@ -111,7 +115,11 @@ export function CalcBlockForm({
           onChange={onChange}
         />
       ))}
-      <BlockPreviewChip blockCode={blockCode} blockConfig={blockConfig} />
+      <BlockPreviewChip
+        blockCode={blockCode}
+        blockConfig={blockConfig}
+        readOnly={isEditMode}
+      />
     </div>
   );
 }

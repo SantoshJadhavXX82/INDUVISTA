@@ -22,8 +22,13 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { formatTagValue } from "@/lib/format";
+import { formatFloat, formatTagValue } from "@/lib/format";
 import { useNamedSetMap, resolveNamedSet, type NamedSetMap } from "@/lib/named-set-resolve";
+import { PageHeader } from "@/components/ui/page-header";
+import { MetricStrip, type MetricItem } from "@/components/ui/metric-strip";
+import { SectionCard } from "@/components/ui/section-card";
+import { AlarmRow } from "@/components/ui/alarm-row";
+import { StatusPill } from "@/components/ui/status-pill";
 
 const REFRESH_MS = 2_000;
 const SPARK_REFRESH_MS = 10_000;
@@ -85,14 +90,14 @@ export default function Dashboard() {
 
   // Phase 11 — per-device health (worst-tag-wins) for DevicePicker dots.
   const healthByDevice = useMemo(() => {
-    const ST_READ_OK = 128;
+    const ST_GOOD_MIN = 128;     // matches backend GOOD_QUALITY threshold
     const STALE_SEC = 30;
     const h: Record<number, "good" | "stale" | "error" | "unknown"> = {};
     const rank = { error: 3, stale: 2, good: 1, unknown: 0 };
     tags.data?.forEach((t) => {
       let state: "good" | "stale" | "error" | "unknown" = "unknown";
       if (t.st !== null && t.age_seconds !== null) {
-        if (t.st !== ST_READ_OK) state = "error";
+        if (t.st < ST_GOOD_MIN) state = "error";
         else if (t.age_seconds > STALE_SEC) state = "stale";
         else state = "good";
       }
@@ -119,22 +124,25 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-4 max-w-7xl mx-auto">
-      <div className="flex items-baseline justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Live Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Current values + recent trend. Values refresh every {REFRESH_MS / 1000}s,
-            sparklines every {SPARK_REFRESH_MS / 1000}s.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <RefreshCw className={cn("h-3 w-3", tags.isFetching && "animate-spin")} />
-          <span>live</span>
-        </div>
-      </div>
+      <PageHeader
+        title="Dashboard"
+        subtitle={`${tags.data?.length ?? "—"} tags · refreshed every ${REFRESH_MS / 1000}s`}
+        actions={
+          <span className="text-xs flex items-center gap-1.5" style={{ color: "var(--ios-gray-1)" }}>
+            <RefreshCw className={cn("h-3 w-3", tags.isFetching && "animate-spin")} />
+            live
+          </span>
+        }
+      />
 
+      <DashboardHero
+        tagCount={tags.data?.length ?? 0}
+        liveTags={tags.data ?? []}
+      />
+
+      <SectionCard title="Browse tags" subtitle="Filter and inspect current values per device">
       {/* Device picker */}
-      <div>
+      <div className="mb-3">
         <DevicePicker
           devices={devices.data ?? []}
           value={activeDeviceId}
@@ -215,7 +223,7 @@ export default function Dashboard() {
       {tags.isLoading ? (
         <p className="text-sm text-muted-foreground text-center mt-12">Loading tags…</p>
       ) : filtered.length === 0 ? (
-        <p className="text-sm text-muted-foreground text-center mt-12">
+        <p className="text-sm text-center mt-12" style={{ color: "var(--ios-gray-1)" }}>
           No tags match the current filter.
         </p>
       ) : viewMode === "cards" ? (
@@ -231,8 +239,234 @@ export default function Dashboard() {
           <TagsTable tags={filtered} sparkByTag={sparkByTag} namedSetMap={namedSetMap} />
         )
       )}
+      </SectionCard>
     </div>
   );
+}
+
+
+// ---------------------------------------------------------------------------
+// Phase 18 — Dashboard hero
+//
+// The new "above-the-fold" content. Three pieces:
+//
+//   1. System status strip — workers / alarms / samples-per-second / db
+//      latency. Reads from /api/diagnostics/summary and falls back gracefully
+//      if the endpoint isn't reachable yet.
+//
+//   2. Active alarms summary — top three most recent alarms with severity
+//      pills, tag names, and one-tap ack/shelve.
+//
+//   3. (TODO Phase 18b) Pinned KPI grid — operator-selected tags shown big.
+//      Implemented as a stub here that surfaces the four most-recently-updated
+//      tags so the section isn't empty.
+//
+// Each section is self-contained and gracefully degrades when the data
+// isn't there yet. The hero adds value without removing anything from
+// the existing "browse tags" workflow below it.
+// ---------------------------------------------------------------------------
+
+import { KpiCard, type Quality as KpiQuality } from "@/components/ui/kpi-card";
+
+function DashboardHero({
+  tagCount: _tagCount, liveTags,
+}: { tagCount: number; liveTags: LiveTag[] }) {
+  // System status — read from diagnostics summary endpoint. Falls back
+  // gracefully if the endpoint hiccups.
+  const summary = useQuery<{
+    workers_healthy: number; workers_unhealthy: number;
+    enabled_tag_count: number; buffer_backlog: number;
+  }>({
+    queryKey: ["dashboard", "summary"],
+    queryFn: () => api.get("/diagnostics/summary"),
+    refetchInterval: 5_000,
+    retry: false,
+  });
+
+  // Phase 18 fix — the API returns list[AlarmActive] directly, not
+  // {alarms: [...]}. Reuse the SAME queryKey as the Alarms page and
+  // the sidebar so React Query dedupes — one fetch, three consumers.
+  // Schema from backend/app/api/alarms.py:AlarmActive.
+  type ActiveAlarm = {
+    rule_id: number;
+    tag_id: number;
+    tag_name: string;
+    engineering_unit: string | null;
+    rule_type: string;
+    severity: string;
+    threshold: number;
+    state: string;
+    last_change_time: string;
+    current_value: number | null;
+    current_quality: number | null;
+  };
+  const alarms = useQuery<ActiveAlarm[]>({
+    queryKey: ["alarms-active"],
+    queryFn: () => api.get<ActiveAlarm[]>("/alarms/active").catch(() => []),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+    retry: false,
+  });
+
+  // Metric strip data
+  const workersHealthy = summary.data?.workers_healthy ?? 0;
+  const workersTotal = workersHealthy + (summary.data?.workers_unhealthy ?? 0);
+  const allActiveAlarms = alarms.data ?? [];
+  const alarmsCount = allActiveAlarms.length;
+  const bufferBacklog = summary.data?.buffer_backlog ?? 0;
+  const samplesPerSec = liveTags.length; // proxy until we expose a true counter
+
+  const metrics: MetricItem[] = [
+    {
+      label: "Workers",
+      value: workersTotal > 0 ? `${workersHealthy}/${workersTotal}` : "—",
+      tone: workersTotal === 0 ? "neutral" : workersHealthy === workersTotal ? "good" : "warn",
+      hint: workersTotal > 0
+        ? (workersHealthy === workersTotal ? "All healthy" : `${workersTotal - workersHealthy} unhealthy`)
+        : undefined,
+    },
+    {
+      label: "Active alarms",
+      value: alarmsCount,
+      tone: alarmsCount === 0 ? "good" : alarmsCount > 5 ? "error" : "warn",
+      hint: alarmsCount === 0 ? "None active" : undefined,
+    },
+    {
+      label: "Live tags",
+      value: samplesPerSec.toLocaleString(),
+      tone: "info",
+      hint: "Polling",
+    },
+    {
+      label: "SF buffer",
+      value: bufferBacklog,
+      tone: bufferBacklog === 0 ? "good" : bufferBacklog > 100 ? "error" : "warn",
+      hint: bufferBacklog === 0 ? "No backlog" : `${bufferBacklog} queued`,
+    },
+  ];
+
+  // Active alarms section content — top 3 of all active.
+  const alarmsList = allActiveAlarms.slice(0, 3);
+
+  // Pinned KPIs — choose the 4 most recently updated tags as a stub until
+  // the user can pin their own favorites.
+  const pinnedTags = useMemo(() => {
+    return [...liveTags]
+      .filter(t => t.value !== null && t.value !== undefined)
+      .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+      .slice(0, 4);
+  }, [liveTags]);
+
+  return (
+    <div className="space-y-3">
+      <MetricStrip items={metrics} />
+
+      <SectionCard
+        title="Active alarms"
+        subtitle={alarmsCount === 0 ? "No alarms — system clean" : `Most recent · ${alarmsCount} shown`}
+        action={
+          alarmsCount > 0
+            ? <a href="/alarms" style={{ color: "var(--ios-blue)" }}>View all →</a>
+            : <StatusPill variant="good" dot>Clean</StatusPill>
+        }
+        flush
+      >
+        <div className="px-4 py-1">
+          {alarmsList.length === 0 ? (
+            <div className="py-6 text-center text-[12px]" style={{ color: "var(--ios-gray-1)" }}>
+              No active alarms.
+            </div>
+          ) : (
+            alarmsList.map((a, idx) => {
+              // Build a "current → threshold" message from the alarm's
+              // current_value and threshold. Examples:
+              //   "92.15 > 92.0"  (high alarm)
+              //   "12.3 < 15.0"  (low alarm)
+              //   "stuck"        (boolean / frozen alarms have no threshold)
+              const op =
+                a.rule_type === "high" || a.rule_type === "hi_hi" ? ">" :
+                a.rule_type === "low"  || a.rule_type === "lo_lo" ? "<" :
+                a.rule_type === "deviation" ? "Δ" : "·";
+              const fmt = (n: number | null) => n == null ? "—" : formatFloat(n);
+              const detail = a.current_value != null && Number.isFinite(a.threshold)
+                ? `${fmt(a.current_value)} ${op} ${fmt(a.threshold)}`
+                : a.rule_type;
+              return (
+                <AlarmRow
+                  key={a.rule_id}
+                  severity={mapSeverity(a.severity)}
+                  severityLabel={a.severity.toUpperCase()}
+                  tagName={a.tag_name}
+                  message={detail}
+                  ageLabel={relativeAge(a.last_change_time)}
+                  withSeparator={idx < alarmsList.length - 1}
+                />
+              );
+            })
+          )}
+        </div>
+      </SectionCard>
+
+      {pinnedTags.length > 0 && (
+        <div>
+          <div
+            className="text-[11px] font-semibold uppercase tracking-wider mb-2 px-1"
+            style={{ color: "var(--ios-gray-1)" }}
+          >
+            Live values · most recent
+          </div>
+          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+            {pinnedTags.map(t => (
+              <KpiCard
+                key={t.tag_id}
+                label={t.tag_name}
+                value={t.value}
+                unit={t.unit ?? undefined}
+                quality={mapQuality(t.st)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+/** Map alarm-severities table code → StatusPill severity variant. */
+function mapSeverity(s: string): "vcritical" | "critical" | "high" | "medium" | "low" | "info" | "noncritical" {
+  const v = (s || "").toLowerCase();
+  if (v.startsWith("vcrit") || v.startsWith("v-crit") || v === "vc") return "vcritical";
+  if (v.startsWith("crit"))   return "critical";
+  if (v.startsWith("high"))   return "high";
+  if (v.startsWith("med"))    return "medium";
+  if (v.startsWith("low"))    return "low";
+  if (v.startsWith("info"))   return "info";
+  return "noncritical";
+}
+
+
+/** Map an ST byte to the KpiCard quality variant. */
+function mapQuality(st: number | null | undefined): KpiQuality {
+  if (st === null || st === undefined) return "none";
+  if (st >= 128) return "good";
+  if (st >= 64)  return "warn";
+  return "error";
+}
+
+
+/** Compact relative-time label, e.g. "5s", "2m", "1h", "3d". */
+function relativeAge(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const s = Math.floor(ms / 1000);
+  if (s < 60)   return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60)   return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24)   return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
 }
 
 // --------------------------------------------------------------------------

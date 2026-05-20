@@ -22,7 +22,23 @@
       "PowerShell(git push origin main 2>&1)",
       "PowerShell(Get-ChildItem backend/app/services -Recurse -File | ForEach-Object { $_.FullName.Replace\\(\\(Get-Location\\).Path + '\\\\',''\\) }; \"---\"; Get-ChildItem frontend/src/components/calc -Recurse -File | ForEach-Object { $_.FullName.Replace\\(\\(Get-Location\\).Path + '\\\\',''\\) }; \"--- .bak files ---\"; git ls-files --others --exclude-standard | Select-String \"\\\\.bak\")",
       "Bash(gh gist *)",
-      "Bash(grep -E '\\(^|/\\)\\\\.env$')"
+      "Bash(grep -E '\\(^|/\\)\\\\.env$')",
+      "Bash(python -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(python -c \"import pypdf\")",
+      "Bash(python -c \"import PyPDF2\")",
+      "Bash(python -c \"import fitz\")",
+      "Bash(python \"d:\\\\INDUVISTA\\\\graphify-out\\\\_pdf_extract.py\")",
+      "Bash(cd /d \"d:\\\\INDUVISTA\\\\graphify-out\")",
+      "Bash(del _pdf_extract.py _pdf_out.txt)",
+      "Bash(cmd /c \"del /q \\\\\"d:\\\\INDUVISTA\\\\graphify-out\\\\_pdf_extract.py\\\\\" \\\\\"d:\\\\INDUVISTA\\\\graphify-out\\\\_pdf_out.txt\\\\\" 2>nul & echo cleaned\")",
+      "Bash(python -c \"import json; d=json.load\\(open\\(r'd:\\\\INDUVISTA\\\\graphify-out\\\\.graphify_chunk_03.json',encoding='utf-8'\\)\\); print\\('nodes',len\\(d['nodes']\\),'edges',len\\(d['edges']\\),'hyperedges',len\\(d['hyperedges']\\)\\)\")",
+      "PowerShell(cd d:\\\\INDUVISTA\\\\frontend; Get-ChildItem screenshots -Recurse -File | Select-Object FullName, @{n='KB';e={[math]::Round\\($_.Length/1KB\\)}})",
+      "Bash(gh --version)",
+      "Bash(command -v magick)",
+      "Bash(magick -version)",
+      "Bash(command -v montage)",
+      "Bash(python -c \"import PIL; print\\('PIL', PIL.__version__\\)\")",
+      "Bash(python -)"
     ]
   }
 }

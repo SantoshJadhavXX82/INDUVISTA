@@ -1,187 +1,291 @@
 /**
- * Sidebar navigation — Phase 11 reorganization (Trend added in 13.3).
- * Phase 16.0e — Calc Blocks leaf added under Setup, alongside alarm admin.
+ * Phase 18 — Sidebar redesign.
+ *
+ * Why this changed:
+ *   - 21 items across 4 sections felt cluttered. Operators couldn't see
+ *     daily-use entries without scrolling.
+ *   - The "Setup" section was 7 items of global reference data used
+ *     rarely (per week or month, not daily). It dominated the sidebar.
+ *   - Modbus tools (Frames / Registers / Write Console / Write Audit)
+ *     are a related cluster used together; they belong grouped.
+ *
+ * Restructure:
+ *   - 11 top-level items spread over 3 sections (Operate / Diagnose /
+ *     Configure).
+ *   - Two expandable groups (Modbus, Reference) that collapse 11 items
+ *     down to 2 sidebar rows when not in use.
+ *   - Alarms row carries an unread-count badge when alarms are active.
+ *
+ * Visual:
+ *   - iOS-blue active state (`--ios-blue-soft` background + `--ios-blue`
+ *     text), no left-border accents.
+ *   - Section labels in muted uppercase tracking.
+ *   - Active count badge for alarms in iOS red.
  */
+import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { NavLink, useLocation } from "react-router";
-import { cn } from "@/lib/utils";
 import {
-  Activity,
-  Gauge,
-  ListTree,
-  Settings,
-  AlertCircle,
-  Radio,
-  ScanLine,
-  FileClock,
-  Zap,
-  Globe2,
-  Network,
-  Ruler,
-  Tag,
-  Hash,
-  ArrowLeftRight,
-  ServerCog,
-  Eye,
-  TrendingUp,
-  Palette,
-  ListChecks,
-  BellRing,
-  Calculator,
-  Shield,
+  LayoutDashboard, TrendingUp, BellRing, Bell, ListTree,
+  Stethoscope, FileText, Activity,
+  Cpu, Calculator, Wrench, BookOpen,
+  ChevronDown, ChevronRight,
+  ScanLine, Radio, Zap, FileClock,
+  Ruler, Palette, ListChecks, Tag, Hash, ArrowLeftRight, Network,
   type LucideIcon,
 } from "lucide-react";
+
+import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
+
 
 type Leaf = {
   kind: "leaf";
   to: string;
   label: string;
   icon: LucideIcon;
+  /** Optional URL prefix for active matching when nested routes apply. */
   matchPrefix?: string;
+  /** Slot for a trailing badge (e.g. unread alarm count). */
+  badge?: React.ReactNode;
+  /** Optional class applied only to the icon — used by the Alarms entry
+   *  to apply the bell-shake keyframes animation when alarms are firing. */
+  iconClassName?: string;
+  /** Optional inline style for the icon (e.g. iOS-red color when alarming). */
+  iconStyle?: React.CSSProperties;
+};
+
+type ExpandableGroup = {
+  kind: "group";
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  matchPrefix: string;
+  children: Leaf[];
 };
 
 type Section = {
   kind: "section";
   label: string;
-  icon: LucideIcon;
-  children: Leaf[];
+  children: (Leaf | ExpandableGroup)[];
 };
 
-type NavEntry = Leaf | Section;
 
-const entries: NavEntry[] = [
-  {
-    kind: "section",
-    label: "Setup",
-    icon: Globe2,
-    children: [
-      { kind: "leaf", to: "/global/engineering-units", label: "Engineering Units", icon: Ruler, matchPrefix: "/global/engineering-units" },
-      { kind: "leaf", to: "/global/alarm-severities", label: "Alarm Severities", icon: Palette, matchPrefix: "/global/alarm-severities" },
-      { kind: "leaf", to: "/global/alarm-types", label: "Alarm Types", icon: ListChecks, matchPrefix: "/global/alarm-types" },
-      { kind: "leaf", to: "/global/calc-blocks", label: "Calc Blocks", icon: Calculator, matchPrefix: "/global/calc-blocks" },
-      { kind: "leaf", to: "/global/groups", label: "Groups", icon: Tag, matchPrefix: "/global/groups" },
-      { kind: "leaf", to: "/global/named-sets", label: "Enumerations", icon: Hash, matchPrefix: "/global/named-sets" },
-      { kind: "leaf", to: "/global/duty-standby-values", label: "Duty/Standby Values", icon: ArrowLeftRight, matchPrefix: "/global/duty-standby-values" },
-    ],
-  },
-  {
-    kind: "section",
-    label: "Operate",
-    icon: Gauge,
-    children: [
-      { kind: "leaf", to: "/dashboard", label: "Live Dashboard", icon: Gauge },
-      { kind: "leaf", to: "/trend", label: "Trend", icon: TrendingUp, matchPrefix: "/trend" },
-      { kind: "leaf", to: "/alarms", label: "Alarms", icon: BellRing, matchPrefix: "/alarms" },
-      { kind: "leaf", to: "/audit-log", label: "Audit Log", icon: Shield, matchPrefix: "/audit-log" },
-      { kind: "leaf", to: "/diagnostics", label: "Diagnostics", icon: Activity },
-      { kind: "leaf", to: "/data-gaps", label: "Data Gaps", icon: AlertCircle },
-    ],
-  },
-  {
-    kind: "section",
-    label: "Explore",
-    icon: Eye,
-    children: [
-      { kind: "leaf", to: "/tags", label: "Tag Explorer", icon: ListTree, matchPrefix: "/tags" },
-      { kind: "leaf", to: "/modbus/registers", label: "Register Browser", icon: ScanLine, matchPrefix: "/modbus/registers" },
-      { kind: "leaf", to: "/modbus/frames", label: "Frame Inspector", icon: Radio, matchPrefix: "/modbus/frames" },
-      { kind: "leaf", to: "/modbus/write-console", label: "Write Console", icon: Zap, matchPrefix: "/modbus/write-console" },
-      { kind: "leaf", to: "/modbus/write-audit", label: "Write Audit", icon: FileClock, matchPrefix: "/modbus/write-audit" },
-    ],
-  },
-  {
-    kind: "section",
-    label: "Configure",
-    icon: Settings,
-    children: [
-      { kind: "leaf", to: "/config/channels", label: "Networks", icon: Network, matchPrefix: "/config/channels" },
-      { kind: "leaf", to: "/config/devices", label: "Devices", icon: ServerCog, matchPrefix: "/config/devices" },
-      { kind: "leaf", to: "/config/blocks", label: "Register Blocks", icon: ListTree, matchPrefix: "/config/blocks" },
-    ],
-  },
-];
+function useEntries(alarmCount: number): Section[] {
+  return useMemo<Section[]>(() => [
+    {
+      kind: "section",
+      label: "Operate",
+      children: [
+        { kind: "leaf", to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+        { kind: "leaf", to: "/trend",     label: "Trend",     icon: TrendingUp, matchPrefix: "/trend" },
+        {
+          kind: "leaf", to: "/alarms", label: "Alarms",
+          // When alarms are firing, swap the static Bell for the animated
+          // BellRing in iOS-red — the wiggle (induvista-bell-shake class)
+          // and color shift give peripheral-vision-grade attention without
+          // being annoying.
+          icon: alarmCount > 0 ? BellRing : Bell,
+          iconClassName: alarmCount > 0 ? "induvista-bell-shake" : undefined,
+          iconStyle: alarmCount > 0 ? { color: "var(--ios-red)" } : undefined,
+          matchPrefix: "/alarms",
+          badge: alarmCount > 0 ? <AlarmBadge count={alarmCount} /> : undefined,
+        },
+        { kind: "leaf", to: "/tags", label: "Tags", icon: ListTree, matchPrefix: "/tags" },
+      ],
+    },
+    {
+      kind: "section",
+      label: "Diagnose",
+      children: [
+        { kind: "leaf", to: "/diagnostics", label: "Health", icon: Stethoscope },
+        { kind: "leaf", to: "/audit-log",   label: "Audit",  icon: FileText, matchPrefix: "/audit-log" },
+        { kind: "leaf", to: "/data-gaps",   label: "Gaps",   icon: Activity },
+      ],
+    },
+    {
+      kind: "section",
+      label: "Configure",
+      children: [
+        { kind: "leaf", to: "/config/channels", label: "Networks",         icon: Network,    matchPrefix: "/config/channels" },
+        { kind: "leaf", to: "/config/devices",  label: "Devices",          icon: Cpu,        matchPrefix: "/config/devices" },
+        { kind: "leaf", to: "/config/blocks",   label: "Register blocks",  icon: ListTree,   matchPrefix: "/config/blocks" },
+        { kind: "leaf", to: "/global/calc-blocks", label: "Calc tags",     icon: Calculator, matchPrefix: "/global/calc-blocks" },
+        {
+          kind: "group", id: "modbus", label: "Modbus", icon: Wrench,
+          matchPrefix: "/modbus", children: [
+            { kind: "leaf", to: "/modbus/registers",     label: "Registers", icon: ScanLine,  matchPrefix: "/modbus/registers" },
+            { kind: "leaf", to: "/modbus/frames",        label: "Frames",    icon: Radio,     matchPrefix: "/modbus/frames" },
+            { kind: "leaf", to: "/modbus/write-console", label: "Write",     icon: Zap,       matchPrefix: "/modbus/write-console" },
+            { kind: "leaf", to: "/modbus/write-audit",   label: "Audit",     icon: FileClock, matchPrefix: "/modbus/write-audit" },
+          ],
+        },
+        {
+          // Renamed from "Reference" — operators called this Global/Setup
+          // since it holds the cross-product reference data (units, severities,
+          // groups, etc.) used to define and classify tags. Networks and
+          // Register blocks moved up to top-level Configure entries because
+          // they're per-deployment infrastructure, not global vocabulary.
+          kind: "group", id: "global-setup", label: "Global/Setup", icon: BookOpen,
+          matchPrefix: "/global", children: [
+            { kind: "leaf", to: "/global/engineering-units",   label: "Units",         icon: Ruler,          matchPrefix: "/global/engineering-units" },
+            { kind: "leaf", to: "/global/alarm-severities",    label: "Severities",    icon: Palette,        matchPrefix: "/global/alarm-severities" },
+            { kind: "leaf", to: "/global/alarm-types",         label: "Alarm types",   icon: ListChecks,     matchPrefix: "/global/alarm-types" },
+            { kind: "leaf", to: "/global/groups",              label: "Groups",        icon: Tag,            matchPrefix: "/global/groups" },
+            { kind: "leaf", to: "/global/named-sets",          label: "Enumerations",  icon: Hash,           matchPrefix: "/global/named-sets" },
+            { kind: "leaf", to: "/global/duty-standby-values", label: "Duty/standby",  icon: ArrowLeftRight, matchPrefix: "/global/duty-standby-values" },
+          ],
+        },
+      ],
+    },
+  ], [alarmCount]);
+}
+
 
 export default function Nav() {
   const location = useLocation();
 
+  // Phase 18 fix — use the SAME query as the Alarms page so React Query
+  // dedupes the fetch (one HTTP call shared by Alarms page + Dashboard +
+  // sidebar). The /alarms/active endpoint returns list[AlarmActive] directly,
+  // not {alarms: [...]} or {count: N}. Count is just the array length.
+  const alarms = useQuery({
+    queryKey: ["alarms-active"],
+    queryFn: () => api.get<unknown[]>("/alarms/active").catch(() => []),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+    retry: false,
+  });
+  const alarmCount = Array.isArray(alarms.data) ? alarms.data.length : 0;
+
+  const entries = useEntries(alarmCount);
+
   return (
-    <nav className="flex flex-col gap-0.5 p-2">
-      {entries.map((e, i) =>
-        e.kind === "leaf" ? (
-          <LeafLink key={e.to} item={e} />
-        ) : (
-          <SectionGroup
-            key={`s-${i}`}
-            section={e}
-            activePath={location.pathname}
-          />
-        ),
-      )}
+    <nav className="flex flex-col gap-3 p-2">
+      {entries.map((section, i) => (
+        <SectionBlock key={`s-${i}`} section={section} activePath={location.pathname} />
+      ))}
     </nav>
   );
 }
 
-function LeafLink({ item }: { item: Leaf }) {
+
+function SectionBlock({
+  section, activePath,
+}: { section: Section; activePath: string }) {
+  return (
+    <div>
+      <div
+        className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider"
+        style={{ color: "var(--ios-gray-1)" }}
+      >
+        {section.label}
+      </div>
+      <div className="flex flex-col gap-0.5">
+        {section.children.map((c) =>
+          c.kind === "leaf"
+            ? <LeafLink key={c.to} item={c} />
+            : <ExpandableBlock key={c.id} group={c} activePath={activePath} />,
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+function LeafLink({ item, nested = false }: { item: Leaf; nested?: boolean }) {
   return (
     <NavLink
       to={item.to}
-      className={({ isActive }) =>
+      end={!item.matchPrefix}
+      className={({ isActive: _ }) =>
         cn(
-          "flex items-center gap-3 rounded-md px-3 py-2 text-sm transition-colors",
-          isActive
-            ? "bg-secondary text-secondary-foreground font-medium"
-            : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
+          "flex items-center gap-3 rounded-md text-[13px] transition-colors",
+          nested ? "pl-9 pr-3 py-1.5" : "px-3 py-1.5",
         )
       }
+      style={({ isActive }) => isActive
+        ? {
+            backgroundColor: "var(--ios-blue-soft)",
+            color: "var(--ios-blue-on-soft)",
+            fontWeight: 500,
+          }
+        : { color: "var(--ios-gray-1)" }
+      }
     >
-      <item.icon className="h-4 w-4" />
-      <span>{item.label}</span>
+      <item.icon
+        className={cn("h-4 w-4 shrink-0", item.iconClassName)}
+        style={item.iconStyle}
+      />
+      <span className="flex-1 truncate">{item.label}</span>
+      {item.badge}
     </NavLink>
   );
 }
 
-function SectionGroup({
-  section,
-  activePath,
-}: {
-  section: Section;
-  activePath: string;
-}) {
-  const anyActive = section.children.some((c) =>
+
+function ExpandableBlock({
+  group, activePath,
+}: { group: ExpandableGroup; activePath: string }) {
+  // Phase 18 refinement — auto-expand when any of the group's CHILDREN
+  // would be highlighted as active, not just when the parent matchPrefix
+  // matches. This matters when sibling top-level leafs share a URL prefix
+  // with the group (e.g. Calc tags lives at /global/calc-blocks but is no
+  // longer a child of Global/Setup, so the group shouldn't auto-open
+  // when Calc tags is selected).
+  const childIsActive = group.children.some((c) =>
     c.matchPrefix
       ? activePath.startsWith(c.matchPrefix)
       : activePath === c.to,
   );
+  const [forceOpen, setForceOpen] = useState(false);
+  const open = childIsActive || forceOpen;
 
   return (
-    <div className="mt-2">
-      <div
-        className={cn(
-          "flex items-center gap-2 px-3 py-1 text-[11px] uppercase tracking-wider",
-          anyActive ? "text-foreground" : "text-muted-foreground/70",
-        )}
+    <div>
+      <button
+        type="button"
+        onClick={() => setForceOpen(o => !o)}
+        className="w-full flex items-center gap-3 px-3 py-1.5 rounded-md text-[13px] transition-colors"
+        style={childIsActive
+          ? { color: "var(--ios-blue-on-soft)", fontWeight: 500 }
+          : { color: "var(--ios-gray-1)" }}
       >
-        <section.icon className="h-3 w-3" />
-        <span className="font-semibold">{section.label}</span>
-      </div>
-      <div className="flex flex-col gap-0.5 mt-0.5">
-        {section.children.map((c) => (
-          <NavLink
-            key={c.to}
-            to={c.to}
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-3 rounded-md ml-3 pl-3 pr-3 py-1.5 text-sm transition-colors border-l-2",
-                isActive
-                  ? "bg-secondary text-secondary-foreground font-medium border-l-foreground"
-                  : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground border-l-transparent",
-              )
-            }
-          >
-            <c.icon className="h-3.5 w-3.5" />
-            <span>{c.label}</span>
-          </NavLink>
-        ))}
-      </div>
+        <group.icon className="h-4 w-4 shrink-0" />
+        <span className="flex-1 text-left truncate">{group.label}</span>
+        {open
+          ? <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+          : <ChevronRight className="h-3.5 w-3.5 opacity-60" />}
+      </button>
+      {open && (
+        <div className="flex flex-col gap-0.5 mt-0.5 mb-1">
+          {group.children.map((c) => (
+            <LeafLink key={c.to} item={c} nested />
+          ))}
+        </div>
+      )}
     </div>
+  );
+}
+
+
+function AlarmBadge({ count }: { count: number }) {
+  if (count === 0) return null;
+  return (
+    <span
+      className="text-[10px] font-semibold tabular-nums px-1.5 rounded-full"
+      style={{
+        backgroundColor: "var(--ios-red)",
+        color: "#fff",
+        minWidth: 18,
+        height: 16,
+        lineHeight: "16px",
+        textAlign: "center",
+        display: "inline-block",
+      }}
+    >
+      {count > 99 ? "99+" : count}
+    </span>
   );
 }

@@ -16,21 +16,40 @@ import {
   GOOD_QUALITY, GOOD_NON_SPECIFIC,
   type PreviewResult,
 } from "@/lib/blockPreview";
+import { useLiveValues } from "@/lib/useLiveValues";
+import { formatFloat } from "@/lib/format";
 import { StatefulBlockSimulator } from "./StatefulBlockSimulator";
 
 
 type SampleOverride = { value: number | null; quality: number };
 
 
+/** Map a quality byte to a short human label for read-only display.
+ *  Matches the categories used by the backend (GOOD_QUALITY=128). */
+function qualityLabel(q: number): string {
+  if (q >= 192) return "GOOD";
+  if (q >= 128) return "GOOD";
+  if (q >= 64)  return "UNCERTAIN";
+  return "BAD";
+}
+
+
 interface BlockPreviewChipProps {
   blockCode: string;
   blockConfig: any;
   expectedDataType?: string;
+  /** When true, hides the override controls — the chip becomes
+   *  display-only, showing live values without letting the user
+   *  inject simulated values. Set this when previewing an existing
+   *  saved calc (Edit mode): the user is observing, not exploring.
+   *  Default false so the create-a-new-calc workflow keeps its
+   *  what-if simulator. */
+  readOnly?: boolean;
 }
 
 
 export function BlockPreviewChip({
-  blockCode, blockConfig, expectedDataType,
+  blockCode, blockConfig, expectedDataType, readOnly = false,
 }: BlockPreviewChipProps) {
   if (!blockCode) return null;
 
@@ -41,6 +60,11 @@ export function BlockPreviewChip({
       <div className="flex items-center gap-2 flex-wrap text-xs">
         <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
           {stateful ? "Timeline simulator" : "Preview"}
+          {readOnly && (
+            <span className="ml-1.5 text-muted-foreground/70 normal-case">
+              · read-only (saved calc)
+            </span>
+          )}
         </span>
       </div>
 
@@ -51,6 +75,7 @@ export function BlockPreviewChip({
           blockCode={blockCode}
           blockConfig={blockConfig}
           expectedDataType={expectedDataType}
+          readOnly={readOnly}
         />
       )}
     </div>
@@ -59,8 +84,9 @@ export function BlockPreviewChip({
 
 
 function StatelessPreview({
-  blockCode, blockConfig, expectedDataType,
+  blockCode, blockConfig, expectedDataType, readOnly = false,
 }: BlockPreviewChipProps) {
+  const liveValues = useLiveValues();
   const tagIds = useMemo(
     () => blockInputs(blockCode, blockConfig),
     [blockCode, blockConfig],
@@ -69,14 +95,23 @@ function StatelessPreview({
   const [expanded, setExpanded] = useState(false);
 
   const result = useMemo<PreviewResult>(() => {
-    const samples = buildSamples(blockCode, blockConfig, overrides);
+    const samples = buildSamples(blockCode, blockConfig, overrides, liveValues.map);
     return evaluateBlockJS(blockCode, blockConfig, samples);
-  }, [blockCode, blockConfig, overrides]);
+  }, [blockCode, blockConfig, overrides, liveValues.map]);
 
   function updateOverride(tagId: number, patch: Partial<SampleOverride>) {
     setOverrides(prev => {
       const next = new Map(prev);
-      const current = next.get(tagId) ?? { value: 1, quality: GOOD_NON_SPECIFIC };
+      // Default seeded from the live value (if any) — matches what the
+      // preview actually used when no override existed.
+      const live = liveValues.map.get(tagId);
+      const seedValue = (live && live.value !== null && live.quality >= GOOD_QUALITY)
+        ? live.value
+        : 1;
+      const seedQuality = (live && live.quality >= GOOD_QUALITY)
+        ? live.quality
+        : GOOD_NON_SPECIFIC;
+      const current = next.get(tagId) ?? { value: seedValue, quality: seedQuality };
       next.set(tagId, { ...current, ...patch });
       return next;
     });
@@ -109,44 +144,66 @@ function StatelessPreview({
             <div className="mt-1.5 space-y-1">
               {tagIds.map(tid => {
                 const ov = overrides.get(tid);
-                const v = ov?.value ?? 1;
-                const q = ov?.quality ?? GOOD_NON_SPECIFIC;
+                const live = liveValues.map.get(tid);
+                const liveOk = live && live.value !== null && live.quality >= GOOD_QUALITY;
+                const v = ov?.value ?? (liveOk ? live.value : 1);
+                const q = ov?.quality ?? (liveOk ? live.quality : GOOD_NON_SPECIFIC);
                 return (
                   <div key={tid} className="flex items-center gap-2 text-[11px]">
                     <span className="font-mono text-muted-foreground w-16 shrink-0">
                       tag #{tid}
                     </span>
-                    <input
-                      type="number"
-                      step="any"
-                      className="h-6 w-24 text-[11px] bg-card border border-border rounded px-1.5 font-mono"
-                      value={v ?? ""}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        updateOverride(tid, { value: raw === "" ? null : Number(raw) });
-                      }}
-                      placeholder="null"
-                    />
-                    <select
-                      className="h-6 text-[11px] bg-card border border-border rounded px-1.5"
-                      value={q}
-                      onChange={(e) => updateOverride(tid, { quality: Number(e.target.value) })}
-                    >
-                      <option value={GOOD_NON_SPECIFIC}>GOOD (192)</option>
-                      <option value={GOOD_QUALITY}>GOOD threshold (128)</option>
-                      <option value={64}>UNCERTAIN (64)</option>
-                      <option value={0}>BAD (0)</option>
-                    </select>
+                    {readOnly ? (
+                      // Display-only: show the live value as a value-shaped
+                      // chip, not an input. No way to override; the operator
+                      // is inspecting, not configuring.
+                      <span className="h-6 w-24 text-[11px] bg-secondary/40 border border-border
+                                       rounded px-1.5 font-mono flex items-center text-muted-foreground">
+                        {v === null || v === undefined ? "null" : v}
+                      </span>
+                    ) : (
+                      <input
+                        type="number"
+                        step="any"
+                        className="h-6 w-24 text-[11px] bg-card border border-border rounded px-1.5 font-mono"
+                        value={v ?? ""}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          updateOverride(tid, { value: raw === "" ? null : Number(raw) });
+                        }}
+                        placeholder="null"
+                      />
+                    )}
+                    {readOnly ? (
+                      <span className="h-6 text-[11px] bg-secondary/40 border border-border
+                                       rounded px-1.5 flex items-center text-muted-foreground">
+                        {qualityLabel(q)}
+                      </span>
+                    ) : (
+                      <select
+                        className="h-6 text-[11px] bg-card border border-border rounded px-1.5"
+                        value={q}
+                        onChange={(e) => updateOverride(tid, { quality: Number(e.target.value) })}
+                      >
+                        <option value={GOOD_NON_SPECIFIC}>GOOD (192)</option>
+                        <option value={GOOD_QUALITY}>GOOD threshold (128)</option>
+                        <option value={64}>UNCERTAIN (64)</option>
+                        <option value={0}>BAD (0)</option>
+                      </select>
+                    )}
+                    {!ov && liveOk && (
+                      <span className="text-[10px] text-muted-foreground italic">live</span>
+                    )}
                   </div>
                 );
               })}
-              {overrides.size > 0 && (
+              {overrides.size > 0 && !readOnly && (
                 <button
                   type="button"
                   onClick={resetOverrides}
                   className="text-[10px] text-muted-foreground hover:text-foreground underline mt-1"
                 >
-                  Reset to defaults (value=1, GOOD)
+                  Reset to defaults (use live values)
                 </button>
               )}
             </div>
@@ -215,11 +272,10 @@ function ResultBadge({
 function formatPreviewValue(v: number | null): string {
   if (v === null || v === undefined) return "BAD";
   if (!Number.isFinite(v)) return String(v);
-  if (Number.isInteger(v) && Math.abs(v) < 1e6) return String(v);
-  if (Math.abs(v) >= 0.001 && Math.abs(v) < 1e6) {
-    return v.toFixed(4).replace(/\.?0+$/, "");
-  }
-  return v.toExponential(3);
+  // Use the central formatter (lib/format.ts) so the preview chip
+  // matches every other tag display in the app — no exponential
+  // notation, thousands separators on large values, etc.
+  return formatFloat(v);
 }
 
 function qualityToLabel(q: number): string {

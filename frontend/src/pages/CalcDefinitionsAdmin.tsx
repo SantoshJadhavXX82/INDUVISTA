@@ -22,6 +22,8 @@ import {
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { PageHeader } from "@/components/ui/page-header";
+import { formatFloat } from "@/lib/format";
 
 import {
   useCalcDefinitions, useBlockTypes, useComputedDevices,
@@ -241,24 +243,19 @@ export default function CalcDefinitionsAdmin() {
 
   return (
     <div className="p-4 space-y-4">
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between py-3 px-4 border-b border-border">
-          <div className="flex items-center gap-2">
-            <Calculator className="h-4 w-4" />
-            <CardTitle className="text-sm">Computed Tags</CardTitle>
-            <span className="text-[11px] text-muted-foreground">
-              {filtered.length} of {totalCount} · {allDevices.length} device{allDevices.length !== 1 ? "s" : ""}
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
+      <PageHeader
+        title="Calc tags"
+        subtitle={`${filtered.length} of ${totalCount} · ${allDevices.length} device${allDevices.length !== 1 ? "s" : ""}`}
+        actions={
+          <>
             <button
               type="button"
               onClick={() => setDevicesModalOpen(true)}
-              className="text-xs px-2.5 py-1 rounded border border-border
-                         hover:bg-secondary inline-flex items-center gap-1.5"
+              className="text-xs px-2.5 py-1 rounded inline-flex items-center gap-1.5 hover:bg-secondary"
+              style={{ border: "0.5px solid var(--separator)" }}
             >
               <Settings className="h-3 w-3" />
-              Manage Computed Devices
+              Manage devices
             </button>
             <button
               type="button"
@@ -267,15 +264,16 @@ export default function CalcDefinitionsAdmin() {
               title={allDevices.filter((d) => d.enabled).length === 0
                 ? "Create a Computed Device first"
                 : "Create a new computed tag"}
-              className="text-xs px-2.5 py-1 rounded bg-primary text-primary-foreground
-                         hover:bg-primary/90 disabled:opacity-30 inline-flex items-center gap-1.5"
+              className="text-xs px-2.5 py-1 rounded text-white inline-flex items-center gap-1.5 disabled:opacity-40"
+              style={{ backgroundColor: "var(--ios-blue)" }}
             >
               <Plus className="h-3 w-3" />
               New computed tag
             </button>
-          </div>
-        </CardHeader>
-
+          </>
+        }
+      />
+      <Card>
         <CardContent className="p-3">
           <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
             <Input
@@ -625,9 +623,7 @@ function CalcDefRow({
     const isBoolish = def.block_type.match(/^(GT|LT|EQ|NE|GE|LE|AND|OR|NOT|TON|TOF|TP|R_TRIG|F_TRIG|SR|RS)$/);
     const formatted = isBoolish
       ? (displayedValue.value > 0.5 ? "TRUE" : "FALSE")
-      : (Math.abs(displayedValue.value) >= 0.01 && Math.abs(displayedValue.value) < 1e9
-          ? displayedValue.value.toFixed(4)
-          : displayedValue.value.toExponential(3));
+      : formatFloat(displayedValue.value);
     const tooltip = displayedValue.ts
       ? `last written ${relativeTime(displayedValue.ts)} (quality ${displayedValue.quality ?? "?"})${isExternal ? " — read from external target" : ""}`
       : `quality ${displayedValue.quality ?? "?"}`;
@@ -741,11 +737,27 @@ function CalcDefRow({
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
                   Stats & routing
                 </div>
+                {/* Phase 17 — diagnostic banner. When last_error_message
+                    is populated, the worker has classified the problem
+                    into a "Title — Cause. Action." sentence. Render it
+                    prominently so operators don't have to squint at a
+                    10px table cell. Severity color depends on status:
+                      error/killed → red (action required)
+                      ok + msg     → amber (warning: BAD-quality output) */}
+                {def.last_error_message && (
+                  <DiagnosticBanner
+                    severity={
+                      def.last_status === 'error' || def.last_status === 'killed'
+                        ? 'error' : 'warning'
+                    }
+                    status={def.last_status}
+                    message={def.last_error_message}
+                  />
+                )}
                 <table className="text-xs">
                   <tbody>
                     <tr><td className="pr-3 text-muted-foreground">Last status</td><td>{def.last_status ?? "pending"}</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Last duration</td><td className="tabular-nums">{def.last_duration_ms != null ? `${def.last_duration_ms.toFixed(3)} ms` : "—"}</td></tr>
-                    <tr><td className="pr-3 text-muted-foreground">Last error</td><td className="text-[10px]">{def.last_error_message ?? "—"}</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Tag id</td><td className="tabular-nums">{def.id}</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Device</td><td className="text-[10px]">{def.device_name} (#{def.device_id})</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Data type</td><td className="text-[10px] font-mono">{def.data_type}</td></tr>
@@ -814,6 +826,67 @@ function CalcDefRow({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Phase 17 — operator-friendly diagnostic banner.
+ *
+ * The worker's classify_error() formats every error as:
+ *   "Title — Cause. Action."
+ *
+ * This banner parses that grammar and renders:
+ *   - Title in bold (the headline)
+ *   - Cause + Action as a body paragraph
+ *
+ * Severity drives the color:
+ *   - error    : red (last_status='error' or 'killed') — operator action required
+ *   - warning  : amber (last_status='ok' but quality propagation set the message)
+ */
+function DiagnosticBanner({
+  severity,
+  status,
+  message,
+}: {
+  severity: 'error' | 'warning';
+  status: string | null;
+  message: string;
+}) {
+  // Try to split "Title — rest of message" so we can render the title prominently.
+  const emDashIdx = message.indexOf(' — ');
+  const title = emDashIdx > 0 ? message.slice(0, emDashIdx) : message;
+  const body = emDashIdx > 0 ? message.slice(emDashIdx + 3) : null;
+
+  const styles = severity === 'error'
+    ? {
+        container: 'bg-red-50 border-red-300 text-red-900',
+        badge: 'bg-red-200 text-red-900',
+        badgeLabel: status === 'killed' ? 'TIMEOUT' : 'ERROR',
+      }
+    : {
+        container: 'bg-amber-50 border-amber-300 text-amber-900',
+        badge: 'bg-amber-200 text-amber-900',
+        badgeLabel: 'WARNING',
+      };
+
+  return (
+    <div className={`mt-2 mb-3 rounded border px-3 py-2 ${styles.container}`}>
+      <div className="flex items-start gap-2">
+        <span className={`text-[10px] font-bold uppercase tracking-wider
+                         rounded px-1.5 py-0.5 mt-0.5 ${styles.badge}`}>
+          {styles.badgeLabel}
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-semibold leading-snug">{title}</div>
+          {body && (
+            <div className="text-[11px] leading-snug mt-1 opacity-90">
+              {body}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function formatRate(ms: number): string {
   if (ms < 1000) return `${ms} ms`;

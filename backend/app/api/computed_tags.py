@@ -50,6 +50,78 @@ ALLOWED_EXECUTION_RATES_MS = (
 
 
 # ---------------------------------------------------------------------------
+# Validation helpers
+# ---------------------------------------------------------------------------
+
+
+def _validate_block(
+    block_type: str | None,
+    block_config: dict | None,
+    *,
+    existing_block_type: str | None = None,
+    existing_block_config: dict | None = None,
+) -> tuple[str | None, int | None, str | None]:
+    """Validate a block_type + block_config combination against BLOCK_REGISTRY.
+
+    For CREATE callers: pass body.block_type and body.block_config; the
+    existing_* arguments are unused.
+
+    For PATCH callers: pass the body fields (each may be None when not
+    being changed) plus the EXISTING values from the DB row. The function
+    validates the POST-update combination, so a PATCH that touches only
+    block_config gets checked against the row's existing block_type.
+
+    Returns (err_message, http_status_code, audit_code) — all None if
+    valid. Mirrors the contract of _validate_output_tag below.
+
+    Without this guard the API silently accepts unknown block codes and
+    malformed configs; the worker then fails silently per-tick. Catching
+    here gives operators immediate feedback.
+    """
+    # Late import — calc_blocks transitively imports many modules; keeping
+    # this lazy avoids surprising the FastAPI startup with worker imports
+    # and any circular paths.
+    from app.workers.calc_blocks import BLOCK_REGISTRY
+
+    effective_type = block_type if block_type is not None else existing_block_type
+    effective_config = block_config if block_config is not None else existing_block_config
+
+    if effective_type is None:
+        # No type set anywhere; nothing to check. Shouldn't happen for
+        # CREATE (Pydantic enforces presence). PATCH without block_type
+        # in the body keeps whatever the row has.
+        return None, None, None
+
+    cls = BLOCK_REGISTRY.get(effective_type)
+    if cls is None:
+        known = sorted(BLOCK_REGISTRY.keys())
+        sample = ", ".join(known[:6]) + (", ..." if len(known) > 6 else "")
+        return (
+            f"unknown block_type {effective_type!r}. "
+            f"Available: {sample} ({len(known)} total)",
+            400,
+            "unknown_block_type",
+        )
+
+    if effective_config is None:
+        # Block type valid; nothing to validate against. PATCH-only-on-type
+        # without block_config could land here if the existing config is
+        # also NULL (shouldn't happen because the column has NOT NULL).
+        return None, None, None
+
+    try:
+        cls.validate_config(effective_config)
+    except ValueError as e:
+        return (
+            f"invalid block_config for {effective_type}: {e}",
+            400,
+            "invalid_block_config",
+        )
+
+    return None, None, None
+
+
+# ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
 
@@ -350,6 +422,22 @@ def create_computed_tag(
         ), request)
         raise HTTPException(status_code or 400, err)
 
+    # Validate block_type + block_config against BLOCK_REGISTRY. Catches
+    # unknown codes and malformed configs at POST time instead of letting
+    # them silently fail per-tick in the worker.
+    err, status_code, code = _validate_block(body.block_type, body.block_config)
+    if err:
+        audit(AuditEvent(
+            action="computed_tag.create",
+            target_type="computed_tag",
+            target_label=target_label,
+            summary=f"Denied: {err}",
+            status="denied",
+            error_message=code or err,
+            details={"request": body.model_dump()},
+        ), request)
+        raise HTTPException(status_code or 400, err)
+
     try:
         # 1. Insert into tags with sentinel values for Modbus-only fields.
         new_id = db.execute(text("""
@@ -601,6 +689,29 @@ def update_computed_tag(
     if "output_tag_id" in updates:
         err, status_code, code = _validate_output_tag(
             db, updates["output_tag_id"], exclude_computed_tag_id=computed_tag_id,
+        )
+        if err:
+            audit(AuditEvent(
+                action=action,
+                target_type="computed_tag",
+                target_id=computed_tag_id,
+                target_label=target_label,
+                summary=f"Denied: {err}",
+                status="denied",
+                error_message=code or err,
+                details={"request": updates, "before": _summarize_ct(existing)},
+            ), request)
+            raise HTTPException(status_code or 400, err)
+
+    # Validate block_type / block_config combination if either is being
+    # changed. Uses existing DB values to fill in whichever isn't in the
+    # PATCH body, so we always check the POST-update combination.
+    if "block_type" in updates or "block_config" in updates:
+        err, status_code, code = _validate_block(
+            updates.get("block_type"),
+            updates.get("block_config"),
+            existing_block_type=existing["block_type"],
+            existing_block_config=existing["block_config"],
         )
         if err:
             audit(AuditEvent(

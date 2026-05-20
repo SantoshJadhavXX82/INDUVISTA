@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { Activity } from "lucide-react";
 import { type HealthResponse } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
 import Nav from "@/components/layout/Nav";
@@ -20,18 +21,48 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   });
 
   return (
-    <div className="flex h-screen bg-background text-foreground">
-      <aside className="w-60 shrink-0 border-r flex flex-col">
-        <div className="px-4 py-4 border-b">
+    <div className="flex h-screen" style={{ backgroundColor: "var(--bg-grouped)", color: "var(--ios-gray-1)" }}>
+      <aside
+        className="w-60 shrink-0 flex flex-col"
+        style={{
+          backgroundColor: "var(--bg-elevated)",
+          borderRight: "0.5px solid var(--separator)",
+        }}
+      >
+        <div className="px-4 py-4" style={{ borderBottom: "0.5px solid var(--separator)" }}>
           <div className="flex items-center gap-2.5">
-            <img
-              src="/icon_induvista.png"
-              alt="InduVista"
-              className="h-9 w-9 rounded shrink-0 object-contain"
-            />
+            {/* iOS-style brand mark: iOS-blue rounded square with a white
+                monitoring-pulse glyph. Inline SVG so it scales perfectly
+                and tints via CSS vars (will auto-adapt when dark mode is
+                turned on). Replaces the dark photographic /icon_induvista.png
+                which had no contrast against the white sidebar. */}
+            <div
+              className="shrink-0 flex items-center justify-center"
+              style={{
+                width: 38,
+                height: 38,
+                backgroundColor: "var(--ios-blue)",
+                borderRadius: 9,    // ≈24% radius — iOS app icon proportion
+                boxShadow: "0 1px 2px rgba(0, 0, 0, 0.08)",
+              }}
+              aria-label="InduVista"
+              role="img"
+            >
+              <Activity
+                className="text-white"
+                style={{ width: 22, height: 22 }}
+                strokeWidth={2.5}
+              />
+            </div>
             <div>
-              <div className="text-lg font-bold tracking-tight leading-tight">InduVista</div>
-              <div className="text-[10px] text-muted-foreground uppercase tracking-wider mt-0.5">
+              <div
+                className="text-lg font-semibold tracking-tight leading-tight"
+                style={{ color: "#000", letterSpacing: "-0.02em" }}
+              >InduVista</div>
+              <div
+                className="text-[10px] uppercase tracking-wider mt-0.5"
+                style={{ color: "var(--ios-gray-1)" }}
+              >
                 Industrial Reporting Tool
               </div>
             </div>
@@ -41,7 +72,13 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
 
       <div className="flex-1 flex flex-col overflow-hidden">
-        <header className="h-12 border-b flex items-center justify-end gap-3 px-4">
+        <header
+          className="h-12 flex items-center justify-end gap-3 px-4"
+          style={{
+            backgroundColor: "var(--bg-elevated)",
+            borderBottom: "0.5px solid var(--separator)",
+          }}
+        >
           {/* Global time format - applies app-wide (chart labels, summary
               tooltips, future timestamp columns in any module). */}
           <TimeFormatSelector />
@@ -59,7 +96,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                 role: {health.data.role}
               </Badge>
               <span
-                className="text-xs text-muted-foreground tabular-nums"
+                className="text-xs tabular-nums"
+                style={{ color: "var(--ios-gray-1)" }}
                 title={
                   `Backend uptime: ${formatUptime(health.data.uptime_sec)}\n` +
                   `Started: ${health.data.started_at}\n` +
@@ -71,11 +109,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               </span>
             </>
           ) : (
-            <span className="text-xs text-muted-foreground">connecting…</span>
+            <span className="text-xs" style={{ color: "var(--ios-gray-1)" }}>connecting…</span>
           )}
         </header>
 
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+        <main className="flex-1 overflow-auto p-6" style={{ color: "#000" }}>{children}</main>
       </div>
     </div>
   );

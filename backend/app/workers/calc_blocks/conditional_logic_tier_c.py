@@ -41,6 +41,8 @@ from typing import Any
 from app.workers.calc_blocks.base import (
     BaseBlock, BlockResult, InputSample, register_block,
     GOOD_QUALITY, GOOD_NON_SPECIFIC,
+    resolve_operand_spec, validate_operand_spec, operand_tag_id,
+    collect_list_tag_ids,
 )
 
 
@@ -61,20 +63,22 @@ def _validate_inputs_list(
     min_inputs: int = 2,
     max_inputs: int = 20,
 ) -> None:
+    """Validation for blocks taking an 'inputs' list of operand specs."""
     if "inputs" not in cfg:
         raise ValueError(f"{block_name} requires 'inputs' in block_config")
     inputs = cfg["inputs"]
     if not isinstance(inputs, list) or len(inputs) < min_inputs:
         raise ValueError(
             f"{block_name} 'inputs' must be a list of at least "
-            f"{min_inputs} tag IDs"
+            f"{min_inputs} items"
         )
     if len(inputs) > max_inputs:
         raise ValueError(f"{block_name} supports at most {max_inputs} inputs")
-    for x in inputs:
-        _validate_tag_id(block_name, x)
-    if len(set(inputs)) != len(inputs):
-        raise ValueError(f"{block_name} inputs must be unique")
+    for i, spec in enumerate(inputs):
+        validate_operand_spec(f"{block_name} inputs[{i}]", spec)
+    tag_ids = collect_list_tag_ids(inputs)
+    if len(set(tag_ids)) != len(tag_ids):
+        raise ValueError(f"{block_name} tag inputs must be unique")
 
 
 def _all_good(samples: list[InputSample]) -> bool:
@@ -111,36 +115,52 @@ class IfThenElse(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [
-            int(cfg["condition"]),
-            int(cfg["then_value"]),
-            int(cfg["else_value"]),
-        ]
+        # Order: condition tag (if any), then_value tag (if any), else_value tag (if any)
+        ids: list[int] = []
+        for key in ("condition", "then_value", "else_value"):
+            t = operand_tag_id(cfg[key])
+            if t is not None:
+                ids.append(t)
+        return ids
 
     @classmethod
     def validate_config(cls, cfg):
         for key in ("condition", "then_value", "else_value"):
             if key not in cfg:
                 raise ValueError(
-                    f"IF_THEN_ELSE requires '{key}' tag ID in block_config"
+                    f"IF_THEN_ELSE requires '{key}' operand in block_config "
+                    f"(tag id or {{value: n}})"
                 )
-            _validate_tag_id(f"IF_THEN_ELSE.{key}", cfg[key])
+            validate_operand_spec(f"IF_THEN_ELSE.{key}", cfg[key])
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        condition, then_s, else_s = samples
+        # Decode each operand. Walk samples in order of tag-typed operands.
+        sample_idx = 0
+        def _resolve(key: str):
+            nonlocal sample_idx
+            tag, const = resolve_operand_spec(cfg[key])
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                return s.value, s.quality
+            return float(const), GOOD_NON_SPECIFIC
 
-        if condition.quality < GOOD_QUALITY or condition.value is None:
-            return BlockResult(value=None, quality=condition.quality)
+        cond_val, cond_q = _resolve("condition")
+        if cond_q < GOOD_QUALITY or cond_val is None:
+            return BlockResult(value=None, quality=cond_q)
 
-        chosen = then_s if condition.value > 0 else else_s
+        # Resolve BOTH branches in declaration order so the sample_idx
+        # walker consumes them in the order the worker delivered them.
+        then_val, then_q = _resolve("then_value")
+        else_val, else_q = _resolve("else_value")
 
-        if chosen.value is None:
-            return BlockResult(value=None, quality=chosen.quality)
-
+        chosen_val, chosen_q = (then_val, then_q) if cond_val > 0 else (else_val, else_q)
+        if chosen_val is None:
+            return BlockResult(value=None, quality=chosen_q)
         return BlockResult(
-            value=chosen.value,
-            quality=min(chosen.quality, GOOD_NON_SPECIFIC),
+            value=float(chosen_val),
+            quality=min(chosen_q, GOOD_NON_SPECIFIC),
         )
 
 
@@ -161,37 +181,45 @@ class _BinaryCompareBase(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        ids = [int(cfg["left"])]
+        ids: list[int] = []
+        left_tag = operand_tag_id(cfg["left"])
+        if left_tag is not None:
+            ids.append(left_tag)
         if "right" in cfg:
-            ids.append(int(cfg["right"]))
+            right_tag = operand_tag_id(cfg["right"])
+            if right_tag is not None:
+                ids.append(right_tag)
         return ids
 
     @classmethod
     def validate_config(cls, cfg):
         if "left" not in cfg:
             raise ValueError(
-                f"{cls.CODE} requires 'left' tag ID in block_config"
+                f"{cls.CODE} requires 'left' operand in block_config"
             )
-        _validate_tag_id(f"{cls.CODE}.left", cfg["left"])
+        validate_operand_spec(f"{cls.CODE}.left", cfg["left"])
 
-        has_right = "right" in cfg
-        has_value = "value" in cfg
-        if has_right == has_value:
-            raise ValueError(
-                f"{cls.CODE} requires exactly one of 'right' (tag ID) "
-                f"or 'value' (numeric constant) in block_config"
-            )
-
-        if has_right:
-            _validate_tag_id(f"{cls.CODE}.right", cfg["right"])
-            if cfg["left"] == cfg["right"]:
+        if "right" in cfg:
+            validate_operand_spec(f"{cls.CODE}.right", cfg["right"])
+            if "value" in cfg:
+                raise ValueError(
+                    f"{cls.CODE}: cannot set both 'right' and legacy 'value'"
+                )
+            # When both are tags, they must be distinct
+            l_tag = operand_tag_id(cfg["left"])
+            r_tag = operand_tag_id(cfg["right"])
+            if l_tag is not None and r_tag is not None and l_tag == r_tag:
                 raise ValueError(
                     f"{cls.CODE}: 'left' and 'right' must be different tags"
                 )
+        elif "value" in cfg:
+            # Legacy constant form on RHS
+            validate_operand_spec(
+                f"{cls.CODE}.value (legacy)",
+                {"value": cfg["value"]},
+            )
         else:
-            v = cfg["value"]
-            if not isinstance(v, (int, float)):
-                raise ValueError(f"{cls.CODE}: 'value' must be numeric")
+            raise ValueError(f"{cls.CODE} requires 'right' operand")
 
     @classmethod
     def _do_compare(cls, left: float, right: float) -> bool:
@@ -199,19 +227,32 @@ class _BinaryCompareBase(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        left = samples[0]
-        if left.quality < GOOD_QUALITY or left.value is None:
-            return BlockResult(value=None, quality=left.quality)
-
-        if len(samples) > 1:
-            right = samples[1]
-            if right.quality < GOOD_QUALITY or right.value is None:
-                return BlockResult(value=None, quality=right.quality)
-            right_val = right.value
+        sample_idx = 0
+        # left
+        l_tag, l_const = resolve_operand_spec(cfg["left"])
+        if l_tag is not None:
+            ls = samples[sample_idx]
+            sample_idx += 1
+            if ls.quality < GOOD_QUALITY or ls.value is None:
+                return BlockResult(value=None, quality=ls.quality)
+            left_val = float(ls.value)
+        else:
+            left_val = float(l_const)
+        # right (or legacy 'value')
+        if "right" in cfg:
+            r_tag, r_const = resolve_operand_spec(cfg["right"])
+            if r_tag is not None:
+                rs = samples[sample_idx]
+                sample_idx += 1
+                if rs.quality < GOOD_QUALITY or rs.value is None:
+                    return BlockResult(value=None, quality=rs.quality)
+                right_val = float(rs.value)
+            else:
+                right_val = float(r_const)
         else:
             right_val = float(cfg["value"])
 
-        result = cls._do_compare(left.value, right_val)
+        result = cls._do_compare(left_val, right_val)
         return BlockResult(
             value=1.0 if result else 0.0,
             quality=GOOD_NON_SPECIFIC,
@@ -280,20 +321,33 @@ class _ToleranceCompareBase(_BinaryCompareBase):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        left = samples[0]
-        if left.quality < GOOD_QUALITY or left.value is None:
-            return BlockResult(value=None, quality=left.quality)
-
-        if len(samples) > 1:
-            right = samples[1]
-            if right.quality < GOOD_QUALITY or right.value is None:
-                return BlockResult(value=None, quality=right.quality)
-            right_val = right.value
+        sample_idx = 0
+        # left
+        l_tag, l_const = resolve_operand_spec(cfg["left"])
+        if l_tag is not None:
+            ls = samples[sample_idx]
+            sample_idx += 1
+            if ls.quality < GOOD_QUALITY or ls.value is None:
+                return BlockResult(value=None, quality=ls.quality)
+            left_val = float(ls.value)
+        else:
+            left_val = float(l_const)
+        # right (or legacy 'value')
+        if "right" in cfg:
+            r_tag, r_const = resolve_operand_spec(cfg["right"])
+            if r_tag is not None:
+                rs = samples[sample_idx]
+                sample_idx += 1
+                if rs.quality < GOOD_QUALITY or rs.value is None:
+                    return BlockResult(value=None, quality=rs.quality)
+                right_val = float(rs.value)
+            else:
+                right_val = float(r_const)
         else:
             right_val = float(cfg["value"])
 
         tol = float(cfg.get("tolerance", 0))
-        result = cls._do_compare_with_tol(left.value, right_val, tol)
+        result = cls._do_compare_with_tol(left_val, right_val, tol)
         return BlockResult(
             value=1.0 if result else 0.0,
             quality=GOOD_NON_SPECIFIC,
@@ -336,7 +390,7 @@ class AndOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -344,9 +398,21 @@ class AndOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        if not _all_good(samples):
-            return BlockResult(value=None, quality=_worst_quality(samples))
-        result = all(s.value > 0 for s in samples)
+        # Each operand is bool-coerced via value > 0. Constants pass through
+        # at GOOD quality; tag samples must also be GOOD or output is BAD.
+        bool_vals: list[bool] = []
+        sample_idx = 0
+        for spec in (cfg.get("inputs", []) or []):
+            tag, const = resolve_operand_spec(spec)
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                if s.quality < GOOD_QUALITY or s.value is None:
+                    return BlockResult(value=None, quality=s.quality)
+                bool_vals.append(s.value > 0)
+            else:
+                bool_vals.append(const > 0)
+        result = all(bool_vals)
         return BlockResult(
             value=1.0 if result else 0.0, quality=GOOD_NON_SPECIFIC,
         )
@@ -358,7 +424,7 @@ class OrOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -366,9 +432,19 @@ class OrOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        if not _all_good(samples):
-            return BlockResult(value=None, quality=_worst_quality(samples))
-        result = any(s.value > 0 for s in samples)
+        bool_vals: list[bool] = []
+        sample_idx = 0
+        for spec in (cfg.get("inputs", []) or []):
+            tag, const = resolve_operand_spec(spec)
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                if s.quality < GOOD_QUALITY or s.value is None:
+                    return BlockResult(value=None, quality=s.quality)
+                bool_vals.append(s.value > 0)
+            else:
+                bool_vals.append(const > 0)
+        result = any(bool_vals)
         return BlockResult(
             value=1.0 if result else 0.0, quality=GOOD_NON_SPECIFIC,
         )
@@ -384,7 +460,7 @@ class XorOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -392,9 +468,19 @@ class XorOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        if not _all_good(samples):
-            return BlockResult(value=None, quality=_worst_quality(samples))
-        true_count = sum(1 for s in samples if s.value > 0)
+        bool_vals: list[bool] = []
+        sample_idx = 0
+        for spec in (cfg.get("inputs", []) or []):
+            tag, const = resolve_operand_spec(spec)
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                if s.quality < GOOD_QUALITY or s.value is None:
+                    return BlockResult(value=None, quality=s.quality)
+                bool_vals.append(s.value > 0)
+            else:
+                bool_vals.append(const > 0)
+        true_count = sum(1 for v in bool_vals if v)
         return BlockResult(
             value=1.0 if true_count % 2 == 1 else 0.0,
             quality=GOOD_NON_SPECIFIC,
@@ -407,20 +493,26 @@ class Not(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["input"])]
+        t = operand_tag_id(cfg["input"])
+        return [t] if t is not None else []
 
     @classmethod
     def validate_config(cls, cfg):
         if "input" not in cfg:
-            raise ValueError("NOT requires 'input' tag ID in block_config")
-        _validate_tag_id("NOT", cfg["input"])
+            raise ValueError("NOT requires 'input' operand in block_config")
+        validate_operand_spec("NOT.input", cfg["input"])
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        s = samples[0]
-        if s.quality < GOOD_QUALITY or s.value is None:
-            return BlockResult(value=None, quality=s.quality)
-        result = s.value <= 0
+        tag, const = resolve_operand_spec(cfg["input"])
+        if tag is not None:
+            s = samples[0]
+            if s.quality < GOOD_QUALITY or s.value is None:
+                return BlockResult(value=None, quality=s.quality)
+            val = s.value
+        else:
+            val = float(const)
+        result = val <= 0
         return BlockResult(
             value=1.0 if result else 0.0, quality=GOOD_NON_SPECIFIC,
         )

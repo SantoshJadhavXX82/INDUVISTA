@@ -124,20 +124,30 @@ def diagnostics_summary(db: Annotated[Session, Depends(get_session)]):
     overlap_count = db.execute(text("""
         WITH tag_span AS (
           SELECT t.*,
+                 d.protocol AS device_protocol,
                  CASE
                    WHEN b.addressing_mode IN ('ENRON_HOLDING', 'ENRON_INPUT')
                      THEN 1
                    ELSE t.register_count
                  END AS effective_span
             FROM tags t
+            JOIN devices d ON d.id = t.device_id
             LEFT JOIN register_blocks b ON b.id = t.register_block_id
         )
+        -- Phase 17 — exclude computed devices. Their tags share the sentinel
+        -- (function_code=3, address=0) so a naive overlap query would emit
+        -- N*(N-1)/2 phantom pairs per computed device. The per-tag overlap
+        -- validation in app/api/_validation.py already short-circuits for
+        -- protocol='computed'; this matches that behavior at the bulk-query
+        -- level so the diagnostics summary count is meaningful.
         SELECT COUNT(*) FROM tag_span t1
         JOIN tag_span t2
           ON t1.device_id = t2.device_id
          AND t1.function_code = t2.function_code
          AND t1.id < t2.id
-        WHERE t1.address < t2.address + t2.effective_span
+        WHERE t1.device_protocol != 'computed'
+          AND t2.device_protocol != 'computed'
+          AND t1.address < t2.address + t2.effective_span
           AND t2.address < t1.address + t1.effective_span
     """)).scalar()
 
@@ -159,8 +169,19 @@ def diagnostics_summary(db: Annotated[Session, Depends(get_session)]):
         SELECT COUNT(*) FROM latest_tag_values lv
         JOIN tags t ON t.id = lv.tag_id
         JOIN devices d ON d.id = t.device_id
-        WHERE lv.st < 128
-           OR EXTRACT(EPOCH FROM (NOW() - lv.time)) > d.stale_after_sec
+        WHERE
+          -- Phase 17 — writable tags are command/setpoint registers. They
+          -- sit at the same value indefinitely by design (a start command
+          -- stays at 1 until cleared). The worker often doesn't read them
+          -- back, so their last-seen timestamp is the initial seed value.
+          -- Counting them as "stale" produces false positives that bury
+          -- the real issues. Heartbeat-monitored writable tags still get
+          -- their own freshness check via the HEARTBEAT_FROZEN code path.
+          t.writable = false
+          AND (
+            lv.st < 128
+            OR EXTRACT(EPOCH FROM (NOW() - lv.time)) > d.stale_after_sec
+          )
     """)).scalar()
 
     tag_count = db.execute(
@@ -400,8 +421,14 @@ def list_stale_tags(db: Annotated[Session, Depends(get_session)]):
         FROM latest_tag_values lv
         JOIN tags t ON t.id = lv.tag_id
         JOIN devices d ON d.id = t.device_id
-        WHERE lv.st < 128
-           OR EXTRACT(EPOCH FROM (NOW() - lv.time)) > d.stale_after_sec
+        WHERE
+          -- Phase 17 — writable tags exempted from stale detection. See
+          -- the matching filter in diagnostics_summary's stale_count.
+          t.writable = false
+          AND (
+            lv.st < 128
+            OR EXTRACT(EPOCH FROM (NOW() - lv.time)) > d.stale_after_sec
+          )
         ORDER BY age_seconds DESC
     """)).mappings().all()
     return [dict(r) for r in rows]

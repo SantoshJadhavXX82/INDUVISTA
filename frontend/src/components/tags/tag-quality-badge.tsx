@@ -3,17 +3,25 @@
  *
  * Shows a colored dot + freshness for a tag based on its last sample.
  * Three states:
- *   • good   — ST_READ_OK (128) and recent (age < stale threshold)
- *   • stale  — ST_READ_OK but age > stale threshold OR no sample yet
- *   • error  — ST != READ_OK (any failure: timeout, comm, retry exhausted, etc.)
+ *   • good   — quality byte is GOOD (>= 128) and recent (age < stale threshold)
+ *   • stale  — quality byte is GOOD but age > stale threshold OR no sample yet
+ *   • error  — quality byte is BAD (< 128) — comm failure, timeout, retry
+ *              exhausted, etc.
+ *
+ * OPC quality-byte semantics (matches backend constants in
+ * app/workers/calc_blocks/base.py):
+ *   0 - 127  : BAD / UNCERTAIN (we treat as error)
+ *   128 - 255: GOOD (with various sub-status codes)
+ *       128 = GOOD_NON_SPECIFIC threshold (used by Modbus reads)
+ *       192 = GOOD_LOCAL_OVERRIDE (used by calc evaluator outputs)
  *
  * The component is intentionally small (single-line text + dot) so it can
  * appear in a Tag Explorer table cell without breaking the row height.
  */
 import { cn } from "@/lib/utils";
 
-const ST_READ_OK = 128;
-const STALE_AFTER_SEC = 30; // values older than this are considered stale
+const ST_GOOD_MIN = 128;            // threshold: st >= 128 is GOOD
+const STALE_AFTER_SEC = 30;         // values older than this are stale
 
 export type TagQuality = "good" | "stale" | "error" | "unknown";
 
@@ -22,7 +30,7 @@ export function tagQuality(
   age_seconds: number | null,
 ): TagQuality {
   if (st === null || age_seconds === null) return "unknown";
-  if (st !== ST_READ_OK) return "error";
+  if (st < ST_GOOD_MIN) return "error";
   if (age_seconds > STALE_AFTER_SEC) return "stale";
   return "good";
 }

@@ -52,6 +52,8 @@ from typing import Any
 from app.workers.calc_blocks.base import (
     BaseBlock, BlockResult, InputSample, register_block,
     GOOD_QUALITY, GOOD_NON_SPECIFIC,
+    resolve_operand_spec, validate_operand_spec, operand_tag_id,
+    resolve_operand_value, iter_list_operand_values, collect_list_tag_ids,
 )
 
 
@@ -60,73 +62,118 @@ from app.workers.calc_blocks.base import (
 # ---------------------------------------------------------------------------
 
 def _validate_tag_id(name: str, x: Any) -> None:
-    if not isinstance(x, int) or x <= 0:
+    """Legacy helper — kept for blocks that still require a bare tag id
+    (no constant option), e.g. some stateful blocks. New code should
+    use validate_operand_spec() instead."""
+    if not isinstance(x, int) or x <= 0 or isinstance(x, bool):
         raise ValueError(f"{name}: tag ID {x!r} is not a positive integer")
 
 
 def _validate_binary_config(cls_name: str, cfg: dict) -> None:
-    """Binary blocks need 'left' (tag id) and exactly one of
-    'right' (tag id) or 'value' (constant)."""
+    """Binary blocks: 'left' and 'right' operands.
+
+    Each operand is an operand-spec — tag id (int), {tag: id}, or
+    {value: num}. The legacy shape with a global 'value' key (meaning
+    right-as-constant) is also accepted; converted to {right: {value}}.
+    N-ary mode is checked by callers before this runs.
+    """
     if "left" not in cfg:
-        raise ValueError(f"{cls_name} requires 'left' tag ID")
-    _validate_tag_id(f"{cls_name}.left", cfg["left"])
-    has_right = "right" in cfg
-    has_value = "value" in cfg
-    if has_right == has_value:
-        raise ValueError(
-            f"{cls_name} requires exactly one of 'right' (tag) or "
-            f"'value' (constant); got both or neither"
-        )
-    if has_right:
-        _validate_tag_id(f"{cls_name}.right", cfg["right"])
-    else:
-        if not isinstance(cfg["value"], (int, float)) or isinstance(cfg["value"], bool):
+        raise ValueError(f"{cls_name} requires 'left' operand")
+    validate_operand_spec(f"{cls_name}.left", cfg["left"])
+
+    # Right: prefer new shape; accept legacy 'value' key as
+    # equivalent to {right: {value: <n>}}
+    if "right" in cfg:
+        validate_operand_spec(f"{cls_name}.right", cfg["right"])
+        if "value" in cfg:
             raise ValueError(
-                f"{cls_name}.value must be a number, "
-                f"got {type(cfg['value']).__name__}"
+                f"{cls_name}: cannot set both 'right' and legacy 'value'"
             )
+    elif "value" in cfg:
+        # Legacy: validate as a constant operand
+        validate_operand_spec(
+            f"{cls_name}.value (legacy)",
+            {"value": cfg["value"]},
+        )
+    else:
+        raise ValueError(f"{cls_name} requires 'right' operand")
 
 
 def _validate_unary_config(cls_name: str, cfg: dict) -> None:
+    """Unary blocks: 'input' operand may be tag or constant."""
     if "input" not in cfg:
-        raise ValueError(f"{cls_name} requires 'input' tag ID")
-    _validate_tag_id(f"{cls_name}.input", cfg["input"])
+        raise ValueError(f"{cls_name} requires 'input' operand")
+    validate_operand_spec(f"{cls_name}.input", cfg["input"])
 
 
 def _binary_inputs(cfg: dict) -> list[int]:
+    """Tag IDs the worker fetches for a binary config. Constants don't
+    need fetching. Order: left's tag (if any), right's tag (if any)."""
+    ids: list[int] = []
+    left_tag = operand_tag_id(cfg["left"])
+    if left_tag is not None:
+        ids.append(left_tag)
     if "right" in cfg:
-        return [int(cfg["left"]), int(cfg["right"])]
-    return [int(cfg["left"])]
+        right_tag = operand_tag_id(cfg["right"])
+        if right_tag is not None:
+            ids.append(right_tag)
+    # Legacy 'value' is always a constant — nothing to fetch.
+    return ids
 
 
 def _unary_inputs(cfg: dict) -> list[int]:
-    return [int(cfg["input"])]
+    tag = operand_tag_id(cfg["input"])
+    return [tag] if tag is not None else []
 
 
 def _binary_operands(
     cfg: dict, samples: list[InputSample]
 ) -> tuple[float | None, float | None, int]:
-    """Resolves left/right operands from samples + optional constant.
-    Returns (left, right, quality_for_output). If either tag operand
-    is BAD, (None, None, that_sample.quality) is returned."""
-    left_sample = samples[0]
-    if left_sample.quality < GOOD_QUALITY or left_sample.value is None:
-        return None, None, left_sample.quality
+    """Resolve (left, right, quality) for a binary block. Walks samples
+    in the same order _binary_inputs() returned them."""
+    sample_idx = 0
+    worst_q = GOOD_NON_SPECIFIC
 
+    # left
+    left_tag, left_const = resolve_operand_spec(cfg["left"])
+    if left_tag is not None:
+        ls = samples[sample_idx]
+        sample_idx += 1
+        if ls.quality < GOOD_QUALITY or ls.value is None:
+            return None, None, ls.quality
+        left_val = float(ls.value)
+        worst_q = min(worst_q, ls.quality)
+    else:
+        left_val = float(left_const)
+
+    # right (or legacy value)
     if "right" in cfg:
-        right_sample = samples[1]
-        if right_sample.quality < GOOD_QUALITY or right_sample.value is None:
-            return None, None, right_sample.quality
-        return left_sample.value, right_sample.value, GOOD_NON_SPECIFIC
+        right_tag, right_const = resolve_operand_spec(cfg["right"])
+        if right_tag is not None:
+            rs = samples[sample_idx]
+            sample_idx += 1
+            if rs.quality < GOOD_QUALITY or rs.value is None:
+                return None, None, rs.quality
+            right_val = float(rs.value)
+            worst_q = min(worst_q, rs.quality)
+        else:
+            right_val = float(right_const)
+    else:
+        # Legacy {value: n} on the cfg itself, treated as right_const
+        right_val = float(cfg["value"])
 
-    return left_sample.value, float(cfg["value"]), GOOD_NON_SPECIFIC
+    return left_val, right_val, worst_q
 
 
-def _unary_operand(samples: list[InputSample]) -> tuple[float | None, int]:
-    s = samples[0]
-    if s.quality < GOOD_QUALITY or s.value is None:
-        return None, s.quality
-    return s.value, GOOD_NON_SPECIFIC
+def _unary_operand(
+    cfg: dict, samples: list[InputSample]
+) -> tuple[float | None, int]:
+    """Resolve (value, quality) for a unary block. Pass cfg so we can
+    distinguish tag- from constant-typed input."""
+    val, q = resolve_operand_value(
+        cfg["input"], samples[0] if samples else None
+    )
+    return val, q
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +475,7 @@ class Abs(_UnaryMathBase):
     CODE = "ABS"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         return BlockResult(value=abs(v), quality=q)
@@ -438,7 +485,7 @@ class Neg(_UnaryMathBase):
     CODE = "NEG"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         return BlockResult(value=-v, quality=q)
@@ -448,7 +495,7 @@ class Sqrt(_UnaryMathBase):
     CODE = "SQRT"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         if v < 0:
@@ -460,7 +507,7 @@ class Floor(_UnaryMathBase):
     CODE = "FLOOR"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         return BlockResult(value=float(math.floor(v)), quality=q)
@@ -470,7 +517,7 @@ class Ceil(_UnaryMathBase):
     CODE = "CEIL"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         return BlockResult(value=float(math.ceil(v)), quality=q)
@@ -480,7 +527,7 @@ class Round(_UnaryMathBase):
     CODE = "ROUND"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         # Python's round() is banker's rounding (half to even).
@@ -496,7 +543,7 @@ class Exp(_UnaryMathBase):
     CODE = "EXP"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         try:
@@ -512,7 +559,7 @@ class Ln(_UnaryMathBase):
     CODE = "LN"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         if v <= 0:
@@ -524,7 +571,7 @@ class Log10(_UnaryMathBase):
     CODE = "LOG10"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         if v <= 0:
@@ -536,7 +583,7 @@ class Sin(_UnaryMathBase):
     CODE = "SIN"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         return BlockResult(value=math.sin(v), quality=q)
@@ -546,7 +593,7 @@ class Cos(_UnaryMathBase):
     CODE = "COS"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         return BlockResult(value=math.cos(v), quality=q)
@@ -556,7 +603,7 @@ class Tan(_UnaryMathBase):
     CODE = "TAN"
     @classmethod
     def evaluate(cls, cfg, samples):
-        v, q = _unary_operand(samples)
+        v, q = _unary_operand(cfg, samples)
         if v is None:
             return BlockResult(value=None, quality=q)
         r = math.tan(v)

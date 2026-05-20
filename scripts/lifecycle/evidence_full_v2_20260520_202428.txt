@@ -1,0 +1,29 @@
+# INDUVISTA Lifecycle Smoke Test — evidence log
+# Date: 2026-05-20 20:28:55
+# Result: 25 pass, 0 fail, 0 skip (266.1s)
+
+PASS: calc_evaluator: all 6 hardening markers present -- signal.signal(signal.SIGTERM, signal.signal(signal.SIGINT, while not _shutting_down, ...
+PASS: alarm_evaluator: all 6 hardening markers present -- signal.signal(signal.SIGTERM, signal.signal(signal.SIGINT, while not _should_stop, ...
+PASS: modbus_supervisor: all 4 hardening markers present -- add_signal_handler, stop_event.set(), stopped cleanly, ...
+PASS: docker-compose.yml: stop_grace_period set on 3+ workers -- found 3 occurrences
+PASS: docker-compose.yml: services wait for migrate completion -- found in 4 service definition(s)
+PASS: calc_evaluator: container running -- uptime=2.9s, container=svj_calc_evaluator
+PASS: alarm_evaluator: container running -- uptime=3.0s, container=svj_alarm_evaluator
+PASS: modbus_worker: container running -- uptime=3.1s, container=svj_modbus_worker
+PASS: calc_evaluator: 'starting' marker emitted -- WARMUP_SEC=3.0
+PASS: calc_evaluator: 'warm-up complete' marker emitted -- after WARMUP_SEC delay
+PASS: alarm_evaluator: 'starting' marker emitted -- WARMUP_SEC=3.0
+PASS: alarm_evaluator: 'warm-up complete' marker emitted -- after WARMUP_SEC delay
+PASS: modbus_supervisor: 'starting' marker emitted
+PASS: modbus_supervisor: 'tasks-started' marker emitted
+PASS: calc_evaluator: warm-up delay honored -- measured=3.001s, configured=3.0s, tolerance=±0.5s
+PASS: alarm_evaluator: warm-up delay honored -- measured=3.001s, configured=3.0s, tolerance=±0.5s
+PASS: calc_evaluator: 'stopped cleanly' marker emitted -- stop_elapsed=2.99s, captured groups=('1', '37')
+PASS: alarm_evaluator: 'stopped cleanly' marker emitted -- stop_elapsed=1.93s, captured groups=('9', '36')
+PASS: modbus_supervisor: 'stopped cleanly' marker emitted -- stop_elapsed=3.18s, captured groups=('0',)
+PASS: calc_evaluator: SIGTERM-to-exit latency within budget -- latency=2.0ms, threshold=1500ms, wall=2.94s (mostly docker orchestration)
+PASS: alarm_evaluator: SIGTERM-to-exit latency within budget -- latency=57.0ms, threshold=1500ms, wall=2.23s (mostly docker orchestration)
+PASS: calc_evaluator: SIGKILL preserved 100% of committed samples -- before=299 after=299 (fixed window [14:56:38, 14:56:59]), kill_elapsed=2.11s
+PASS: calc_evaluator: resumed writing after restart -- 53 samples in 10s post-restart
+PASS: state byte-identical across restart for all 10 stateful blocks -- example tag 2206: state preserved exactly
+PASS: Burn-in: 5 cycles completed without error accumulation -- each cycle: stop → start → warm-up → evaluating

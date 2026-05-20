@@ -43,6 +43,7 @@ from typing import Any
 from app.workers.calc_blocks.base import (
     StatefulBlock, BlockResult, InputSample, register_block,
     GOOD_QUALITY, GOOD_NON_SPECIFIC,
+    resolve_operand_spec, validate_operand_spec, operand_tag_id,
 )
 
 
@@ -64,6 +65,22 @@ def _is_high(sample: InputSample) -> bool:
         and sample.value is not None
         and sample.value > 0
     )
+
+
+def _resolve_bool_operand(
+    spec: object, sample: InputSample | None,
+) -> tuple[bool | None, int]:
+    """Decode a tag-or-constant operand spec into (bool_value, quality).
+    bool_value is None when the underlying tag sample is BAD; the worker
+    caller emits a BAD output in that case (preserving stateful state)."""
+    tag, const = resolve_operand_spec(spec)
+    if tag is not None:
+        if sample is None:
+            return None, 0  # defensive — worker should never hit this
+        if sample.quality < GOOD_QUALITY or sample.value is None:
+            return None, sample.quality
+        return sample.value > 0, GOOD_NON_SPECIFIC
+    return (const > 0), GOOD_NON_SPECIFIC
 
 
 def _bad_result(sample: InputSample, state: dict) -> tuple[BlockResult, dict]:
@@ -96,13 +113,14 @@ class OnDelayTimer(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["input"])]
+        t = operand_tag_id(cfg["input"])
+        return [t] if t is not None else []
 
     @classmethod
     def validate_config(cls, cfg):
         if "input" not in cfg:
-            raise ValueError("TON requires 'input' tag ID")
-        _validate_tag_id("TON.input", cfg["input"])
+            raise ValueError("TON requires 'input' operand")
+        validate_operand_spec("TON.input", cfg["input"])
         if "preset_ms" not in cfg:
             raise ValueError("TON requires 'preset_ms' in block_config")
         p = cfg["preset_ms"]
@@ -111,11 +129,14 @@ class OnDelayTimer(StatefulBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        s = samples[0]
-        if s.quality < GOOD_QUALITY or s.value is None:
-            return _bad_result(s, state)
+        # Tag-or-constant input. Constant is "always at its value".
+        sample = samples[0] if (operand_tag_id(cfg["input"]) is not None) else None
+        is_high_opt, q = _resolve_bool_operand(cfg["input"], sample)
+        if is_high_opt is None:
+            # BAD upstream; preserve state for clean resume
+            return BlockResult(value=None, quality=q), state
 
-        is_high = s.value > 0
+        is_high = is_high_opt
         preset_sec = cfg["preset_ms"] / 1000.0
         was_high = state.get("in_was_high", False)
         started_ts = state.get("high_started_ts")
@@ -153,13 +174,14 @@ class OffDelayTimer(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["input"])]
+        t = operand_tag_id(cfg["input"])
+        return [t] if t is not None else []
 
     @classmethod
     def validate_config(cls, cfg):
         if "input" not in cfg:
-            raise ValueError("TOF requires 'input' tag ID")
-        _validate_tag_id("TOF.input", cfg["input"])
+            raise ValueError("TOF requires 'input' operand")
+        validate_operand_spec("TOF.input", cfg["input"])
         if "preset_ms" not in cfg:
             raise ValueError("TOF requires 'preset_ms' in block_config")
         p = cfg["preset_ms"]
@@ -168,11 +190,14 @@ class OffDelayTimer(StatefulBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        s = samples[0]
-        if s.quality < GOOD_QUALITY or s.value is None:
-            return _bad_result(s, state)
+        # Tag-or-constant input. Constant is "always at its value".
+        sample = samples[0] if (operand_tag_id(cfg["input"]) is not None) else None
+        is_high_opt, q = _resolve_bool_operand(cfg["input"], sample)
+        if is_high_opt is None:
+            # BAD upstream; preserve state for clean resume
+            return BlockResult(value=None, quality=q), state
 
-        is_high = s.value > 0
+        is_high = is_high_opt
         preset_sec = cfg["preset_ms"] / 1000.0
         was_high = state.get("in_was_high", False)
         low_started = state.get("low_started_ts")
@@ -213,13 +238,14 @@ class PulseTimer(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["input"])]
+        t = operand_tag_id(cfg["input"])
+        return [t] if t is not None else []
 
     @classmethod
     def validate_config(cls, cfg):
         if "input" not in cfg:
-            raise ValueError("TP requires 'input' tag ID")
-        _validate_tag_id("TP.input", cfg["input"])
+            raise ValueError("TP requires 'input' operand")
+        validate_operand_spec("TP.input", cfg["input"])
         if "preset_ms" not in cfg:
             raise ValueError("TP requires 'preset_ms' in block_config")
         p = cfg["preset_ms"]
@@ -228,11 +254,14 @@ class PulseTimer(StatefulBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        s = samples[0]
-        if s.quality < GOOD_QUALITY or s.value is None:
-            return _bad_result(s, state)
+        # Tag-or-constant input. Constant is "always at its value".
+        sample = samples[0] if (operand_tag_id(cfg["input"]) is not None) else None
+        is_high_opt, q = _resolve_bool_operand(cfg["input"], sample)
+        if is_high_opt is None:
+            # BAD upstream; preserve state for clean resume
+            return BlockResult(value=None, quality=q), state
 
-        is_high = s.value > 0
+        is_high = is_high_opt
         preset_sec = cfg["preset_ms"] / 1000.0
         was_high = state.get("in_was_high", False)
         pulse_started = state.get("pulse_started_ts")
@@ -275,21 +304,22 @@ class RisingEdge(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["input"])]
+        t = operand_tag_id(cfg["input"])
+        return [t] if t is not None else []
 
     @classmethod
     def validate_config(cls, cfg):
         if "input" not in cfg:
-            raise ValueError("R_TRIG requires 'input' tag ID")
-        _validate_tag_id("R_TRIG.input", cfg["input"])
+            raise ValueError("R_TRIG requires 'input' operand")
+        validate_operand_spec("R_TRIG.input", cfg["input"])
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        s = samples[0]
-        if s.quality < GOOD_QUALITY or s.value is None:
-            return _bad_result(s, state)
-
-        is_high = s.value > 0
+        sample = samples[0] if (operand_tag_id(cfg["input"]) is not None) else None
+        is_high_opt, q = _resolve_bool_operand(cfg["input"], sample)
+        if is_high_opt is None:
+            return BlockResult(value=None, quality=q), state
+        is_high = is_high_opt
         was_high = state.get("prev_high", False)
         q = 1.0 if (is_high and not was_high) else 0.0
         new_state = {"prev_high": is_high}
@@ -307,21 +337,22 @@ class FallingEdge(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["input"])]
+        t = operand_tag_id(cfg["input"])
+        return [t] if t is not None else []
 
     @classmethod
     def validate_config(cls, cfg):
         if "input" not in cfg:
-            raise ValueError("F_TRIG requires 'input' tag ID")
-        _validate_tag_id("F_TRIG.input", cfg["input"])
+            raise ValueError("F_TRIG requires 'input' operand")
+        validate_operand_spec("F_TRIG.input", cfg["input"])
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        s = samples[0]
-        if s.quality < GOOD_QUALITY or s.value is None:
-            return _bad_result(s, state)
-
-        is_high = s.value > 0
+        sample = samples[0] if (operand_tag_id(cfg["input"]) is not None) else None
+        is_high_opt, q = _resolve_bool_operand(cfg["input"], sample)
+        if is_high_opt is None:
+            return BlockResult(value=None, quality=q), state
+        is_high = is_high_opt
         was_high = state.get("prev_high", False)
         q = 1.0 if (not is_high and was_high) else 0.0
         new_state = {"prev_high": is_high}
@@ -350,30 +381,50 @@ class _LatchBase(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["set"]), int(cfg["reset"])]
+        ids: list[int] = []
+        for key in ("set", "reset"):
+            t = operand_tag_id(cfg[key])
+            if t is not None:
+                ids.append(t)
+        return ids
 
     @classmethod
     def validate_config(cls, cfg):
         for key in ("set", "reset"):
             if key not in cfg:
-                raise ValueError(f"{cls.CODE} requires '{key}' tag ID")
-            _validate_tag_id(f"{cls.CODE}.{key}", cfg[key])
-        if cfg["set"] == cfg["reset"]:
+                raise ValueError(f"{cls.CODE} requires '{key}' operand")
+            validate_operand_spec(f"{cls.CODE}.{key}", cfg[key])
+        # Disallow only when BOTH are tags AND identical
+        s_tag = operand_tag_id(cfg["set"])
+        r_tag = operand_tag_id(cfg["reset"])
+        if s_tag is not None and r_tag is not None and s_tag == r_tag:
             raise ValueError(
                 f"{cls.CODE}: 'set' and 'reset' must be different tags"
             )
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        set_sample, reset_sample = samples
-        # BAD on either input -> output BAD, preserve latch state
-        if set_sample.quality < GOOD_QUALITY or set_sample.value is None:
-            return _bad_result(set_sample, state)
-        if reset_sample.quality < GOOD_QUALITY or reset_sample.value is None:
-            return _bad_result(reset_sample, state)
+        # Resolve set + reset; consume samples in spec-order
+        sample_idx = 0
+        def _consume(key):
+            nonlocal sample_idx
+            t = operand_tag_id(cfg[key])
+            if t is not None:
+                sample = samples[sample_idx]
+                sample_idx += 1
+            else:
+                sample = None
+            val, q = _resolve_bool_operand(cfg[key], sample)
+            return val, q
+        s_val, s_q = _consume("set")
+        if s_val is None:
+            return BlockResult(value=None, quality=s_q), state
+        r_val, r_q = _consume("reset")
+        if r_val is None:
+            return BlockResult(value=None, quality=r_q), state
 
-        s = set_sample.value > 0
-        r = reset_sample.value > 0
+        s = s_val
+        r = r_val
         q = state.get("q", 0.0)
 
         if cls.SET_DOMINANT:
@@ -425,27 +476,45 @@ class CountUp(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["count_up"]), int(cfg["reset"])]
+        ids: list[int] = []
+        for key in ("count_up", "reset"):
+            t = operand_tag_id(cfg[key])
+            if t is not None:
+                ids.append(t)
+        return ids
 
     @classmethod
     def validate_config(cls, cfg):
         for key in ("count_up", "reset"):
             if key not in cfg:
-                raise ValueError(f"CTU requires '{key}' tag ID")
-            _validate_tag_id(f"CTU.{key}", cfg[key])
-        if cfg["count_up"] == cfg["reset"]:
+                raise ValueError(f"CTU requires '{key}' operand")
+            validate_operand_spec(f"CTU.{key}", cfg[key])
+        cu_tag = operand_tag_id(cfg["count_up"])
+        r_tag = operand_tag_id(cfg["reset"])
+        if cu_tag is not None and r_tag is not None and cu_tag == r_tag:
             raise ValueError("CTU: 'count_up' and 'reset' must differ")
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        cu_sample, r_sample = samples
-        if cu_sample.quality < GOOD_QUALITY or cu_sample.value is None:
-            return _bad_result(cu_sample, state)
-        if r_sample.quality < GOOD_QUALITY or r_sample.value is None:
-            return _bad_result(r_sample, state)
+        sample_idx = 0
+        def _consume(key):
+            nonlocal sample_idx
+            t = operand_tag_id(cfg[key])
+            if t is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+            else:
+                s = None
+            return _resolve_bool_operand(cfg[key], s)
+        cu_opt, cu_q = _consume("count_up")
+        if cu_opt is None:
+            return BlockResult(value=None, quality=cu_q), state
+        r_opt, r_q = _consume("reset")
+        if r_opt is None:
+            return BlockResult(value=None, quality=r_q), state
 
-        cu = cu_sample.value > 0
-        r = r_sample.value > 0
+        cu = cu_opt
+        r = r_opt
         prev_cu = state.get("prev_cu", False)
         cv = state.get("cv", 0)
 
@@ -476,15 +545,22 @@ class CountDown(StatefulBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["count_down"]), int(cfg["load"])]
+        ids: list[int] = []
+        for key in ("count_down", "load"):
+            t = operand_tag_id(cfg[key])
+            if t is not None:
+                ids.append(t)
+        return ids
 
     @classmethod
     def validate_config(cls, cfg):
         for key in ("count_down", "load"):
             if key not in cfg:
-                raise ValueError(f"CTD requires '{key}' tag ID")
-            _validate_tag_id(f"CTD.{key}", cfg[key])
-        if cfg["count_down"] == cfg["load"]:
+                raise ValueError(f"CTD requires '{key}' operand")
+            validate_operand_spec(f"CTD.{key}", cfg[key])
+        cd_tag = operand_tag_id(cfg["count_down"])
+        l_tag = operand_tag_id(cfg["load"])
+        if cd_tag is not None and l_tag is not None and cd_tag == l_tag:
             raise ValueError("CTD: 'count_down' and 'load' must differ")
         lv = cfg.get("load_value", 0)
         if not isinstance(lv, int):
@@ -492,14 +568,25 @@ class CountDown(StatefulBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples, state, now_wall):
-        cd_sample, l_sample = samples
-        if cd_sample.quality < GOOD_QUALITY or cd_sample.value is None:
-            return _bad_result(cd_sample, state)
-        if l_sample.quality < GOOD_QUALITY or l_sample.value is None:
-            return _bad_result(l_sample, state)
+        sample_idx = 0
+        def _consume(key):
+            nonlocal sample_idx
+            t = operand_tag_id(cfg[key])
+            if t is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+            else:
+                s = None
+            return _resolve_bool_operand(cfg[key], s)
+        cd_opt, cd_q = _consume("count_down")
+        if cd_opt is None:
+            return BlockResult(value=None, quality=cd_q), state
+        ld_opt, ld_q = _consume("load")
+        if ld_opt is None:
+            return BlockResult(value=None, quality=ld_q), state
 
-        cd = cd_sample.value > 0
-        ld = l_sample.value > 0
+        cd = cd_opt
+        ld = ld_opt
         load_value = cfg.get("load_value", 0)
         prev_cd = state.get("prev_cd", False)
         cv = state.get("cv", load_value)

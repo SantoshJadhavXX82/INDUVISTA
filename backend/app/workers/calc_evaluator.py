@@ -41,6 +41,9 @@ from app.db import SessionLocal
 from app.workers.calc_blocks import (
     BLOCK_REGISTRY, get_block, InputSample, BlockResult,
 )
+from app.workers.calc_diagnostics import (
+    classify_error, diagnose_bad_quality,
+)
 
 
 log = logging.getLogger("calc_evaluator")
@@ -51,6 +54,19 @@ MAX_SLEEP_SEC = 0.1
 MAX_INPUT_AGE_SEC = float(os.getenv("CALC_MAX_INPUT_AGE_SEC", "300.0"))
 GOOD_QUALITY = 128
 
+# Phase 17 — startup/shutdown predictability.
+#
+# Warm-up delay: how long to wait after worker boot before the first
+# evaluation tick. Gives the Modbus side time to populate tag_values so
+# the very first cycle doesn't paint every computed tag BAD due to
+# transiently-stale inputs. Set to 0 to disable.
+WARMUP_SEC = float(os.getenv("CALC_WARMUP_SEC", "3.0"))
+
+# Graceful shutdown flag. Flipped by the SIGTERM/SIGINT handler. The
+# main loop polls this between cycles and exits cleanly when set, after
+# the in-flight cycle finishes and commits.
+_shutting_down = False
+
 
 class DeadlineExceeded(Exception):
     """Raised by the SIGALRM handler when a block exceeds its deadline."""
@@ -60,7 +76,31 @@ def _alarm_handler(signum, frame):
     raise DeadlineExceeded("evaluation exceeded deadline")
 
 
+def _shutdown_handler(signum, frame):
+    """SIGTERM / SIGINT: request graceful shutdown.
+
+    We do NOT raise from inside the signal handler. Instead, we flip a
+    flag the main loop polls. This guarantees:
+      - the currently-evaluating tag's savepoint completes (no half-write)
+      - any pending per-tag commit lands cleanly
+      - the next 'while' check sees the flag and exits
+
+    Idempotent: re-receiving SIGTERM has no extra effect (Docker may send
+    SIGTERM once then SIGKILL after the grace period).
+    """
+    global _shutting_down
+    if not _shutting_down:
+        name = signal.Signals(signum).name
+        log.info(
+            "calc_evaluator: %s received; finishing current cycle and exiting cleanly",
+            name,
+        )
+        _shutting_down = True
+
+
 signal.signal(signal.SIGALRM, _alarm_handler)
+signal.signal(signal.SIGTERM, _shutdown_handler)
+signal.signal(signal.SIGINT, _shutdown_handler)
 
 
 # ---------------------------------------------------------------------------
@@ -436,9 +476,30 @@ def tick_once(db, scheduler: SchedulerState, defs: list[CalcDef]) -> int:
     success = 0
     for d in sorted_due:
         _run_one(db, scheduler, d)
+        # Per-tag commit (Phase 17). Committing after each tag bounds
+        # the worst-case data loss on SIGKILL to a single tag's writes
+        # instead of an entire cycle's. The next tag's begin_nested()
+        # auto-opens a fresh transaction.
+        try:
+            db.commit()
+        except Exception as e:
+            # If the commit itself fails (rare), log and rollback so
+            # the next tag starts with a clean session. Don't propagate
+            # — the next cycle will reattempt this tag.
+            log.exception("commit failed after computed_tag id=%d: %s", d.id, e)
+            db.rollback()
         success += 1
 
-    db.commit()
+        # Honor an in-flight shutdown request: stop processing more
+        # tags in this cycle. The current tag is already committed.
+        if _shutting_down:
+            log.info(
+                "calc_evaluator: shutdown requested mid-cycle; "
+                "stopping after %d of %d due tags",
+                success, len(sorted_due),
+            )
+            break
+
     return success
 
 
@@ -462,24 +523,47 @@ def _run_one(db, scheduler: SchedulerState, d: CalcDef) -> None:
     is_stateful = getattr(block_cls, 'STATEFUL', False)
 
     try:
-        wanted = block_cls.inputs(d.block_config)
-        samples_by_tag = latest_inputs(db, wanted)
-        samples = [samples_by_tag[tid] for tid in wanted]
-        if is_stateful:
-            state = _load_block_state(db, d.id)
-            now_wall = time.time()
-            result, new_state = _evaluate_stateful_with_deadline(
-                block_cls, d.block_config, samples, state, now_wall, deadline_sec)
-            _save_block_state(db, d.id, new_state)
-        else:
-            result = _evaluate_with_deadline(
-                block_cls, d.block_config, samples, deadline_sec)
+        # Per-tag savepoint: any DB-level exception inside this block
+        # (a failed input fetch, a write_output type mismatch, a stale
+        # state row) triggers ROLLBACK TO SAVEPOINT automatically. That
+        # restores the outer session to a clean state — critical
+        # because the finally block below still needs to call
+        # update_stats, and Postgres would otherwise refuse every
+        # subsequent statement with 'current transaction is aborted'.
+        #
+        # Without this, one bad tag in the cycle cascades a failed
+        # transaction to every subsequent tag.
+        with db.begin_nested():
+            wanted = block_cls.inputs(d.block_config)
+            samples_by_tag = latest_inputs(db, wanted)
+            samples = [samples_by_tag[tid] for tid in wanted]
+            if is_stateful:
+                state = _load_block_state(db, d.id)
+                now_wall = time.time()
+                result, new_state = _evaluate_stateful_with_deadline(
+                    block_cls, d.block_config, samples, state, now_wall, deadline_sec)
+                _save_block_state(db, d.id, new_state)
+            else:
+                result = _evaluate_with_deadline(
+                    block_cls, d.block_config, samples, deadline_sec)
     except DeadlineExceeded:
         status = 'killed'
-        err_msg = f"exceeded {deadline_sec*1000:.0f}ms deadline"
+        err_msg = (
+            f"Evaluation deadline exceeded — this block took longer than "
+            f"its {deadline_sec*1000:.0f}ms budget. Consider raising the "
+            f"execution rate (longer interval) or simplifying the block."
+        )
     except Exception as e:
+        # Savepoint was auto-rolled back; outer transaction is usable.
+        # Classify the exception into an operator-actionable message;
+        # the full traceback still goes to the log via log.exception.
         status = 'error'
-        err_msg = f"{type(e).__name__}: {e}"
+        err_msg = classify_error(
+            e,
+            block_type=d.block_type,
+            samples_by_tag={s.tag_id: s for s in samples} if samples else {},
+            block_config=d.block_config,
+        )
         log.exception("computed_tag id=%d (%s) raised: %s", d.id, d.block_type, e)
     finally:
         duration_ms = (time.monotonic() - t0) * 1000
@@ -487,9 +571,35 @@ def _run_one(db, scheduler: SchedulerState, d: CalcDef) -> None:
         if status == 'ok' and duration_ms > budget_ms:
             status = 'overrun'
 
+        # Phase 17 — even when evaluation succeeds (status='ok'), the
+        # output can be unusable for either of TWO reasons:
+        #   1. result.quality < GOOD     — upstream BAD propagated
+        #   2. result.value is None      — block-internal "no result"
+        #                                  (no quorum, no good inputs,
+        #                                  out-of-domain, etc.)
+        # Both surface as a red dot or "BAD" label in the UI, but the
+        # root causes are different. Generate an actionable diagnostic
+        # for either case so operators don't have to guess.
+        output_unusable = result is not None and (
+            result.value is None or result.quality < GOOD_QUALITY
+        )
+        if (output_unusable
+                and status in ('ok', 'overrun')
+                and samples is not None):
+            diag = diagnose_bad_quality(
+                output_quality=result.quality,
+                samples=samples,
+                block_type=d.block_type,
+                value_is_none=(result.value is None),
+                block_config=d.block_config,
+            )
+            if diag:
+                err_msg = diag
+
         if result is not None and status in ('ok', 'overrun'):
             try:
-                write_output(db, d, result, executed_at)
+                with db.begin_nested():
+                    write_output(db, d, result, executed_at)
             except Exception as e:
                 log.exception("Failed to write output for computed_tag id=%d (target_tag=%d): %s",
                               d.id, d.effective_output_tag(), e)
@@ -507,8 +617,9 @@ def _run_one(db, scheduler: SchedulerState, d: CalcDef) -> None:
                 d.id, d.block_type, skips)
 
         try:
-            update_stats(db, d, duration_ms, status, err_msg,
-                         executed_at, next_at, skips)
+            with db.begin_nested():
+                update_stats(db, d, duration_ms, status, err_msg,
+                             executed_at, next_at, skips)
         except Exception as e:
             log.exception("Stats upsert failed for computed_tag id=%d: %s",
                           d.id, e)
@@ -521,15 +632,32 @@ def main() -> None:
     )
     log.info(
         "calc_evaluator starting (Phase 17.0b / Migration 0043): "
-        "reload=%.1fs max_input_age=%.1fs blocks_registered=%s",
-        RELOAD_SEC, MAX_INPUT_AGE_SEC, sorted(BLOCK_REGISTRY.keys()),
+        "reload=%.1fs max_input_age=%.1fs warmup=%.1fs blocks_registered=%s",
+        RELOAD_SEC, MAX_INPUT_AGE_SEC, WARMUP_SEC,
+        sorted(BLOCK_REGISTRY.keys()),
     )
+
+    # Phase 17 — warm-up. Sleep before the first cycle to let Modbus
+    # workers populate tag_values, so the first cycle doesn't paint
+    # every computed tag BAD due to transiently-stale inputs. During
+    # warm-up we still respect shutdown signals (a fast docker stop
+    # right after start should exit promptly, not wait the full delay).
+    if WARMUP_SEC > 0:
+        deadline = time.monotonic() + WARMUP_SEC
+        while time.monotonic() < deadline and not _shutting_down:
+            time.sleep(min(0.5, deadline - time.monotonic()))
+        if _shutting_down:
+            log.info("calc_evaluator: shutdown during warm-up; never ran a cycle")
+            return
+        log.info("calc_evaluator: warm-up complete, beginning evaluation")
 
     scheduler = SchedulerState()
     defs_cache: list[CalcDef] = []
     last_reload_mono = 0.0
+    cycles_run = 0
+    tags_evaluated = 0
 
-    while True:
+    while not _shutting_down:
         loop_start = time.monotonic()
 
         if loop_start - last_reload_mono > RELOAD_SEC:
@@ -549,10 +677,15 @@ def main() -> None:
             with SessionLocal() as db:
                 n = tick_once(db, scheduler, defs_cache)
                 if n > 0:
+                    cycles_run += 1
+                    tags_evaluated += n
                     log.debug("tick: %d evaluations", n)
         except Exception as e:
             log.exception("Tick failed: %s", e)
 
+        # Sleep until next scheduled tag is due, but check the shutdown
+        # flag every MAX_SLEEP_SEC slice so we respond promptly to
+        # SIGTERM rather than blocking until the next tick window.
         next_t = scheduler.earliest_next()
         now = time.monotonic()
         if next_t is None:
@@ -560,6 +693,15 @@ def main() -> None:
         else:
             sleep_for = max(0.001, next_t - now)
         time.sleep(min(sleep_for, MAX_SLEEP_SEC))
+
+    # Graceful exit. Per-tag commits inside tick_once guarantee every
+    # tag that ran is persisted. Stateful-block state is saved per-eval
+    # so no in-flight state is lost beyond the one tag interrupted by
+    # the shutdown signal (which will be re-evaluated on next boot).
+    log.info(
+        "calc_evaluator: stopped cleanly after %d cycles, %d tag evaluations",
+        cycles_run, tags_evaluated,
+    )
 
 
 if __name__ == "__main__":
