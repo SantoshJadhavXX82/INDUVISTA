@@ -78,3 +78,186 @@ body {
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }
+
+/* Phase 18 — bell-shake animation for the sidebar Alarms icon when there
+ * are active alarms. The keyframes mimic a physical bell ringing: a quick
+ * decaying oscillation that loops. Used on the BellRing icon in Nav.tsx. */
+@keyframes induvista-bell-shake {
+  0%, 70%, 100% { transform: rotate(0deg); }
+  8%  { transform: rotate(-14deg); }
+  16% { transform: rotate(12deg); }
+  24% { transform: rotate(-8deg); }
+  32% { transform: rotate(6deg); }
+  40% { transform: rotate(-4deg); }
+  48% { transform: rotate(2deg); }
+}
+.induvista-bell-shake {
+  animation: induvista-bell-shake 2s ease-in-out infinite;
+  transform-origin: top center;
+}
+/* Respect "reduce motion" preference for accessibility — show a steady icon
+ * (no animation) but keep the alert color. Operators with vestibular
+ * conditions still need to see the alarm, just without the wiggle. */
+@media (prefers-reduced-motion: reduce) {
+  .induvista-bell-shake { animation: none; }
+}
+
+/* ===========================================================================
+ * Phase 18 — iOS-inspired design token layer
+ *
+ * Two-track system: the shadcn vars above stay as-is (existing components
+ * keep working). These NEW semantic vars are what the refactored primitives
+ * (StatusPill, KpiCard, MetricStrip, etc.) consume.
+ *
+ * Why iOS palette: per-product decision — operators preferred a softer,
+ * more familiar visual language than typical SCADA dark-mode/dense.
+ *
+ * Dark mode: tokens defined for both modes but light is default. To enable
+ * dark, toggle `data-theme="dark"` on <html>. The :where() selector keeps
+ * specificity at 0 so any explicit color override still wins.
+ * ========================================================================= */
+:root {
+  /* ----- iOS system palette (light mode) ----- */
+  --ios-blue: #007AFF;
+  --ios-blue-soft: #E6F0FE;       /* tinted backgrounds */
+  --ios-blue-on-soft: #0040A0;    /* text on soft */
+
+  --ios-green: #34C759;
+  --ios-green-soft: #E5F8EB;
+  --ios-green-on-soft: #1A7A3E;
+
+  --ios-red: #FF3B30;
+  --ios-red-soft: #FFE9E7;
+  --ios-red-on-soft: #B0271F;
+
+  --ios-orange: #FF9500;
+  --ios-orange-soft: #FFEFD9;
+  --ios-orange-on-soft: #9A5800;
+
+  --ios-yellow: #FFCC00;
+  --ios-yellow-soft: #FFF7CC;
+  --ios-yellow-on-soft: #6B5200;
+
+  --ios-indigo: #5856D6;
+  --ios-indigo-soft: #ECECFB;
+  --ios-indigo-on-soft: #2F2E80;
+
+  --ios-purple: #AF52DE;
+  --ios-purple-soft: #F4E7FB;
+  --ios-purple-on-soft: #6B2F8C;
+
+  --ios-pink: #FF2D55;
+  --ios-pink-soft: #FFE5EC;
+  --ios-pink-on-soft: #99203A;
+
+  --ios-teal: #5AC8FA;
+  --ios-teal-soft: #E2F4FD;
+  --ios-teal-on-soft: #1A5F80;
+
+  /* ----- iOS grayscale (light mode) ----- */
+  --ios-gray-1: #8E8E93;
+  --ios-gray-2: #AEAEB2;
+  --ios-gray-3: #C7C7CC;
+  --ios-gray-4: #D1D1D6;
+  --ios-gray-5: #E5E5EA;
+  --ios-gray-6: #F2F2F7;
+
+  /* ----- Surface semantics (light) ----- */
+  --bg-grouped:        #F2F2F7;   /* the page background under "grouped lists" */
+  --bg-elevated:       #FFFFFF;   /* white card floating on grouped bg */
+  --bg-elevated-soft:  #FAFAFC;   /* nested grouped row inside an elevated card */
+  --separator:         rgba(60, 60, 67, 0.18);
+  --separator-strong:  rgba(60, 60, 67, 0.36);
+
+  /* ----- Status semantics — what UI components reach for ----- */
+  --status-good:    var(--ios-green);
+  --status-warn:    var(--ios-orange);
+  --status-error:   var(--ios-red);
+  --status-info:    var(--ios-blue);
+  --status-neutral: var(--ios-gray-1);
+
+  --status-good-soft:    var(--ios-green-soft);
+  --status-warn-soft:    var(--ios-orange-soft);
+  --status-error-soft:   var(--ios-red-soft);
+  --status-info-soft:    var(--ios-blue-soft);
+  --status-neutral-soft: var(--ios-gray-6);
+
+  --status-good-on-soft:    var(--ios-green-on-soft);
+  --status-warn-on-soft:    var(--ios-orange-on-soft);
+  --status-error-on-soft:   var(--ios-red-on-soft);
+  --status-info-on-soft:    var(--ios-blue-on-soft);
+  --status-neutral-on-soft: #3C3C43;
+
+  /* ----- Alarm-severity ramp (light) — maps to your existing
+     vCritical / Critical / High / Medium / Low / Info / Non-Critical
+     so the same data already in the DB drives the right color. ----- */
+  --severity-vcritical:    var(--ios-red);
+  --severity-vcritical-bg: var(--ios-red-soft);
+  --severity-vcritical-fg: var(--ios-red-on-soft);
+
+  --severity-critical:    #DC2626;
+  --severity-critical-bg: #FCEBEB;
+  --severity-critical-fg: #7F1D1D;
+
+  --severity-high:    var(--ios-orange);
+  --severity-high-bg: var(--ios-orange-soft);
+  --severity-high-fg: var(--ios-orange-on-soft);
+
+  --severity-medium:    var(--ios-yellow);
+  --severity-medium-bg: var(--ios-yellow-soft);
+  --severity-medium-fg: var(--ios-yellow-on-soft);
+
+  --severity-low:    var(--ios-green);
+  --severity-low-bg: var(--ios-green-soft);
+  --severity-low-fg: var(--ios-green-on-soft);
+
+  --severity-info:    var(--ios-blue);
+  --severity-info-bg: var(--ios-blue-soft);
+  --severity-info-fg: var(--ios-blue-on-soft);
+
+  --severity-noncritical:    var(--ios-gray-1);
+  --severity-noncritical-bg: var(--ios-gray-6);
+  --severity-noncritical-fg: #3C3C43;
+
+  /* ----- Radius scale (iOS-tuned) ----- */
+  --radius-pill: 999px;
+  --radius-xs: 4px;
+  --radius-sm-2: 6px;     /* pill badges */
+  --radius-md-2: 10px;    /* buttons */
+  --radius-lg-2: 14px;    /* cards — iOS signature softness */
+  --radius-xl-2: 20px;    /* large containers */
+
+  /* ----- Spacing scale ----- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+}
+
+/* ----- Dark mode token overrides (preserved for future activation) ------
+ * Activate by adding `data-theme="dark"` to <html>. iOS color palette
+ * shifts to its dark variants; soft backgrounds become deeper tints. */
+:where([data-theme="dark"]) {
+  --ios-blue: #0A84FF;       --ios-blue-soft: #0A2A52;       --ios-blue-on-soft: #7FB8FF;
+  --ios-green: #30D158;      --ios-green-soft: #0E3A1F;      --ios-green-on-soft: #6DE38C;
+  --ios-red: #FF453A;        --ios-red-soft: #4A1410;        --ios-red-on-soft: #FF8E87;
+  --ios-orange: #FF9F0A;     --ios-orange-soft: #3D2400;     --ios-orange-on-soft: #FFBE5C;
+  --ios-yellow: #FFD60A;     --ios-yellow-soft: #3B3000;     --ios-yellow-on-soft: #FFE56B;
+  --ios-indigo: #5E5CE6;     --ios-indigo-soft: #1A1A4A;     --ios-indigo-on-soft: #9C9AFF;
+  --ios-purple: #BF5AF2;     --ios-purple-soft: #3C1A4F;     --ios-purple-on-soft: #DE99FF;
+  --ios-pink: #FF375F;       --ios-pink-soft: #4A0F1F;       --ios-pink-on-soft: #FF8AA1;
+  --ios-teal: #64D2FF;       --ios-teal-soft: #103340;       --ios-teal-on-soft: #9BE3FF;
+
+  --ios-gray-1: #8E8E93;
+  --ios-gray-6: #1C1C1E;
+
+  --bg-grouped:        #000000;
+  --bg-elevated:       #1C1C1E;
+  --bg-elevated-soft:  #2C2C2E;
+  --separator:         rgba(84, 84, 88, 0.65);
+  --separator-strong:  rgba(84, 84, 88, 0.85);
+}

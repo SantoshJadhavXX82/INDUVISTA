@@ -27,6 +27,8 @@ from typing import Any
 from app.workers.calc_blocks.base import (
     BaseBlock, BlockResult, InputSample, register_block,
     GOOD_QUALITY, GOOD_NON_SPECIFIC,
+    resolve_operand_spec, validate_operand_spec, operand_tag_id,
+    collect_list_tag_ids,
 )
 
 
@@ -40,45 +42,120 @@ def _validate_input_list_config(
     min_inputs: int = 1,
     max_inputs: int = 100,
 ) -> None:
-    """Common validation for blocks that take an 'inputs' list of tag IDs."""
+    """Common validation for blocks that take an 'inputs' list of
+    operand specs (tag id, {tag: id}, or {value: number}).
+
+    Backward compatible: existing configs with bare-int lists continue
+    to work because resolve_operand_spec() accepts bare positive ints.
+    """
     if "inputs" not in block_config:
         raise ValueError(
-            f"{block_name} requires 'inputs' in block_config - a list of tag IDs"
+            f"{block_name} requires 'inputs' in block_config - a list of "
+            f"tag ids or {{tag: id}} / {{value: number}} operand specs"
         )
     inputs = block_config["inputs"]
     if not isinstance(inputs, list) or len(inputs) < min_inputs:
         raise ValueError(
-            f"{block_name} 'inputs' must be a list of at least {min_inputs} tag IDs"
+            f"{block_name} 'inputs' must be a list of at least {min_inputs} items"
         )
     if len(inputs) > max_inputs:
         raise ValueError(
             f"{block_name} supports at most {max_inputs} inputs; "
             f"split into nested blocks for larger sets."
         )
-    for x in inputs:
-        if not isinstance(x, int) or x <= 0:
-            raise ValueError(
-                f"{block_name} input {x!r} is not a positive integer tag ID"
-            )
-    if len(set(inputs)) != len(inputs):
-        raise ValueError(f"{block_name} inputs must be unique")
+    for i, spec in enumerate(inputs):
+        validate_operand_spec(f"{block_name} inputs[{i}]", spec)
+    # Tag ids must be unique among tag-typed operands; constants can repeat
+    tag_ids = collect_list_tag_ids(inputs)
+    if len(set(tag_ids)) != len(tag_ids):
+        raise ValueError(f"{block_name} tag inputs must be unique")
 
 
-def _good_values(samples: list[InputSample]) -> list[float]:
-    """Extract value from samples whose value is not None.
+def _good_values(cfg: dict, samples: list[InputSample]) -> list[float]:
+    """Extract numeric values from cfg['inputs'] + matching samples.
+
+    Tag operands contribute their sample.value (None values dropped).
+    Constant operands ({value: n}) contribute their constant.
 
     Note this does NOT filter by quality - quality-aware filtering is
-    handled per-block. This helper just keeps numeric/non-numeric out.
+    handled per-block via _output_quality. Constants always count.
     """
-    return [s.value for s in samples if s.value is not None]
+    inputs = cfg.get("inputs", []) or []
+    out: list[float] = []
+    sample_idx = 0
+    for spec in inputs:
+        tag, const = resolve_operand_spec(spec)
+        if tag is not None:
+            if sample_idx >= len(samples):
+                # Worker bug: inputs() vs evaluate() out of sync.
+                # Defensive — skip rather than crash.
+                continue
+            s = samples[sample_idx]
+            sample_idx += 1
+            if s.value is not None:
+                out.append(float(s.value))
+        else:
+            out.append(float(const))
+    return out
 
 
-def _output_quality(samples: list[InputSample]) -> int:
-    """Default propagation: worst input quality, or GOOD_NON_SPECIFIC
-    if all inputs are GOOD (>= 128)."""
-    if not samples:
+def _resolve_weight_spec(spec) -> tuple[int | None, float | None]:
+    """Resolve a WEIGHTED_AVG weight spec.
+
+    Unlike resolve_operand_spec, bare numbers (int OR float) are
+    interpreted as CONSTANTS, not tag ids. This preserves legacy
+    weights:[1.0, 0.5, 1.0] and [1, 2, 1] semantics — those numbers
+    were always meant to be multiplicative weights, never tag refs.
+
+    To use a tag as a weight, wrap it explicitly as {'tag': N}.
+    """
+    import math
+    if isinstance(spec, bool):
+        raise ValueError(
+            "weight must not be boolean; use {value: 0/1} for boolean weights"
+        )
+    if isinstance(spec, (int, float)):
+        if isinstance(spec, float) and not math.isfinite(spec):
+            raise ValueError(f"weight float must be finite, got {spec!r}")
+        return None, float(spec)
+    if isinstance(spec, dict):
+        if "tag" in spec:
+            t = spec["tag"]
+            if (not isinstance(t, int)) or isinstance(t, bool) or t <= 0:
+                raise ValueError(
+                    f"weight 'tag' must be a positive int, got {t!r}"
+                )
+            return t, None
+        if "value" in spec:
+            v = spec["value"]
+            if (not isinstance(v, (int, float))) or isinstance(v, bool):
+                raise ValueError(
+                    f"weight 'value' must be a number, got {type(v).__name__}"
+                )
+            return None, float(v)
+        raise ValueError(
+            f"weight object needs 'tag' or 'value' key; "
+            f"got keys {list(spec.keys())}"
+        )
+    raise ValueError(
+        f"weight must be a number, {{'tag': id}}, or {{'value': number}}; "
+        f"got {type(spec).__name__}"
+    )
+
+
+def _output_quality(cfg: dict, samples: list[InputSample]) -> int:
+    """Default propagation: worst quality across TAG operands; constants
+    don't drag quality down (they're inline GOOD). If there are no
+    inputs at all → BAD. If only constants → GOOD_NON_SPECIFIC."""
+    inputs = cfg.get("inputs", []) or []
+    if not inputs:
         return 0
-    worst = min(s.quality for s in samples)
+    # Only tag operands have a quality; constants are inherently GOOD.
+    tag_qualities = [s.quality for s in samples] if samples else []
+    if not tag_qualities:
+        # Pure-constant config → all known-good
+        return GOOD_NON_SPECIFIC
+    worst = min(tag_qualities)
     return GOOD_NON_SPECIFIC if worst >= GOOD_QUALITY else worst
 
 
@@ -92,7 +169,7 @@ class AvgOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -100,11 +177,11 @@ class AvgOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         return BlockResult(value=sum(vals) / len(vals),
-                           quality=_output_quality(samples))
+                           quality=_output_quality(cfg, samples))
 
 
 class MinOf(BaseBlock):
@@ -113,7 +190,7 @@ class MinOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -121,10 +198,10 @@ class MinOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
-        return BlockResult(value=min(vals), quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
+        return BlockResult(value=min(vals), quality=_output_quality(cfg, samples))
 
 
 class MaxOf(BaseBlock):
@@ -133,7 +210,7 @@ class MaxOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -141,10 +218,10 @@ class MaxOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
-        return BlockResult(value=max(vals), quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
+        return BlockResult(value=max(vals), quality=_output_quality(cfg, samples))
 
 
 class MedianOf(BaseBlock):
@@ -154,7 +231,7 @@ class MedianOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -162,11 +239,11 @@ class MedianOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         return BlockResult(value=statistics.median(vals),
-                           quality=_output_quality(samples))
+                           quality=_output_quality(cfg, samples))
 
 
 class ModeOf(BaseBlock):
@@ -176,7 +253,7 @@ class ModeOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -184,11 +261,11 @@ class ModeOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         modes = statistics.multimode(vals)
-        return BlockResult(value=min(modes), quality=_output_quality(samples))
+        return BlockResult(value=min(modes), quality=_output_quality(cfg, samples))
 
 
 class RangeOf(BaseBlock):
@@ -197,7 +274,7 @@ class RangeOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -205,11 +282,11 @@ class RangeOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         return BlockResult(value=max(vals) - min(vals),
-                           quality=_output_quality(samples))
+                           quality=_output_quality(cfg, samples))
 
 
 # ===========================================================================
@@ -223,7 +300,7 @@ class StddevOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -232,11 +309,11 @@ class StddevOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if len(vals) < 2:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         return BlockResult(value=statistics.stdev(vals),
-                           quality=_output_quality(samples))
+                           quality=_output_quality(cfg, samples))
 
 
 class VarianceOf(BaseBlock):
@@ -246,7 +323,7 @@ class VarianceOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -254,11 +331,11 @@ class VarianceOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if len(vals) < 2:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         return BlockResult(value=statistics.variance(vals),
-                           quality=_output_quality(samples))
+                           quality=_output_quality(cfg, samples))
 
 
 class RmsOf(BaseBlock):
@@ -268,7 +345,7 @@ class RmsOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -276,12 +353,12 @@ class RmsOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         mean_sq = sum(v * v for v in vals) / len(vals)
         return BlockResult(value=math.sqrt(mean_sq),
-                           quality=_output_quality(samples))
+                           quality=_output_quality(cfg, samples))
 
 
 # ===========================================================================
@@ -294,7 +371,7 @@ class ProductOf(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -302,13 +379,13 @@ class ProductOf(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         prod = 1.0
         for v in vals:
             prod *= v
-        return BlockResult(value=prod, quality=_output_quality(samples))
+        return BlockResult(value=prod, quality=_output_quality(cfg, samples))
 
 
 class GeometricMean(BaseBlock):
@@ -317,7 +394,7 @@ class GeometricMean(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -325,9 +402,9 @@ class GeometricMean(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         # Any non-positive value invalidates the geometric mean.
         # Mark quality as BAD rather than producing a complex/NaN result.
         if any(v <= 0 for v in vals):
@@ -335,7 +412,7 @@ class GeometricMean(BaseBlock):
         # Use log-sum-exp pattern for numerical stability on large products.
         return BlockResult(
             value=math.exp(sum(math.log(v) for v in vals) / len(vals)),
-            quality=_output_quality(samples),
+            quality=_output_quality(cfg, samples),
         )
 
 
@@ -345,7 +422,7 @@ class HarmonicMean(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -353,15 +430,15 @@ class HarmonicMean(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        vals = _good_values(samples)
+        vals = _good_values(cfg, samples)
         if not vals:
-            return BlockResult(value=None, quality=_output_quality(samples))
+            return BlockResult(value=None, quality=_output_quality(cfg, samples))
         if any(v == 0 for v in vals):
             # Division by zero would occur. Return BAD quality.
             return BlockResult(value=None, quality=0)
         return BlockResult(
             value=len(vals) / sum(1.0 / v for v in vals),
-            quality=_output_quality(samples),
+            quality=_output_quality(cfg, samples),
         )
 
 
@@ -379,7 +456,7 @@ class WeightedAvg(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -396,25 +473,77 @@ class WeightedAvg(BaseBlock):
                 f"WEIGHTED_AVG: weights length {len(weights)} != "
                 f"inputs length {len(cfg['inputs'])}"
             )
-        for w in weights:
-            if not isinstance(w, (int, float)) or w <= 0:
+        # Weights use the weight-aware resolver: bare numbers are
+        # CONSTANTS (legacy weights:[1.0, 0.5, ...] semantics), not
+        # tag ids. To use a tag as a weight, wrap as {tag: N}.
+        for i, w in enumerate(weights):
+            tag, const = _resolve_weight_spec(w)
+            if tag is None and const <= 0:
                 raise ValueError(
-                    f"WEIGHTED_AVG weight {w!r} must be a positive number"
+                    f"WEIGHTED_AVG weights[{i}]={const!r} must be positive"
                 )
 
     @classmethod
+    def inputs(cls, cfg):
+        # Tag ids come from inputs FIRST, then from weights — matches the
+        # sample order the worker delivers them in evaluate().
+        # For weights, only the explicit {tag: N} form fetches; bare
+        # numbers are constants and need no sample.
+        weight_tags = [
+            _resolve_weight_spec(w)[0]
+            for w in (cfg.get("weights", []) or [])
+        ]
+        weight_tag_ids = [t for t in weight_tags if t is not None]
+        return collect_list_tag_ids(cfg.get("inputs", [])) + weight_tag_ids
+
+    @classmethod
     def evaluate(cls, cfg, samples):
-        weights = cfg["weights"]
-        # Align weights with sample order, dropping samples with no value.
-        paired = [(s.value, w) for s, w in zip(samples, weights)
-                  if s.value is not None]
-        if not paired:
-            return BlockResult(value=None, quality=_output_quality(samples))
-        weighted_sum = sum(v * w for v, w in paired)
-        weight_total = sum(w for _, w in paired)
+        inputs_specs = cfg.get("inputs", []) or []
+        weights_specs = cfg.get("weights", []) or []
+        n_input_tags = sum(1 for s in inputs_specs if operand_tag_id(s) is not None)
+        input_samples = samples[:n_input_tags]
+        weight_samples = samples[n_input_tags:]
+
+        # Resolve each (value, weight) pair, skipping items where the
+        # tag sample is BAD (matches legacy behavior).
+        in_idx = 0
+        w_idx = 0
+        weighted_sum = 0.0
+        weight_total = 0.0
+        worst_q = GOOD_NON_SPECIFIC
+        for v_spec, w_spec in zip(inputs_specs, weights_specs):
+            v_tag, v_const = resolve_operand_spec(v_spec)
+            if v_tag is not None:
+                s = input_samples[in_idx]
+                in_idx += 1
+                worst_q = min(worst_q, s.quality)
+                if s.value is None:
+                    continue
+                value = float(s.value)
+            else:
+                value = float(v_const)
+
+            # Weights use the weight-aware resolver (bare num = const)
+            w_tag, w_const = _resolve_weight_spec(w_spec)
+            if w_tag is not None:
+                s = weight_samples[w_idx]
+                w_idx += 1
+                worst_q = min(worst_q, s.quality)
+                if s.value is None or s.value <= 0:
+                    continue
+                weight = float(s.value)
+            else:
+                weight = float(w_const)
+
+            weighted_sum += value * weight
+            weight_total += weight
+
+        out_q = GOOD_NON_SPECIFIC if worst_q >= GOOD_QUALITY else worst_q
+        if weight_total <= 0:
+            return BlockResult(value=None, quality=out_q)
         return BlockResult(
             value=weighted_sum / weight_total,
-            quality=_output_quality(samples),
+            quality=out_q,
         )
 
 
@@ -430,7 +559,7 @@ class CountGood(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -438,8 +567,15 @@ class CountGood(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
+        # Count tag operands with GOOD quality + every constant operand
+        # (constants are by definition inline-good).
         count = sum(1 for s in samples if s.quality >= GOOD_QUALITY)
-        return BlockResult(value=float(count), quality=GOOD_NON_SPECIFIC)
+        const_count = sum(
+            1 for spec in (cfg.get("inputs", []) or [])
+            if operand_tag_id(spec) is None
+        )
+        return BlockResult(value=float(count + const_count),
+                           quality=GOOD_NON_SPECIFIC)
 
 
 class CountNonzero(BaseBlock):
@@ -449,7 +585,7 @@ class CountNonzero(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -457,8 +593,16 @@ class CountNonzero(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        count = sum(1 for s in samples
-                    if s.value is not None and s.value != 0)
+        # Count tag samples with a non-zero numeric value + constants
+        # whose embedded value is non-zero.
+        count = sum(
+            1 for s in samples
+            if s.value is not None and s.value != 0
+        )
+        for spec in (cfg.get("inputs", []) or []):
+            tag, const = resolve_operand_spec(spec)
+            if tag is None and const != 0:
+                count += 1
         return BlockResult(value=float(count), quality=GOOD_NON_SPECIFIC)
 
 

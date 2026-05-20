@@ -163,14 +163,18 @@ export function CreateCalcModal({
       if (isEditMode && existingCalc) {
         // PATCH only what's editable. Include output_tag_id always
         // (so switching from external back to internal works - we
-        // explicitly send null).
-        const body = {
+        // explicitly send null). Include data_type only when changed
+        // so we don't churn the underlying tag row on no-op saves.
+        const body: Record<string, unknown> = {
           description: description.trim() || null,
           block_config: blockConfig,
           execution_rate_ms: rateMs,
           enabled,
           output_tag_id,
         };
+        if (dataType !== existingCalc.data_type) {
+          body.data_type = dataType;
+        }
         const res = await fetch(`/api/computed-tags/${existingCalc.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
@@ -405,24 +409,29 @@ export function CreateCalcModal({
                   <div>
                     <label className="text-[11px] uppercase tracking-wider text-muted-foreground mb-0.5 block">
                       Data type
-                      {isEditMode && (
-                        <span className="ml-2 normal-case tracking-normal">(locked)</span>
+                      {isEditMode && dataType !== existingCalc?.data_type && (
+                        <span className="ml-2 normal-case tracking-normal text-amber-700">
+                          · changed
+                        </span>
                       )}
                     </label>
-                    {isEditMode ? (
-                      <div className="text-xs px-2 py-1.5 bg-card border border-border rounded font-mono">
-                        {existingCalc?.data_type}
-                      </div>
-                    ) : (
-                      <select
-                        className="h-7 text-xs bg-card border border-border rounded px-2 w-full"
-                        value={dataType}
-                        onChange={(e) => setDataType(e.target.value)}
-                      >
-                        {DATA_TYPES.map((t) => (
-                          <option key={t} value={t}>{t}</option>
-                        ))}
-                      </select>
+                    <select
+                      className="h-7 text-xs bg-card border border-border rounded px-2 w-full"
+                      value={dataType}
+                      onChange={(e) => setDataType(e.target.value)}
+                    >
+                      {DATA_TYPES.map((t) => (
+                        <option key={t} value={t}>{t}</option>
+                      ))}
+                    </select>
+                    {isEditMode && dataType !== existingCalc?.data_type && (
+                      <p className="mt-1 text-[10px] text-amber-700 bg-amber-50
+                                    border border-amber-300 rounded px-1.5 py-1
+                                    leading-snug">
+                        Changing data type may affect downstream tags or dashboards
+                        that read this tag. Stored values are unchanged; only the
+                        display/interpretation type changes.
+                      </p>
                     )}
                   </div>
                 </div>
@@ -481,6 +490,7 @@ export function CreateCalcModal({
                       blockCode={blockCode}
                       blockConfig={blockConfig}
                       onChange={setBlockConfig}
+                      isEditMode={isEditMode}
                     />
                   </div>
                 )}

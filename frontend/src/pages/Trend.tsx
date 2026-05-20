@@ -35,6 +35,7 @@ import { Input } from "@/components/ui/input";
 
 import TrendChart, { type TrendChartHandle } from "@/components/TrendChart";
 import TagPicker from "@/components/TagPicker";
+import { PageHeader } from "@/components/ui/page-header";
 import TimeRangePicker, {
   type TimeRange,
   makePresetRange,
@@ -345,24 +346,33 @@ export default function Trend() {
 
   return (
     <div className="space-y-3 p-4">
+      <PageHeader
+        title="Trend"
+        subtitle={
+          mode === "live"
+            ? `Live mode · last ${liveWindowMinutes} minute${liveWindowMinutes === 1 ? "" : "s"}${paused ? " · paused" : ""}`
+            : "Historical mode"
+        }
+        actions={
+          historyQuery.dataUpdatedAt > 0 ? (
+            <span
+              className="text-[11px] tabular-nums"
+              style={{ color: "var(--ios-gray-1)" }}
+            >
+              Updated {formatRelative(historyQuery.dataUpdatedAt)}
+            </span>
+          ) : undefined
+        }
+      />
       {/* ============ Header / Toolbar ============================== */}
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between gap-3 flex-wrap">
             <CardTitle className="flex items-center gap-3 text-base">
-              <span className="flex items-center gap-2">
-                <TrendingUp className="h-4 w-4" />
-                Trend
-              </span>
               <ModeToggle value={mode} onChange={setMode} />
               <ModeBadge mode={mode} paused={paused} />
             </CardTitle>
             <div className="flex items-center gap-2 flex-wrap">
-              {historyQuery.dataUpdatedAt > 0 && (
-                <span className="text-[11px] text-muted-foreground tabular-nums">
-                  Updated {formatRelative(historyQuery.dataUpdatedAt)}
-                </span>
-              )}
               {mode === "historical" ? (
                 <TimeRangePicker
                   value={historicalRange}

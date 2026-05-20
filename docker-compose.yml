@@ -102,6 +102,9 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # Workers need a moment to drain in-flight Modbus reads and flush the
+    # store-and-forward SQLite buffer. 15s is comfortable headroom.
+    stop_grace_period: 15s
     volumes:
       - ./backend/app:/app/app
       # Durable local buffer for store-and-forward. Survives container
@@ -122,8 +125,12 @@ services:
       env_file:
         - .env
       depends_on:
-        - postgres
-        - valkey
+        postgres:
+          condition: service_healthy
+        migrate:
+          condition: service_completed_successfully
+      # Same rationale as calc_evaluator — drain current tick before exit.
+      stop_grace_period: 15s
       volumes:
         - ./backend/app:/app/app
       command: ["python", "-m", "app.workers.alarm_evaluator"]
@@ -135,8 +142,15 @@ services:
       env_file:
         - .env
       depends_on:
-        - postgres
-        - valkey
+        postgres:
+          condition: service_healthy
+        migrate:
+          condition: service_completed_successfully
+      # Docker's default SIGTERM grace is 10s; the worker's graceful
+      # shutdown finishes the in-flight cycle (typically <2s for 60 tags)
+      # before exiting. If you have hundreds of tags or very long cycles
+      # bump this; otherwise the default is fine.
+      stop_grace_period: 15s
       volumes:
         - ./backend/app:/app/app
       command: ["python", "-m", "app.workers.calc_evaluator"]

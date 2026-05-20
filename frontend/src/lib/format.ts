@@ -118,36 +118,66 @@ export function formatRelative(v: string | Date | null | undefined): string {
 /**
  * Format a finite floating-point number for display.
  *
- * Threshold philosophy:
+ * Phase 17 design point: operators want to see the actual magnitude
+ * even for large totalizer values (e.g. 1,507,000,000 MJ of cumulative
+ * energy), NOT "1.507e+9". Scientific notation hides the magnitude in
+ * a way that's hard to scan at a glance. So:
  *
- *   • Scientific notation is reserved for values that are genuinely too
- *     large or too small to read as plain decimals — abs ≥ 1e7 or, when
- *     non-zero, abs < 1e-4. Everything in between renders as a regular
- *     decimal, so 0.01, 0.001, 94.9, and 12345 all show as themselves.
+ *   • Plain digits everywhere up to ~15 significant digits — that's
+ *     the precision ceiling of IEEE 754 double anyway, so showing more
+ *     would be lying. Beyond that, we fall back to exponential to be
+ *     honest about precision loss.
  *
- *   • Float32 precision quirk: Daniel's "0.01" arrives on the wire as
- *     IEEE 754 float32 0x3C23D70A = 0.009999999776482582 — strictly less
- *     than 0.01 in float64 arithmetic. A naive "abs < 0.01 → toExponential"
- *     branch trips on this and emits "1.00e-2". This formatter rounds with
- *     toFixed(4) instead, so 0.009999… → "0.0100" → "0.01" after trailing-
- *     zero strip.
+ *   • Very small magnitudes (abs < 1e-4) still use exponential since
+ *     0.0000001 is genuinely unreadable as a long string of zeros.
+ *
+ *   • Float32 precision quirk: "0.01" arrives on the wire as IEEE 754
+ *     float32 0x3C23D70A = 0.009999999776482582 — strictly less than
+ *     0.01 in float64 arithmetic. toFixed() rounds correctly so
+ *     0.009999… → "0.0100" → "0.01" after trailing-zero strip.
  *
  *   • Trailing zeros are stripped for readability: "94.9000" → "94.9",
- *     "0.0100" → "0.01", "1234.00" → "1234". This is purely cosmetic;
- *     the underlying value is unchanged.
+ *     "0.0100" → "0.01", "1234.00" → "1234". Purely cosmetic.
+ *
+ *   • Big-number readability: integer-magnitude values (>= 1) render
+ *     with thousands separators ("1,507,000,000") so the operator can
+ *     count digits without finger-pointing at the screen.
  *
  * Decimal-count tiering is coarser for big numbers and finer for small
- * ones, keeping roughly four significant digits across the range.
+ * ones, keeping roughly four significant digits in the fractional part.
  */
 function formatFloatMagnitude(d: number): string {
   const abs = Math.abs(d);
   if (abs === 0) return "0";
 
-  // Only truly extreme values get scientific notation.
-  if (abs >= 1e7) return d.toExponential(3);
+  // Genuinely too small to read as a decimal — exponential is clearer.
   if (abs < 1e-4) return d.toExponential(3);
 
-  // Pick a decimal count that gives ~4 significant digits.
+  // Beyond IEEE-754 double precision (~15-17 sig digits): exponential
+  // is more honest than printing fake digits.
+  if (abs >= 1e15) return d.toExponential(6);
+
+  // Big integer-magnitude values: render as plain digits with
+  // thousands separators. "1,507,000,000" not "1.507e+9".
+  if (abs >= 1e7) {
+    // Pick a decimal count that keeps ~4 sig digits in the fractional
+    // part while staying readable.
+    let decimals: number;
+    if (abs >= 1e12) decimals = 0;          // trillions: no decimals
+    else if (abs >= 1e9) decimals = 1;      // billions: 1 decimal
+    else if (abs >= 1e8) decimals = 2;      // hundred-millions: 2
+    else decimals = 3;                       // ten-millions: 3
+    const s = d.toFixed(decimals);
+    // Apply thousands separators to the integer part only.
+    const [intPart, fracPart] = s.split(".");
+    const withSeps = Number(intPart).toLocaleString("en-US");
+    const stripped = fracPart
+      ? `${withSeps}.${fracPart}`.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")
+      : withSeps;
+    return stripped;
+  }
+
+  // Mid-range: pick a decimal count that gives ~4 significant digits.
   let decimals: number;
   if (abs >= 1000) decimals = 2;         // 12345.67
   else if (abs >= 10) decimals = 3;      // 94.900 → 94.9
@@ -156,8 +186,14 @@ function formatFloatMagnitude(d: number): string {
   else decimals = 5;                     // 0.0001 → 0.0001
 
   const s = d.toFixed(decimals);
+  // Add thousands separators for the integer part when the value is >= 1000.
+  if (abs >= 1000) {
+    const [intPart, fracPart] = s.split(".");
+    const withSeps = Number(intPart).toLocaleString("en-US");
+    const joined = fracPart ? `${withSeps}.${fracPart}` : withSeps;
+    return joined.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
+  }
   // Strip trailing zeros after the decimal point, then a lone trailing dot.
-  //   "94.9000" → "94.9"   "0.0100" → "0.01"   "1234.00" → "1234"
   return s.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
 }
 

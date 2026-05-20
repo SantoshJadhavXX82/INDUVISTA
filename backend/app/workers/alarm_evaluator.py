@@ -509,16 +509,50 @@ def _default_message(rule: Rule, value: float) -> str:
 # Main loop
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Lifecycle — startup/shutdown predictability (Phase 17 hardening).
+#
+# Pattern matches calc_evaluator.py — same guarantees:
+#   • SIGTERM/SIGINT sets a flag, never raises from the handler
+#   • main loop is `while not _should_stop` with sub-second poll
+#   • optional warm-up delay before the first cycle
+#   • clear log markers at start, warm-up complete, stop
+#   • cycle/rule counters in the exit log for forensic clarity
+# ---------------------------------------------------------------------------
+
 _should_stop = False
+
+# Warm-up grace before first cycle. Lets the Modbus side populate
+# tag_values so alarm rules don't all fire MISSING_INPUT on first tick.
+# Set CALC_WARMUP_SEC=0 to disable.
+WARMUP_SEC = float(os.getenv("ALARM_WARMUP_SEC", "3.0"))
+
+# Sleep tick — even when waiting between cycles, we never block longer
+# than this so SIGTERM is detected promptly (default 100ms).
+_SLEEP_CHUNK_SEC = 0.1
 
 
 def _install_sig_handlers() -> None:
     def stop(signum, _frame):
         global _should_stop
-        log.info("got signal %d, shutting down after current tick", signum)
-        _should_stop = True
+        if not _should_stop:
+            name = signal.Signals(signum).name
+            log.info(
+                "alarm_evaluator: %s received; finishing current tick and exiting cleanly",
+                name,
+            )
+            _should_stop = True
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+
+
+def _responsive_sleep(seconds: float) -> None:
+    """Sleep up to `seconds`, but wake every _SLEEP_CHUNK_SEC to check
+    the shutdown flag. Returns early if _should_stop is set."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not _should_stop:
+        remaining = deadline - time.monotonic()
+        time.sleep(min(_SLEEP_CHUNK_SEC, remaining))
 
 
 def run() -> None:
@@ -528,12 +562,24 @@ def run() -> None:
     )
     _install_sig_handlers()
     log.info(
-        "alarm_evaluator starting (tick=%.2fs, reload=%.2fs, max_age=%.0fs)",
-        EVAL_TICK_SEC, RULE_RELOAD_SEC, MAX_VALUE_AGE_SEC,
+        "alarm_evaluator starting (tick=%.2fs, reload=%.2fs, max_age=%.0fs, warmup=%.1fs)",
+        EVAL_TICK_SEC, RULE_RELOAD_SEC, MAX_VALUE_AGE_SEC, WARMUP_SEC,
     )
+
+    # Warm-up — same logic as calc_evaluator. Respects shutdown so a
+    # docker stop right after start exits in <100ms rather than the
+    # full warm-up window.
+    if WARMUP_SEC > 0:
+        _responsive_sleep(WARMUP_SEC)
+        if _should_stop:
+            log.info("alarm_evaluator: shutdown during warm-up; never ran a tick")
+            return
+        log.info("alarm_evaluator: warm-up complete, beginning evaluation")
 
     rules: list[Rule] = []
     last_reload = 0.0
+    cycles_run = 0
+    rules_evaluated = 0
 
     while not _should_stop:
         cycle_start = time.monotonic()
@@ -548,26 +594,40 @@ def run() -> None:
                     values = latest_values_by_tag(db, tag_ids)
 
                     for rule in rules:
+                        # Honor shutdown mid-cycle so a slow cycle doesn't
+                        # delay exit. Current rule's transaction state is
+                        # bounded by its own try/except.
+                        if _should_stop:
+                            log.info(
+                                "alarm_evaluator: shutdown requested mid-cycle; "
+                                "stopping after %d of %d rules", rules_evaluated, len(rules),
+                            )
+                            break
                         try:
                             snap = current_state(db, rule.id)
                             if snap is None:
                                 log.warning("no alarm_state row for rule %d", rule.id)
                                 continue
                             evaluate_rule(db, rule, snap, values.get(rule.tag_id))
+                            rules_evaluated += 1
                         except Exception:
                             log.exception("evaluation failed for rule %d", rule.id)
                             db.rollback()
+            cycles_run += 1
         except Exception:
             log.exception("evaluator cycle failed")
 
         elapsed = time.monotonic() - cycle_start
         if elapsed < EVAL_TICK_SEC:
-            time.sleep(EVAL_TICK_SEC - elapsed)
+            _responsive_sleep(EVAL_TICK_SEC - elapsed)
         elif elapsed > 2 * EVAL_TICK_SEC:
             log.warning("evaluator cycle slow: %.2fs (target %.2fs)",
                         elapsed, EVAL_TICK_SEC)
 
-    log.info("alarm_evaluator stopped")
+    log.info(
+        "alarm_evaluator: stopped cleanly after %d cycles, %d rule evaluations",
+        cycles_run, rules_evaluated,
+    )
 
 
 if __name__ == "__main__":

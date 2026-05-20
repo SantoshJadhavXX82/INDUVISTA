@@ -34,6 +34,8 @@ from typing import Any
 from app.workers.calc_blocks.base import (
     BaseBlock, BlockResult, InputSample, register_block,
     GOOD_QUALITY, GOOD_NON_SPECIFIC,
+    resolve_operand_spec, validate_operand_spec, operand_tag_id,
+    collect_list_tag_ids,
 )
 
 
@@ -54,27 +56,25 @@ def _validate_inputs_list(
     min_inputs: int = 2,
     max_inputs: int = 20,
 ) -> None:
-    """Common validation for blocks taking an 'inputs' list of tag IDs.
-
-    Selection blocks generally need >= 2 inputs (a 1-input "selector"
-    is just a passthrough and not worth the block overhead).
-    """
+    """Validation for blocks taking an 'inputs' list of operand specs
+    (tag id, {tag: id}, or {value: number})."""
     if "inputs" not in cfg:
         raise ValueError(f"{block_name} requires 'inputs' in block_config")
     inputs = cfg["inputs"]
     if not isinstance(inputs, list) or len(inputs) < min_inputs:
         raise ValueError(
             f"{block_name} 'inputs' must be a list of at least "
-            f"{min_inputs} tag IDs"
+            f"{min_inputs} items"
         )
     if len(inputs) > max_inputs:
         raise ValueError(
             f"{block_name} supports at most {max_inputs} inputs"
         )
-    for x in inputs:
-        _validate_tag_id(block_name, x)
-    if len(set(inputs)) != len(inputs):
-        raise ValueError(f"{block_name} inputs must be unique")
+    for i, spec in enumerate(inputs):
+        validate_operand_spec(f"{block_name} inputs[{i}]", spec)
+    tag_ids = collect_list_tag_ids(inputs)
+    if len(set(tag_ids)) != len(tag_ids):
+        raise ValueError(f"{block_name} tag inputs must be unique")
 
 
 def _worst_quality(samples: list[InputSample]) -> int:
@@ -98,7 +98,7 @@ class FirstGood(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -106,9 +106,20 @@ class FirstGood(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        for s in samples:
-            if s.quality >= GOOD_QUALITY and s.value is not None:
-                return BlockResult(value=s.value, quality=GOOD_NON_SPECIFIC)
+        # Iterate specs in declared order; constants count as GOOD.
+        sample_idx = 0
+        for spec in (cfg.get("inputs", []) or []):
+            tag, const = resolve_operand_spec(spec)
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                if s.quality >= GOOD_QUALITY and s.value is not None:
+                    return BlockResult(value=float(s.value),
+                                       quality=GOOD_NON_SPECIFIC)
+            else:
+                # Constants are inherently GOOD
+                return BlockResult(value=float(const),
+                                   quality=GOOD_NON_SPECIFIC)
         return BlockResult(value=None, quality=_worst_quality(samples))
 
 
@@ -123,7 +134,7 @@ class LastGood(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -131,9 +142,27 @@ class LastGood(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        for s in reversed(samples):
-            if s.quality >= GOOD_QUALITY and s.value is not None:
-                return BlockResult(value=s.value, quality=GOOD_NON_SPECIFIC)
+        # Iterate specs in REVERSE declared order; constants are GOOD.
+        specs = list(cfg.get("inputs", []) or [])
+        # First map each spec to its sample index (constants get None)
+        sample_idx = 0
+        per_spec_sample: list[InputSample | None] = []
+        for spec in specs:
+            if operand_tag_id(spec) is not None:
+                per_spec_sample.append(samples[sample_idx])
+                sample_idx += 1
+            else:
+                per_spec_sample.append(None)
+        # Walk in reverse
+        for spec, s in reversed(list(zip(specs, per_spec_sample))):
+            tag, const = resolve_operand_spec(spec)
+            if tag is not None:
+                if s is not None and s.quality >= GOOD_QUALITY and s.value is not None:
+                    return BlockResult(value=float(s.value),
+                                       quality=GOOD_NON_SPECIFIC)
+            else:
+                return BlockResult(value=float(const),
+                                   quality=GOOD_NON_SPECIFIC)
         return BlockResult(value=None, quality=_worst_quality(samples))
 
 
@@ -153,7 +182,7 @@ class HighestQuality(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -161,12 +190,25 @@ class HighestQuality(BaseBlock):
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        valid = [s for s in samples if s.value is not None]
-        if not valid:
+        # Build (value, quality) pairs from cfg+samples. Constants have
+        # GOOD_NON_SPECIFIC quality by definition.
+        specs = cfg.get("inputs", []) or []
+        candidates: list[tuple[float, int]] = []  # (value, quality)
+        sample_idx = 0
+        for spec in specs:
+            tag, const = resolve_operand_spec(spec)
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                if s.value is not None:
+                    candidates.append((float(s.value), s.quality))
+            else:
+                candidates.append((float(const), GOOD_NON_SPECIFIC))
+        if not candidates:
             return BlockResult(value=None, quality=_worst_quality(samples))
-        # max() picks first occurrence on ties, which is what we want.
-        best = max(valid, key=lambda s: s.quality)
-        return BlockResult(value=best.value, quality=best.quality)
+        # max() picks first occurrence on ties — preserve order semantics
+        best_val, best_q = max(candidates, key=lambda vq: vq[1])
+        return BlockResult(value=best_val, quality=best_q)
 
 
 # ===========================================================================
@@ -195,33 +237,49 @@ class HotStandby(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["primary"]), int(cfg["standby"])]
+        ids: list[int] = []
+        for key in ("primary", "standby"):
+            tag = operand_tag_id(cfg[key])
+            if tag is not None:
+                ids.append(tag)
+        return ids
 
     @classmethod
     def validate_config(cls, cfg):
         if "primary" not in cfg or "standby" not in cfg:
             raise ValueError(
-                "HOT_STANDBY requires 'primary' and 'standby' tag IDs "
-                "in block_config"
+                "HOT_STANDBY requires 'primary' and 'standby' operands "
+                "(tag id or {value: n}) in block_config"
             )
-        _validate_tag_id("HOT_STANDBY", cfg["primary"])
-        _validate_tag_id("HOT_STANDBY", cfg["standby"])
-        if cfg["primary"] == cfg["standby"]:
+        validate_operand_spec("HOT_STANDBY.primary", cfg["primary"])
+        validate_operand_spec("HOT_STANDBY.standby", cfg["standby"])
+        # When both are tags, they must be distinct
+        p_tag = operand_tag_id(cfg["primary"])
+        s_tag = operand_tag_id(cfg["standby"])
+        if p_tag is not None and s_tag is not None and p_tag == s_tag:
             raise ValueError(
                 "HOT_STANDBY 'primary' and 'standby' must be different tags"
             )
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        primary, standby = samples
-        if primary.quality >= GOOD_QUALITY and primary.value is not None:
-            return BlockResult(value=primary.value, quality=GOOD_NON_SPECIFIC)
-        if standby.quality >= GOOD_QUALITY and standby.value is not None:
-            return BlockResult(value=standby.value, quality=GOOD_NON_SPECIFIC)
-        return BlockResult(
-            value=None,
-            quality=min(primary.quality, standby.quality),
-        )
+        # Build (value, quality) for each slot from cfg+samples
+        sample_idx = 0
+        def _resolve(key: str):
+            nonlocal sample_idx
+            tag, const = resolve_operand_spec(cfg[key])
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                return s.value, s.quality
+            return float(const), GOOD_NON_SPECIFIC
+        p_val, p_q = _resolve("primary")
+        s_val, s_q = _resolve("standby")
+        if p_q >= GOOD_QUALITY and p_val is not None:
+            return BlockResult(value=float(p_val), quality=GOOD_NON_SPECIFIC)
+        if s_q >= GOOD_QUALITY and s_val is not None:
+            return BlockResult(value=float(s_val), quality=GOOD_NON_SPECIFIC)
+        return BlockResult(value=None, quality=min(p_q, s_q))
 
 
 # ===========================================================================
@@ -256,7 +314,7 @@ class VotingMofN(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(x) for x in cfg.get("inputs", [])]
+        return collect_list_tag_ids(cfg.get("inputs", []))
 
     @classmethod
     def validate_config(cls, cfg):
@@ -282,13 +340,23 @@ class VotingMofN(BaseBlock):
     @classmethod
     def evaluate(cls, cfg, samples):
         tol = float(cfg["tolerance"])
-        n = len(samples)
+        specs = cfg.get("inputs", []) or []
+        n = len(specs)
         m = cfg.get("min_agreement") or (n // 2 + 1)  # strict majority
 
-        good = sorted(
-            s.value for s in samples
-            if s.quality >= GOOD_QUALITY and s.value is not None
-        )
+        # Collect numeric values from GOOD tag samples + every constant.
+        good_values: list[float] = []
+        sample_idx = 0
+        for spec in specs:
+            tag, const = resolve_operand_spec(spec)
+            if tag is not None:
+                s = samples[sample_idx]
+                sample_idx += 1
+                if s.quality >= GOOD_QUALITY and s.value is not None:
+                    good_values.append(float(s.value))
+            else:
+                good_values.append(float(const))
+        good = sorted(good_values)
         if len(good) < m:
             return BlockResult(value=None, quality=_worst_quality(samples))
 
@@ -342,49 +410,76 @@ class MuxIndex(BaseBlock):
 
     @classmethod
     def inputs(cls, cfg):
-        return [int(cfg["index"])] + [int(x) for x in cfg.get("values", [])]
+        ids: list[int] = []
+        idx_tag = operand_tag_id(cfg["index"])
+        if idx_tag is not None:
+            ids.append(idx_tag)
+        ids.extend(collect_list_tag_ids(cfg.get("values", [])))
+        return ids
 
     @classmethod
     def validate_config(cls, cfg):
         if "index" not in cfg:
             raise ValueError(
-                "MUX_INDEX requires 'index' tag ID in block_config"
+                "MUX_INDEX requires 'index' operand in block_config"
             )
-        _validate_tag_id("MUX_INDEX", cfg["index"])
+        validate_operand_spec("MUX_INDEX.index", cfg["index"])
         values = cfg.get("values")
         if not isinstance(values, list) or len(values) < 1:
             raise ValueError(
-                "MUX_INDEX requires 'values' list with at least 1 tag ID"
+                "MUX_INDEX requires 'values' list with at least 1 item"
             )
         if len(values) > 64:
             raise ValueError("MUX_INDEX supports at most 64 value inputs")
-        for x in values:
-            _validate_tag_id("MUX_INDEX", x)
-        if len(set(values)) != len(values):
-            raise ValueError("MUX_INDEX 'values' must be unique")
-        if cfg["index"] in values:
+        for i, v in enumerate(values):
+            validate_operand_spec(f"MUX_INDEX.values[{i}]", v)
+        # Tag uniqueness across values
+        value_tag_ids = collect_list_tag_ids(values)
+        if len(set(value_tag_ids)) != len(value_tag_ids):
+            raise ValueError("MUX_INDEX 'values' tag entries must be unique")
+        # Index tag must not appear in values' tag list
+        idx_tag = operand_tag_id(cfg["index"])
+        if idx_tag is not None and idx_tag in value_tag_ids:
             raise ValueError(
                 "MUX_INDEX 'index' tag must not also appear in 'values'"
             )
 
     @classmethod
     def evaluate(cls, cfg, samples):
-        index_sample = samples[0]
-        value_samples = samples[1:]
+        sample_idx = 0
+        # Resolve index
+        idx_tag, idx_const = resolve_operand_spec(cfg["index"])
+        if idx_tag is not None:
+            index_sample = samples[sample_idx]
+            sample_idx += 1
+            if index_sample.quality < GOOD_QUALITY or index_sample.value is None:
+                return BlockResult(value=None, quality=index_sample.quality)
+            idx_float = float(index_sample.value)
+        else:
+            idx_float = float(idx_const)
 
-        if index_sample.quality < GOOD_QUALITY or index_sample.value is None:
-            return BlockResult(value=None, quality=index_sample.quality)
-
-        idx_float = float(index_sample.value)
         if not idx_float.is_integer():
-            # Non-integer index - configuration error at runtime.
             return BlockResult(value=None, quality=0)
         idx = int(idx_float)
-        if idx < 0 or idx >= len(value_samples):
+        values_specs = cfg.get("values", []) or []
+        if idx < 0 or idx >= len(values_specs):
             return BlockResult(value=None, quality=0)
 
-        selected = value_samples[idx]
-        return BlockResult(value=selected.value, quality=selected.quality)
+        # Resolve only the selected value
+        selected_spec = values_specs[idx]
+        # We need the sample for it (if it's a tag). To find it, walk
+        # through specs[0..idx-1] and count tags to skip the right number
+        # of consumed samples.
+        for prior_spec in values_specs[:idx]:
+            if operand_tag_id(prior_spec) is not None:
+                sample_idx += 1
+        sel_tag, sel_const = resolve_operand_spec(selected_spec)
+        if sel_tag is not None:
+            sel_sample = samples[sample_idx]
+            return BlockResult(value=sel_sample.value,
+                               quality=sel_sample.quality)
+        return BlockResult(value=float(sel_const),
+                           quality=GOOD_NON_SPECIFIC)
 
 
 # ===========================================================================

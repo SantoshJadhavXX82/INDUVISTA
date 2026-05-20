@@ -45,6 +45,8 @@ import {
 import { cn } from "@/lib/utils";
 import { formatTagValue } from "@/lib/format";
 import { TagQualityBadge } from "@/components/tags/tag-quality-badge";
+import { PageHeader } from "@/components/ui/page-header";
+import { StatusPill } from "@/components/ui/status-pill";
 
 type Device = { id: number; name: string };
 type RegisterBlock = {
@@ -148,6 +150,17 @@ export default function TagExplorer() {
     staleTime: 60_000,
   });
 
+  // Phase 17 — lightweight fetch of computed-tag IDs so the edit drawer
+  // can hide/gray-out Modbus-specific fields that don't apply to a
+  // calc-block output. Just need the ids; we don't render the configs
+  // here.
+  const computedTags = useQuery({
+    queryKey: ["computed-tags-ids"],
+    queryFn: () => api.get<Array<{ id: number }>>("/computed-tags"),
+    staleTime: 60_000,
+    select: (rows) => new Set(rows.map((r) => r.id)),
+  });
+
   const filtered = useMemo(() => {
     if (!tags.data) return [];
     const lowerSearch = search.toLowerCase();
@@ -172,13 +185,13 @@ export default function TagExplorer() {
   // Rule: error > stale > good > unknown. Worst tag wins so any failing
   // tag flashes red at the device-picker level.
   const healthByDevice = useMemo(() => {
-    const ST_READ_OK = 128;
+    const ST_GOOD_MIN = 128;     // matches backend GOOD_QUALITY threshold
     const STALE_SEC = 30;
     const h: Record<number, "good" | "stale" | "error" | "unknown"> = {};
     tags.data?.forEach((t) => {
       let state: "good" | "stale" | "error" | "unknown" = "unknown";
       if (t.st !== null && t.age_seconds !== null) {
-        if (t.st !== ST_READ_OK) state = "error";
+        if (t.st < ST_GOOD_MIN) state = "error";
         else if (t.age_seconds > STALE_SEC) state = "stale";
         else state = "good";
       }
@@ -291,30 +304,37 @@ export default function TagExplorer() {
 
   return (
     <div className="space-y-4 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Tag Explorer</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Browse, search, and edit the {tags.data?.length ?? "…"} tags. Click any row to view details and edit.
-        </p>
-      </div>
+      <PageHeader
+        title="Tags"
+        subtitle={`Browse, search, and edit ${tags.data?.length ?? "…"} tags`}
+        actions={
+          <StatusPill variant="info" size="sm">
+            {(tags.data?.length ?? 0) + (pairTags.data?.length ?? 0)} total
+          </StatusPill>
+        }
+      />
 
       {/* Phase 12.3 — view tab strip. "All Tags" interleaves pair tags
           and physical tags with a PAIR/PHYS badge; "Pair Tags" focuses on
           just the duty/standby logical tags. The Pair Tags tab is hidden
-          when no pairs exist (avoids an empty-state surprise). */}
-      <div className="flex gap-1 border-b -mb-2">
+          when no pairs exist (avoids an empty-state surprise).
+          Phase 18 — restyled as iOS-segmented-control tabs. */}
+      <div
+        className="flex gap-1 px-1 py-1 rounded-lg w-fit"
+        style={{ backgroundColor: "var(--ios-gray-5)" }}
+      >
         <button
           type="button"
           onClick={() => setViewMode("all")}
           className={cn(
-            "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
-            viewMode === "all"
-              ? "border-foreground text-foreground"
-              : "border-transparent text-muted-foreground hover:text-foreground",
+            "px-4 py-1.5 text-[13px] font-medium rounded-md transition-colors",
           )}
+          style={viewMode === "all"
+            ? { backgroundColor: "var(--bg-elevated)", color: "#000" }
+            : { color: "var(--ios-gray-1)" }}
         >
           All tags
-          <span className="ml-2 text-xs text-muted-foreground tabular-nums">
+          <span className="ml-2 text-[11px] tabular-nums" style={{ color: "var(--ios-gray-1)" }}>
             {(tags.data?.length ?? 0) + (pairTags.data?.length ?? 0)}
           </span>
         </button>
@@ -322,15 +342,13 @@ export default function TagExplorer() {
           <button
             type="button"
             onClick={() => setViewMode("pair")}
-            className={cn(
-              "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
-              viewMode === "pair"
-                ? "border-foreground text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground",
-            )}
+            className="px-4 py-1.5 text-[13px] font-medium rounded-md transition-colors"
+            style={viewMode === "pair"
+              ? { backgroundColor: "var(--bg-elevated)", color: "#000" }
+              : { color: "var(--ios-gray-1)" }}
           >
             Pair tags
-            <span className="ml-2 text-xs text-muted-foreground tabular-nums">
+            <span className="ml-2 text-[11px] tabular-nums" style={{ color: "var(--ios-gray-1)" }}>
               {pairTags.data?.length ?? 0}
             </span>
           </button>
@@ -474,8 +492,6 @@ export default function TagExplorer() {
                    the row are no-ops. The Quality column shows the live
                    value's quality from the currently-active (duty) side. */
                 const renderPairRow = (pt: PairTagLive) => {
-                  const ST_READ_OK = 128;
-                  const STALE_SEC = 30;
                   return (
                     <TableRow
                       key={`pair-${pt.pair_tag_id}`}
@@ -786,6 +802,7 @@ export default function TagExplorer() {
           <TagEditPanel
             key={selectedTag.tag_id}
             tag={selectedTag}
+            isComputed={computedTags.data?.has(selectedTag.tag_id) ?? false}
             onSaved={() => {
               queryClient.invalidateQueries({ queryKey: ["live"] });
             }}
@@ -1231,10 +1248,12 @@ type EditableFields = {
 
 function TagEditPanel({
   tag,
+  isComputed,
   onSaved,
   onDeleted,
 }: {
   tag: LiveTag;
+  isComputed: boolean;
   onSaved: () => void;
   onDeleted: () => void;
 }) {
@@ -1294,25 +1313,33 @@ function TagEditPanel({
       body.engineering_unit = form.engineering_unit || null;
     if (form.engineering_unit_id !== original.engineering_unit_id)
       body.engineering_unit_id = form.engineering_unit_id;
-    if (form.scale !== original.scale)
-      body.scale = parseFloat(form.scale);
-    if (form.offset !== original.offset)
-      body.offset = parseFloat(form.offset);
+    // Scale/Offset/Heartbeat/Writable are Modbus-only — skip the diff
+    // entirely for computed tags so the disabled inputs (whose values
+    // are forced to "" on render) don't get turned into spurious PATCH
+    // mutations.
+    if (!isComputed) {
+      if (form.scale !== original.scale)
+        body.scale = parseFloat(form.scale);
+      if (form.offset !== original.offset)
+        body.offset = parseFloat(form.offset);
+    }
     if (form.min_value !== original.min_value)
       body.min_value = form.min_value === "" ? null : parseFloat(form.min_value);
     if (form.max_value !== original.max_value)
       body.max_value = form.max_value === "" ? null : parseFloat(form.max_value);
     if (form.enabled !== original.enabled)
       body.enabled = form.enabled;
-    if (form.is_heartbeat !== original.is_heartbeat)
-      body.is_heartbeat = form.is_heartbeat;
-    if (form.heartbeat_max_stale_sec !== original.heartbeat_max_stale_sec)
-      body.heartbeat_max_stale_sec =
-        form.heartbeat_max_stale_sec === "" ? null : parseInt(form.heartbeat_max_stale_sec, 10);
+    if (!isComputed) {
+      if (form.is_heartbeat !== original.is_heartbeat)
+        body.is_heartbeat = form.is_heartbeat;
+      if (form.heartbeat_max_stale_sec !== original.heartbeat_max_stale_sec)
+        body.heartbeat_max_stale_sec =
+          form.heartbeat_max_stale_sec === "" ? null : parseInt(form.heartbeat_max_stale_sec, 10);
+      if (form.writable !== original.writable)
+        body.writable = form.writable;
+    }
     if (form.named_set_id !== original.named_set_id)
       body.named_set_id = form.named_set_id;
-    if (form.writable !== original.writable)
-      body.writable = form.writable;
 
     // Phase 8.2 — group memberships persist via a separate endpoint.
     const groupsChanged = (
@@ -1329,6 +1356,20 @@ function TagEditPanel({
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
+      {/* Phase 17 — banner for computed tags. Modbus-shaped fields below
+          are intentionally locked / blanked because they don't apply to
+          a calc-block output. */}
+      {isComputed && (
+        <div className="text-xs text-blue-900 bg-blue-50 border border-blue-200
+                        rounded px-2.5 py-2 leading-snug">
+          <span className="font-medium">Computed tag.</span>{" "}
+          The block configuration (block type, inputs, execution rate, output
+          target) lives in <a href="/calc" className="underline hover:no-underline">
+          Computed Tags admin</a>. Fields below that are Modbus-specific are
+          shown for reference only.
+        </div>
+      )}
+
       {/* Identity (read-only) */}
       <section className="space-y-2">
         <h3 className="text-sm font-semibold">Identity</h3>
@@ -1336,10 +1377,26 @@ function TagEditPanel({
           <DT label="Device">{tag.device_name}</DT>
           <DT label="Tag ID">{tag.tag_id}</DT>
           <DT label="Data type">{tag.data_type}</DT>
-          <DT label="Byte order">{byteOrderLabelFor(tag.data_type, tag.byte_order)}</DT>
-          <DT label="Function code">{tag.function_code}</DT>
-          <DT label="Address">{tag.address}</DT>
-          <DT label="Register count">{tag.register_count}</DT>
+          <DT label="Byte order">
+            {isComputed
+              ? <span className="text-muted-foreground/60">—</span>
+              : byteOrderLabelFor(tag.data_type, tag.byte_order)}
+          </DT>
+          <DT label="Function code">
+            {isComputed
+              ? <span className="text-muted-foreground/60">—</span>
+              : tag.function_code}
+          </DT>
+          <DT label="Address">
+            {isComputed
+              ? <span className="text-muted-foreground/60">—</span>
+              : tag.address}
+          </DT>
+          <DT label="Register count">
+            {isComputed
+              ? <span className="text-muted-foreground/60">—</span>
+              : tag.register_count}
+          </DT>
           <DT label="Groups">{tag.groups.join(", ") || "—"}</DT>
         </dl>
       </section>
@@ -1407,7 +1464,9 @@ function TagEditPanel({
                 className="h-4 w-4"
               />
               <span className="text-muted-foreground">
-                {form.enabled ? "polled" : "skipped"}
+                {form.enabled
+                  ? (isComputed ? "evaluated" : "polled")
+                  : "skipped"}
               </span>
             </label>
           </div>
@@ -1417,12 +1476,19 @@ function TagEditPanel({
           <div className="space-y-1.5">
             <Label htmlFor="scale">
               Scale <HelpTip entry={help.tag.scale} />
+              {isComputed && (
+                <span className="ml-1 text-[10px] text-muted-foreground/70 normal-case">
+                  (n/a for computed)
+                </span>
+              )}
             </Label>
             <Input
               id="scale"
               type="number"
               step="any"
-              value={form.scale}
+              value={isComputed ? "" : form.scale}
+              placeholder={isComputed ? "—" : ""}
+              disabled={isComputed}
               onChange={(e) => setForm({ ...form, scale: e.target.value })}
             />
           </div>
@@ -1430,12 +1496,19 @@ function TagEditPanel({
           <div className="space-y-1.5">
             <Label htmlFor="offset">
               Offset <HelpTip entry={help.tag.offset} />
+              {isComputed && (
+                <span className="ml-1 text-[10px] text-muted-foreground/70 normal-case">
+                  (n/a for computed)
+                </span>
+              )}
             </Label>
             <Input
               id="offset"
               type="number"
               step="any"
-              value={form.offset}
+              value={isComputed ? "" : form.offset}
+              placeholder={isComputed ? "—" : ""}
+              disabled={isComputed}
               onChange={(e) => setForm({ ...form, offset: e.target.value })}
             />
           </div>
@@ -1497,25 +1570,37 @@ function TagEditPanel({
           </p>
         </div>
 
-        {/* Phase 7 E1a — heartbeat watch */}
-        <div className="rounded-md border bg-secondary/30 p-3 space-y-2">
-          <label className="flex items-center gap-2 text-sm cursor-pointer">
+        {/* Phase 7 E1a — heartbeat watch.
+            Phase 17 — disabled for computed tags: a calc-block output
+            is always "fresh" when its evaluator is running, so the
+            Modbus-style heartbeat check has nothing to watch. */}
+        <div className={cn(
+          "rounded-md border p-3 space-y-2",
+          isComputed ? "bg-muted/30 border-muted opacity-60" : "bg-secondary/30",
+        )}>
+          <label className={cn(
+            "flex items-center gap-2 text-sm",
+            isComputed ? "cursor-not-allowed" : "cursor-pointer",
+          )}>
             <input
               type="checkbox"
-              checked={form.is_heartbeat}
+              checked={isComputed ? false : form.is_heartbeat}
+              disabled={isComputed}
               onChange={(e) => setForm({ ...form, is_heartbeat: e.target.checked })}
               className="h-4 w-4"
             />
             <span className="font-medium inline-flex items-center gap-1">
               Heartbeat watch
               <HelpTip entry={help.tag.is_heartbeat} />
-              {form.is_heartbeat && <span className="text-rose-500">♥</span>}
+              {!isComputed && form.is_heartbeat && <span className="text-rose-500">♥</span>}
             </span>
             <span className="text-xs text-muted-foreground">
-              Alarm if the value freezes for too long
+              {isComputed
+                ? "Not applicable for computed tags"
+                : "Alarm if the value freezes for too long"}
             </span>
           </label>
-          {form.is_heartbeat && (
+          {!isComputed && form.is_heartbeat && (
             <div className="pl-6 grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label htmlFor="hb_stale">
@@ -1543,8 +1628,11 @@ function TagEditPanel({
         {/* Phase 8.5.1 — writability opt-in.
             If the parent block is Read-only, lock this checkbox OFF —
             tags can't be writable when their block isn't. To allow
-            writes, the block's Access has to flip first. */}
-        {(tag.function_code === 1 || tag.function_code === 3) && (() => {
+            writes, the block's Access has to flip first.
+            Phase 17 — hidden entirely for computed tags. A calc-block
+            output is written by the evaluator, not by the user; exposing
+            a "Writable" toggle here would be misleading. */}
+        {!isComputed && (tag.function_code === 1 || tag.function_code === 3) && (() => {
           const blockIsReadOnly =
             tag.register_block_id != null && tag.block_writable === false;
           return (

@@ -22,6 +22,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Pin, PinOff, X, ExternalLink } from "lucide-react";
+import { formatFloat } from "@/lib/format";
 
 const POPOVER_WIDTH = 360;
 const POPOVER_GAP = 8;            // px between trigger and popover
@@ -363,11 +364,7 @@ function BellCurveDiagram({
 
   const fmt = (v: number) => {
     if (!isFinite(v)) return "—";
-    const a = Math.abs(v);
-    if (a >= 100) return v.toFixed(1);
-    if (a >= 1) return v.toFixed(2);
-    if (a >= 0.01) return v.toFixed(3);
-    return v.toExponential(1);
+    return formatFloat(v);
   };
 
   const unitSuffix = unit ? " " + unit : "";

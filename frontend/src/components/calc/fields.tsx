@@ -73,7 +73,19 @@ function fieldHelp(field: FieldDef) {
 
 export function TagRefField({ field, blockConfig, onChange }: FieldProps) {
   const tags = useTagsList();
-  const currentTagId = (blockConfig[field.key] as number | undefined) ?? "";
+  // Accept three shapes defensively:
+  //   bare positive int       → legacy tag id
+  //   {tag: N}                → new shape (e.g. from an upgraded field
+  //                              whose override was later removed)
+  //   anything else / missing → unselected
+  const raw = blockConfig[field.key];
+  let currentTagId: number | "" = "";
+  if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) {
+    currentTagId = raw;
+  } else if (raw && typeof raw === "object" && "tag" in raw) {
+    const t = Number((raw as any).tag);
+    if (Number.isInteger(t) && t > 0) currentTagId = t;
+  }
 
   const available = useMemo(
     () => filterTags(tags.data ?? [], field.filter),
@@ -116,7 +128,17 @@ export function TagRefField({ field, blockConfig, onChange }: FieldProps) {
 
 export function TagRefListField({ field, blockConfig, onChange }: FieldProps) {
   const tags = useTagsList();
-  const tagIds = (blockConfig[field.key] as number[] | undefined) ?? [];
+  // Coerce each item into a bare tag id — accepts bare int (legacy)
+  // or {tag: N} (new shape). Invalid items become 0 (unselected).
+  const rawList = (blockConfig[field.key] as any[] | undefined) ?? [];
+  const tagIds: number[] = rawList.map((raw) => {
+    if (typeof raw === "number" && Number.isInteger(raw) && raw > 0) return raw;
+    if (raw && typeof raw === "object" && "tag" in raw) {
+      const t = Number((raw as any).tag);
+      if (Number.isInteger(t) && t > 0) return t;
+    }
+    return 0;
+  });
   const minItems = field.minItems ?? 1;
   const maxItems = field.maxItems ?? 100;
 
@@ -199,21 +221,83 @@ export function TagRefListField({ field, blockConfig, onChange }: FieldProps) {
 
 
 // ===========================================================================
-// TagOrConstantField - mutex: either {field.key: tag_id} or {value: number}
+// TagOrConstantField — per-field operand spec storage.
+//
+// Each tag_or_constant field stores its value under its own field.key
+// as a structural object — NOT a global `value` slot. This isolates
+// fields so multiple tag_or_constant inputs in one block (left + right,
+// condition + then_value + else_value, primary + standby, etc.) each
+// pick tag/constant independently.
+//
+// Backend shape (also accepted, for backward compat):
+//   bare positive int        → tag (legacy form)
+//   {"tag": <id>}            → tag (new explicit form, what we write)
+//   {"value": <number>}      → numeric constant (new)
+//
+// Legacy-config compat: if the block was saved before this change with
+// a global "value" key (binary blocks' right operand only), we still
+// honor it on first read by treating field.key === "right" with no
+// `right` key but a top-level `value` key as constant-mode. On the
+// first toggle we migrate it to the new shape.
 // ===========================================================================
 
 export function TagOrConstantField({ field, blockConfig, onChange }: FieldProps) {
-  const hasConst = "value" in blockConfig && !(field.key in blockConfig);
-  const mode: "tag" | "constant" = hasConst ? "constant" : "tag";
+  const current = blockConfig[field.key];
+
+  // Detect legacy shape: only applies to `right` on binary blocks
+  const isLegacyRightConst =
+    field.key === "right"
+    && !("right" in blockConfig)
+    && "value" in blockConfig;
+
+  let mode: "tag" | "constant";
+  if (isLegacyRightConst) {
+    mode = "constant";
+  } else if (current && typeof current === "object" && "value" in current) {
+    mode = "constant";
+  } else {
+    // covers: undefined, bare int (legacy), {tag: id}, {tag: 0} (no selection)
+    mode = "tag";
+  }
+
+  const currentTagId: number = (() => {
+    if (typeof current === "number") return current;                // legacy bare int
+    if (current && typeof current === "object" && "tag" in current) // new shape
+      return Number((current as any).tag) || 0;
+    return 0;
+  })();
+
+  const currentConstant: number = (() => {
+    if (isLegacyRightConst) return Number(blockConfig.value) || 0;
+    if (current && typeof current === "object" && "value" in current)
+      return Number((current as any).value) || 0;
+    return 0;
+  })();
 
   const switchToTag = () => {
-    const { value: _v, ...rest } = blockConfig;
-    onChange(rest);  // tag id will be set by the picker below
+    const next = { ...blockConfig };
+    delete next.value;                       // sweep legacy global slot
+    next[field.key] = { tag: currentTagId }; // start fresh; tag id 0 = unselected
+    onChange(next);
   };
 
   const switchToConstant = () => {
-    const { [field.key]: _removed, ...rest } = blockConfig;
-    onChange({ ...rest, value: 0 });
+    const next = { ...blockConfig };
+    delete next.value;                            // sweep legacy
+    next[field.key] = { value: currentConstant }; // preserve last-seen constant if any
+    onChange(next);
+  };
+
+  // Inner tag picker writes {tag: id} into blockConfig[field.key].
+  // We adapt the TagRefField (which expects bare int) by transforming
+  // its onChange and pre-populating the right id.
+  const tagPickerConfig = { ...blockConfig, [field.key]: currentTagId };
+  const tagPickerOnChange = (nextLeaf: any) => {
+    const picked = Number(nextLeaf[field.key]) || 0;
+    const next = { ...blockConfig };
+    delete next.value;
+    next[field.key] = { tag: picked };
+    onChange(next);
   };
 
   return (
@@ -242,18 +326,21 @@ export function TagOrConstantField({ field, blockConfig, onChange }: FieldProps)
       {mode === "tag" ? (
         <TagRefField
           field={{ ...field, label: "", help: undefined }}
-          blockConfig={blockConfig}
-          onChange={onChange}
+          blockConfig={tagPickerConfig}
+          onChange={tagPickerOnChange}
         />
       ) : (
         <input
           className={inputCls}
           type="number"
           step="any"
-          value={(blockConfig.value as number | undefined) ?? 0}
+          value={currentConstant}
           onChange={(e) => {
             const num = e.target.value === "" ? 0 : Number(e.target.value);
-            onChange({ ...blockConfig, value: num });
+            const next = { ...blockConfig };
+            delete next.value;
+            next[field.key] = { value: num };
+            onChange(next);
           }}
           placeholder="numeric constant"
         />
@@ -544,12 +631,38 @@ export function ModeSelectField({ field, blockConfig, onChange }: FieldProps) {
 type TocItem = { tag: number } | { value: number };
 
 function isTagItem(item: TocItem): item is { tag: number } {
-  return "tag" in item;
+  return item != null && typeof item === "object" && "tag" in item;
+}
+
+/** Normalize one item from the saved blockConfig shape into the
+ *  structural {tag}/{value} shape this component renders.
+ *
+ *  Legacy DB rows may store bare numbers:
+ *    positive integer  →  treat as a tag id  →  {tag: N}
+ *    other number      →  treat as a constant →  {value: N}
+ *
+ *  This makes the component robust to any of these shapes mixed in
+ *  the same list, which the new backend resolver accepts uniformly.
+ *  Users who edit a normalized item will save the new shape; an
+ *  untouched legacy list saves back as-is (backend still accepts it).
+ */
+function normalizeTocItem(raw: any): TocItem {
+  if (typeof raw === "number") {
+    if (Number.isInteger(raw) && raw > 0) return { tag: raw };
+    return { value: raw };
+  }
+  if (raw != null && typeof raw === "object") {
+    if ("tag" in raw)   return { tag: Number((raw as any).tag) || 0 };
+    if ("value" in raw) return { value: Number((raw as any).value) || 0 };
+  }
+  // Fallback: an empty tag slot the user can fill in
+  return { tag: 0 };
 }
 
 export function TagOrConstantListField({ field, blockConfig, onChange }: FieldProps) {
   const tagsQuery = useTagsList();
-  const items = (blockConfig[field.key] as TocItem[] | undefined) ?? [];
+  const rawItems = (blockConfig[field.key] as any[] | undefined) ?? [];
+  const items: TocItem[] = rawItems.map(normalizeTocItem);
 
   const minItems = field.minItems ?? 1;
   const maxItems = field.maxItems ?? 100;
@@ -563,6 +676,8 @@ export function TagOrConstantListField({ field, blockConfig, onChange }: FieldPr
   // (the backend rejects duplicates).
   const pickedTagIds = items.filter(isTagItem).map((i) => i.tag);
 
+  // setItems always writes the normalized structural shape — this
+  // migrates legacy bare-number rows the moment the user edits.
   function setItems(next: TocItem[]) {
     onChange({ ...blockConfig, [field.key]: next });
   }

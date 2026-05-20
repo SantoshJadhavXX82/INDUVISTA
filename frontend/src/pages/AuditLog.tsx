@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { PageHeader } from "@/components/ui/page-header";
 
 
 // ---------------------------------------------------------------------------
@@ -119,26 +120,23 @@ export default function AuditLog() {
 
   return (
     <div className="p-4 space-y-4">
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between py-3 px-4 border-b border-border">
-          <div className="flex items-center gap-2">
-            <Shield className="h-4 w-4" />
-            <CardTitle className="text-sm">Audit Log</CardTitle>
-            <span className="text-[11px] text-muted-foreground">
-              {total.toLocaleString()} events
-            </span>
-          </div>
+      <PageHeader
+        title="Audit log"
+        subtitle={`${total.toLocaleString()} events recorded`}
+        actions={
           <button
             type="button"
             onClick={() => events.refetch()}
             disabled={events.isFetching}
             className="h-7 inline-flex items-center gap-1 text-xs px-2 rounded border border-border hover:bg-secondary disabled:opacity-30"
+            style={{ borderColor: "var(--separator)" }}
           >
             <RefreshCw className={`h-3 w-3 ${events.isFetching ? "animate-spin" : ""}`} />
             Refresh
           </button>
-        </CardHeader>
-
+        }
+      />
+      <Card>
         <CardContent className="p-3">
           {/* Filters */}
           <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
