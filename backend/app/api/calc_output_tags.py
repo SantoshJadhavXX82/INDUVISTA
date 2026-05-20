@@ -18,11 +18,12 @@ Frontend uses this from CreateCalcModal when the operator picks
 
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.db import SessionLocal
+from app.utils.audit import audit, AuditEvent
 
 
 router = APIRouter(tags=["calc"])
@@ -129,7 +130,7 @@ def _build_insert(explicit: dict, db) -> tuple[str, dict]:
 
 
 @router.post("/api/calc/output-tags", response_model=CalcOutputTagResponse)
-def create_calc_output_tag(body: CalcOutputTagCreate):
+def create_calc_output_tag(body: CalcOutputTagCreate, request: Request):
     """Create a new tag on the Calculations device for use as a calc
     block output. Auto-discovers the device by querying for
     protocol='manual'. Returns the created tag's basics."""
@@ -147,6 +148,15 @@ def create_calc_output_tag(body: CalcOutputTagCreate):
                 ORDER BY id LIMIT 1
             """)).mappings().first()
         if dev is None:
+            audit(AuditEvent(
+                action="tag.create",
+                target_type="computed_tag",
+                target_label=body.name,
+                summary=f"Denied: no Calculations device exists",
+                status="denied",
+                error_message="No manual-protocol device found",
+                details={"request": body.model_dump()},
+            ), request)
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -163,6 +173,15 @@ def create_calc_output_tag(body: CalcOutputTagCreate):
             {"n": body.name, "d": dev["id"]},
         ).first()
         if existing:
+            audit(AuditEvent(
+                action="tag.create",
+                target_type="computed_tag",
+                target_label=body.name,
+                summary=f"Denied: duplicate tag name on device {dev['name']}",
+                status="denied",
+                error_message="Duplicate name",
+                details={"request": body.model_dump(), "device_id": dev["id"]},
+            ), request)
             raise HTTPException(
                 status_code=409,
                 detail=(
@@ -185,6 +204,15 @@ def create_calc_output_tag(body: CalcOutputTagCreate):
             db.commit()
         except Exception as e:
             db.rollback()
+            audit(AuditEvent(
+                action="tag.create",
+                target_type="computed_tag",
+                target_label=body.name,
+                summary=f"INSERT failed",
+                status="error",
+                error_message=f"{type(e).__name__}: {e}",
+                details={"request": body.model_dump(), "device_id": dev["id"]},
+            ), request)
             raise HTTPException(
                 status_code=500,
                 detail=(
@@ -193,5 +221,19 @@ def create_calc_output_tag(body: CalcOutputTagCreate):
                     f"didn't auto-fill, paste the column name."
                 ),
             )
+
+        # Success audit.
+        audit(AuditEvent(
+            action="tag.create",
+            target_type="computed_tag",
+            target_id=row["id"],
+            target_label=row["name"],
+            summary=f"Created computed tag '{row['name']}' ({row['data_type']}) on device {dev['name']}",
+            details={
+                "device_id": row["device_id"],
+                "data_type": row["data_type"],
+                "description": body.description,
+            },
+        ), request)
 
         return CalcOutputTagResponse(**row)

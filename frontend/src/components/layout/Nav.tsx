@@ -1,31 +1,6 @@
 /**
  * Sidebar navigation — Phase 11 reorganization (Trend added in 13.3).
- *
- * Workflow-driven layout instead of protocol-driven. Order reflects the
- * commissioning lifecycle plus daily access patterns:
- *
- *   SETUP     — Engineering Units, Groups, Enumerations
- *               Master data set up FIRST when installing the system.
- *               Stays at the top because it's conceptually the foundation
- *               everything else references.
- *   OPERATE   — Live Dashboard, Trend, Diagnostics, Data Gaps
- *               Daily monitoring screens. What ops staff opens each hour.
- *               Trend sits between Dashboard (current values) and
- *               Diagnostics (health) — the natural eye-flow when
- *               investigating "is this normal?".
- *   EXPLORE   — Tag Explorer, Register Browser, Frame Inspector,
- *               Write Console, Write Audit
- *               Investigation tools. Used during commissioning and
- *               post-incident analysis. Write Audit lives here as a
- *               read-only history of writes — investigation, not config.
- *   CONFIGURE — Networks, Devices, Register Blocks
- *               Protocol-level setup. Touched during onboarding and
- *               change-control.
- *
- * The section headings are visual only — the user clicks a leaf NavLink to
- * navigate. The /modbus, /config, and /global parent routes have their own
- * Layout pages that render the sub-tab strip; deep links from the sidebar
- * land directly on the right sub-tab.
+ * Phase 16.0e — Calc Blocks leaf added under Setup, alongside alarm admin.
  */
 import { NavLink, useLocation } from "react-router";
 import { cn } from "@/lib/utils";
@@ -51,6 +26,8 @@ import {
   Palette,
   ListChecks,
   BellRing,
+  Calculator,
+  Shield,
   type LucideIcon,
 } from "lucide-react";
 
@@ -59,7 +36,6 @@ type Leaf = {
   to: string;
   label: string;
   icon: LucideIcon;
-  /** Match prefixes too, so /modbus/frames/123 also highlights the parent link */
   matchPrefix?: string;
 };
 
@@ -73,8 +49,6 @@ type Section = {
 type NavEntry = Leaf | Section;
 
 const entries: NavEntry[] = [
-  // SETUP — master/reference data that everything else points at. Always
-  // first: it's the foundation an installer touches before any device exists.
   {
     kind: "section",
     label: "Setup",
@@ -83,16 +57,12 @@ const entries: NavEntry[] = [
       { kind: "leaf", to: "/global/engineering-units", label: "Engineering Units", icon: Ruler, matchPrefix: "/global/engineering-units" },
       { kind: "leaf", to: "/global/alarm-severities", label: "Alarm Severities", icon: Palette, matchPrefix: "/global/alarm-severities" },
       { kind: "leaf", to: "/global/alarm-types", label: "Alarm Types", icon: ListChecks, matchPrefix: "/global/alarm-types" },
+      { kind: "leaf", to: "/global/calc-blocks", label: "Calc Blocks", icon: Calculator, matchPrefix: "/global/calc-blocks" },
       { kind: "leaf", to: "/global/groups", label: "Groups", icon: Tag, matchPrefix: "/global/groups" },
       { kind: "leaf", to: "/global/named-sets", label: "Enumerations", icon: Hash, matchPrefix: "/global/named-sets" },
       { kind: "leaf", to: "/global/duty-standby-values", label: "Duty/Standby Values", icon: ArrowLeftRight, matchPrefix: "/global/duty-standby-values" },
     ],
   },
-
-  // OPERATE — daily monitoring. Live Dashboard first because that's what
-  // ops staff actually open at 3am, not Diagnostics. Trend follows
-  // Dashboard since the natural follow-up to "what's the value now?" is
-  // "what has it been doing?".
   {
     kind: "section",
     label: "Operate",
@@ -101,14 +71,11 @@ const entries: NavEntry[] = [
       { kind: "leaf", to: "/dashboard", label: "Live Dashboard", icon: Gauge },
       { kind: "leaf", to: "/trend", label: "Trend", icon: TrendingUp, matchPrefix: "/trend" },
       { kind: "leaf", to: "/alarms", label: "Alarms", icon: BellRing, matchPrefix: "/alarms" },
+      { kind: "leaf", to: "/audit-log", label: "Audit Log", icon: Shield, matchPrefix: "/audit-log" },
       { kind: "leaf", to: "/diagnostics", label: "Diagnostics", icon: Activity },
       { kind: "leaf", to: "/data-gaps", label: "Data Gaps", icon: AlertCircle },
     ],
   },
-
-  // EXPLORE — investigation. Tag Explorer is the workhorse here, sits at
-  // top. Register Browser + Frame Inspector for protocol-level debugging.
-  // Write Audit moved here because it's investigation, not master data.
   {
     kind: "section",
     label: "Explore",
@@ -121,8 +88,6 @@ const entries: NavEntry[] = [
       { kind: "leaf", to: "/modbus/write-audit", label: "Write Audit", icon: FileClock, matchPrefix: "/modbus/write-audit" },
     ],
   },
-
-  // CONFIGURE — protocol setup. Hierarchy order: Channels → Devices → Blocks.
   {
     kind: "section",
     label: "Configure",
@@ -181,7 +146,6 @@ function SectionGroup({
   section: Section;
   activePath: string;
 }) {
-  // Active if any child is currently visible
   const anyActive = section.children.some((c) =>
     c.matchPrefix
       ? activePath.startsWith(c.matchPrefix)

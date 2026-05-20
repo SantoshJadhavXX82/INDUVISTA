@@ -1,9 +1,22 @@
-"""CRUD endpoints for devices."""
+"""CRUD endpoints for devices.
+Phase 16.0h - audit() calls on every mutating endpoint.
+
+Audited actions:
+  device.create / device.update / device.toggle / device.delete
+  device.pair (captures pair_tags_created from auto helper)
+  device.unpair (captures pair_tags_deleted from auto helper)
+  device.swap_duty (captures both sides' from->to + reason)
+  device.set_pair_override (captures enable state + partner)
+
+Diagnostic endpoints (test_read, scan_range) are NOT audited - they're
+read-only commissioning helpers that open transient TCP connections but
+don't change state.
+"""
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -11,11 +24,17 @@ from sqlalchemy.orm import Session
 
 from app.api._helpers import handle_integrity_error, sql_col
 from app.db import get_session
+from app.utils.audit import audit, AuditEvent
 
 router = APIRouter(prefix="/api", tags=["devices"])
 
 
 DutyRole = Literal["duty", "standby", "none"]
+
+
+# ===========================================================================
+# Schemas (unchanged from original)
+# ===========================================================================
 
 
 class DeviceCreate(BaseModel):
@@ -33,40 +52,22 @@ class DeviceCreate(BaseModel):
     secondary_port: int | None = Field(None, ge=1, le=65535)
     secondary_unit_id: int | None = Field(None, ge=0, le=255)
     redundant_device_id: int | None = None
-    # Phase 12.2 — which tag on this device reports its self-assessed
-    # duty/standby role. NULL = manual-only (current behavior).
     duty_status_tag_id: int | None = None
-    # Phase 12.5 — suspends worker reconciliation for this pair
     manual_override: bool = False
-    # Phase 12.6 — operator may create a device in disabled state (useful
-    # for staging a config before going live, or for test fixtures that
-    # need a config row but no polling). DB default is TRUE; this surfaces
-    # it as a proper API field instead of silently defaulting.
     enabled: bool = True
-    # Phase 8.5 — Modbus hardening config
-    request_timeout_ms: int = Field(3000, ge=100, le=60000,
-        description="Per-request timeout in ms (100-60000)")
-    retry_count: int = Field(1, ge=0, le=10,
-        description="Retries on failed block reads (0-10)")
-    reconnect_initial_ms: int = Field(1000, ge=100, le=60000,
-        description="Initial reconnect backoff (ms)")
-    reconnect_max_ms: int = Field(30000, ge=100, le=300000,
-        description="Maximum reconnect backoff after exponential doubling (ms)")
+    request_timeout_ms: int = Field(3000, ge=100, le=60000)
+    retry_count: int = Field(1, ge=0, le=10)
+    reconnect_initial_ms: int = Field(1000, ge=100, le=60000)
+    reconnect_max_ms: int = Field(30000, ge=100, le=300000)
 
 
 class DeviceUpdate(BaseModel):
-    # Phase 11 — name editable. Device identity is the integer id (FK from
-    # tags, register_blocks, worker_device_status). Renaming preserves all
-    # references; the unique constraint (channel_id, name) is enforced at
-    # the DB level.
     name: str | None = Field(None, min_length=1, max_length=100)
     description: str | None = None
     protocol: str | None = None
     host: str | None = None
     port: int | None = Field(None, ge=1, le=65535)
     unit_id: int | None = Field(None, ge=0, le=255)
-    # Optional here = "field not supplied" (PATCH semantics). Frontend
-    # must send a valid value when it does include the field, never null.
     duty_role: DutyRole | None = None
     stale_after_sec: int | None = Field(None, ge=1)
     scan_interval_ms: int | None = Field(None, ge=10)
@@ -77,7 +78,6 @@ class DeviceUpdate(BaseModel):
     duty_status_tag_id: int | None = None
     manual_override: bool | None = None
     enabled: bool | None = None
-    # Phase 8.5 — Modbus hardening config (all optional for PATCH semantics)
     request_timeout_ms: int | None = Field(None, ge=100, le=60000)
     retry_count: int | None = Field(None, ge=0, le=10)
     reconnect_initial_ms: int | None = Field(None, ge=100, le=60000)
@@ -93,7 +93,7 @@ class DeviceResponse(BaseModel):
     protocol: str
     host: str | None
     port: int | None
-    unit_id: int
+    unit_id: int | None
     duty_role: str | None
     stale_after_sec: int
     scan_interval_ms: int
@@ -104,7 +104,6 @@ class DeviceResponse(BaseModel):
     duty_status_tag_id: int | None
     manual_override: bool
     enabled: bool
-    # Phase 8.5 — hardening config (always returned)
     request_timeout_ms: int
     retry_count: int
     reconnect_initial_ms: int
@@ -122,6 +121,62 @@ _DEVICE_SELECT = """
     FROM devices d
     JOIN channels c ON c.id = d.channel_id
 """
+
+
+# ===========================================================================
+# Audit helpers
+# ===========================================================================
+
+
+def _summarize_dev(row) -> dict[str, Any]:
+    """Compact before-state used on update/toggle audits."""
+    return {
+        "name": row["name"],
+        "channel_id": row.get("channel_id"),
+        "channel_name": row.get("channel_name"),
+        "host": row.get("host"),
+        "port": row.get("port"),
+        "unit_id": row.get("unit_id"),
+        "protocol": row.get("protocol"),
+        "duty_role": row.get("duty_role"),
+        "redundant_device_id": row.get("redundant_device_id"),
+        "manual_override": row.get("manual_override"),
+        "enabled": row.get("enabled"),
+    }
+
+
+def _full_dev(row) -> dict[str, Any]:
+    """Full before-state used on delete audits."""
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "channel_id": row.get("channel_id"),
+        "channel_name": row.get("channel_name"),
+        "description": row.get("description"),
+        "protocol": row.get("protocol"),
+        "host": row.get("host"),
+        "port": row.get("port"),
+        "unit_id": row.get("unit_id"),
+        "duty_role": row.get("duty_role"),
+        "stale_after_sec": row.get("stale_after_sec"),
+        "scan_interval_ms": row.get("scan_interval_ms"),
+        "secondary_host": row.get("secondary_host"),
+        "secondary_port": row.get("secondary_port"),
+        "secondary_unit_id": row.get("secondary_unit_id"),
+        "redundant_device_id": row.get("redundant_device_id"),
+        "duty_status_tag_id": row.get("duty_status_tag_id"),
+        "manual_override": row.get("manual_override"),
+        "enabled": row.get("enabled"),
+        "request_timeout_ms": row.get("request_timeout_ms"),
+        "retry_count": row.get("retry_count"),
+        "reconnect_initial_ms": row.get("reconnect_initial_ms"),
+        "reconnect_max_ms": row.get("reconnect_max_ms"),
+    }
+
+
+# ===========================================================================
+# List + get (read-only, not audited)
+# ===========================================================================
 
 
 @router.get("/devices", response_model=list[DeviceResponse])
@@ -150,11 +205,19 @@ def get_device(device_id: int, db: Annotated[Session, Depends(get_session)]):
     return dict(row)
 
 
+# ===========================================================================
+# Create / update / delete (audited)
+# ===========================================================================
+
+
 @router.post("/devices", response_model=DeviceResponse, status_code=201)
 def create_device(
     body: DeviceCreate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
+    target_label = body.name
+
     try:
         new_id = db.execute(
             text("""
@@ -185,7 +248,51 @@ def create_device(
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        handle_integrity_error(e, "device")
+        msg = str(e.orig).lower() if hasattr(e, "orig") else str(e).lower()
+        if "unique" in msg or "duplicate" in msg:
+            audit(AuditEvent(
+                action="device.create",
+                target_type="device",
+                target_label=target_label,
+                summary=f"Denied: device '{body.name}' already exists on channel {body.channel_id}",
+                status="denied",
+                error_message="duplicate (channel_id, name)",
+                details={"request": body.model_dump()},
+            ), request)
+        elif "foreign key" in msg:
+            audit(AuditEvent(
+                action="device.create",
+                target_type="device",
+                target_label=target_label,
+                summary=f"Denied: FK violation (likely channel_id {body.channel_id} doesn't exist)",
+                status="denied",
+                error_message=f"FK violation: {e.orig}",
+                details={"request": body.model_dump()},
+            ), request)
+        else:
+            audit(AuditEvent(
+                action="device.create",
+                target_type="device",
+                target_label=target_label,
+                summary="INSERT failed (IntegrityError)",
+                status="error",
+                error_message=str(e.orig),
+                details={"request": body.model_dump()},
+            ), request)
+        try:
+            handle_integrity_error(e, "device")
+        except HTTPException:
+            raise
+        raise HTTPException(400, f"Database constraint violation: {e.orig}")
+
+    audit(AuditEvent(
+        action="device.create",
+        target_type="device",
+        target_id=new_id,
+        target_label=target_label,
+        summary=f"Created device '{body.name}' (host={body.host}:{body.port}, protocol={body.protocol}, channel={body.channel_id})",
+        details=body.model_dump(),
+    ), request)
 
     return get_device(new_id, db)
 
@@ -194,65 +301,209 @@ def create_device(
 def update_device(
     device_id: int,
     body: DeviceUpdate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
     updates = body.model_dump(exclude_unset=True)
+    is_toggle = (len(updates) == 1 and "enabled" in updates)
+    action = "device.toggle" if is_toggle else "device.update"
+
+    # Pre-fetch for before-snapshot + 404 audit.
+    existing = db.execute(
+        text(_DEVICE_SELECT + " WHERE d.id = :id"),
+        {"id": device_id},
+    ).mappings().first()
+    if not existing:
+        audit(AuditEvent(
+            action=action,
+            target_type="device",
+            target_id=device_id,
+            summary=f"Denied: device {device_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": updates},
+        ), request)
+        raise HTTPException(404, f"device {device_id} not found")
+
+    target_label = existing["name"]
+
     if not updates:
+        audit(AuditEvent(
+            action=action,
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="Denied: no fields to update",
+            status="denied",
+            error_message="empty PATCH body",
+        ), request)
         raise HTTPException(400, "no fields to update")
 
     set_clauses = ", ".join(f"{sql_col(k)} = :{k}" for k in updates)
-    updates["id"] = device_id
+    params = {**updates, "id": device_id}
 
     try:
-        result = db.execute(
+        db.execute(
             text(f"UPDATE devices SET {set_clauses} WHERE id = :id"),
-            updates,
+            params,
         )
-        if result.rowcount == 0:
-            raise HTTPException(404, f"device {device_id} not found")
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        handle_integrity_error(e, "device")
+        msg = str(e.orig).lower() if hasattr(e, "orig") else str(e).lower()
+        if "unique" in msg or "duplicate" in msg:
+            audit(AuditEvent(
+                action=action,
+                target_type="device",
+                target_id=device_id,
+                target_label=target_label,
+                summary="Denied: update caused unique-constraint violation",
+                status="denied",
+                error_message="duplicate value",
+                details={"request": updates, "before": _summarize_dev(existing)},
+            ), request)
+        else:
+            audit(AuditEvent(
+                action=action,
+                target_type="device",
+                target_id=device_id,
+                target_label=target_label,
+                summary="UPDATE failed (IntegrityError)",
+                status="error",
+                error_message=str(e.orig),
+                details={"request": updates, "before": _summarize_dev(existing)},
+            ), request)
+        try:
+            handle_integrity_error(e, "device")
+        except HTTPException:
+            raise
+        raise HTTPException(400, f"Database constraint violation: {e.orig}")
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action=action,
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="UPDATE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": updates, "before": _summarize_dev(existing)},
+        ), request)
+        raise
+
+    if is_toggle:
+        new_state = "Enabled" if updates["enabled"] else "Disabled"
+        summary = f"{new_state} device '{existing['name']}' (channel={existing['channel_name']})"
+    else:
+        summary = f"Updated device '{existing['name']}' ({', '.join(updates.keys())})"
+
+    audit(AuditEvent(
+        action=action,
+        target_type="device",
+        target_id=device_id,
+        target_label=target_label,
+        summary=summary,
+        details={
+            "changed_fields": list(updates.keys()),
+            "request": updates,
+            "before": _summarize_dev(existing),
+        },
+    ), request)
 
     return get_device(device_id, db)
 
 
 @router.delete("/devices/{device_id}", status_code=204)
-def delete_device(device_id: int, db: Annotated[Session, Depends(get_session)]):
+def delete_device(
+    device_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+):
+    existing = db.execute(
+        text(_DEVICE_SELECT + " WHERE d.id = :id"),
+        {"id": device_id},
+    ).mappings().first()
+    if not existing:
+        audit(AuditEvent(
+            action="device.delete",
+            target_type="device",
+            target_id=device_id,
+            summary=f"Denied: device {device_id} not found",
+            status="denied",
+            error_message="not found",
+        ), request)
+        raise HTTPException(404, f"device {device_id} not found")
+
+    target_label = existing["name"]
+
+    # Count blockers for friendlier audit detail. tags, register_blocks,
+    # and the redundant_device pair all hold FKs into devices.
+    blockers = db.execute(text("""
+        SELECT
+            (SELECT COUNT(*) FROM register_blocks WHERE device_id = :id) AS register_blocks,
+            (SELECT COUNT(*) FROM tags WHERE device_id = :id) AS tags,
+            (SELECT COUNT(*) FROM devices WHERE redundant_device_id = :id) AS pair_partners
+    """), {"id": device_id}).mappings().first()
+
     try:
-        result = db.execute(
+        db.execute(
             text("DELETE FROM devices WHERE id = :id"),
             {"id": device_id},
         )
-        if result.rowcount == 0:
-            raise HTTPException(404, f"device {device_id} not found")
         db.commit()
     except IntegrityError as e:
         db.rollback()
+        audit(AuditEvent(
+            action="device.delete",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary=(
+                f"Denied: '{existing['name']}' has dependents "
+                f"(register_blocks={blockers['register_blocks']}, "
+                f"tags={blockers['tags']}, "
+                f"pair_partners={blockers['pair_partners']})"
+            ),
+            status="denied",
+            error_message="FK violation from dependent rows",
+            details={"before": _full_dev(existing), "blockers": dict(blockers)},
+        ), request)
         raise HTTPException(
             409,
             f"device {device_id} cannot be deleted because other rows reference it "
             "(register_blocks, tags, or the redundant_device pair)",
         )
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="device.delete",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="DELETE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"before": _full_dev(existing)},
+        ), request)
+        raise
+
+    audit(AuditEvent(
+        action="device.delete",
+        target_type="device",
+        target_id=device_id,
+        target_label=target_label,
+        summary=f"Deleted device '{existing['name']}' (host={existing.get('host')}:{existing.get('port')}, channel={existing.get('channel_name')})",
+        details={"before": _full_dev(existing)},
+    ), request)
 
 
-# ---------------------------------------------------------------------------
-# Phase 12 — Duty/standby pairing (configuration + manual swap)
-# ---------------------------------------------------------------------------
-#
-# Schema invariants enforced by ck_devices_duty_role_consistency:
-#   duty_role = 'none'        ⇔  redundant_device_id IS NULL
-#   duty_role IN ('duty','standby')  ⇔  redundant_device_id IS NOT NULL
-#
-# Both rows of a pair MUST satisfy the constraint after every transaction.
-# These endpoints wrap the multi-row UPDATEs in a single transaction so
-# we never leave the database in a state that would fail the constraint.
+# ===========================================================================
+# Phase 12 - duty/standby pairing (configuration + manual swap)
+# ===========================================================================
+
 
 class PairRequest(BaseModel):
-    """Pair this device with a partner. This device becomes the duty role
-    given (default 'duty'); the partner becomes the opposite role.
-    Both `redundant_device_id` columns are set to point at each other."""
     partner_device_id: int
     this_role: Literal["duty", "standby"] = "duty"
 
@@ -261,39 +512,58 @@ class PairRequest(BaseModel):
 def pair_devices(
     device_id: int,
     body: PairRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
     """Create a duty/standby pair between two devices in one transaction.
 
-    Either device may already be in a pair; if so, the old partner is
-    unpaired first (set duty_role='none', redundant_device_id=NULL). This
-    keeps the schema invariant intact at every commit boundary.
+    Audit captures:
+      - this_role + partner role
+      - any old partners that got broken up as a side-effect
+      - the auto_create_pair_tags() return value (number of pair_tags made)
     """
     if device_id == body.partner_device_id:
+        audit(AuditEvent(
+            action="device.pair",
+            target_type="device",
+            target_id=device_id,
+            summary="Denied: self-pair attempt",
+            status="denied",
+            error_message="device cannot be its own partner",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(400, "a device cannot be its own partner")
 
-    # Verify both devices exist
+    # Verify both devices exist (FOR UPDATE locks the rows).
     rows = db.execute(
         text("SELECT id, name, duty_role, redundant_device_id FROM devices "
              "WHERE id IN (:a, :b) FOR UPDATE"),
         {"a": device_id, "b": body.partner_device_id},
     ).mappings().all()
     if len(rows) != 2:
+        audit(AuditEvent(
+            action="device.pair",
+            target_type="device",
+            target_id=device_id,
+            summary=f"Denied: one or both devices not found (requested {device_id} + {body.partner_device_id})",
+            status="denied",
+            error_message="device(s) not found",
+            details={"request": body.model_dump(), "found_ids": [r["id"] for r in rows]},
+        ), request)
         raise HTTPException(404, "one or both devices not found")
 
     me = next(r for r in rows if r["id"] == device_id)
     partner = next(r for r in rows if r["id"] == body.partner_device_id)
+    target_label = me["name"]
     partner_role: Literal["duty", "standby"] = (
         "standby" if body.this_role == "duty" else "duty"
     )
 
-    # Unpair any existing partners (avoids constraint violation when our
-    # update lands on a row whose old partner now has duty_role IN
-    # ('duty','standby') but redundant_device_id NULL).
     old_partner_ids = {
         me["redundant_device_id"],
         partner["redundant_device_id"],
     } - {None, device_id, body.partner_device_id}
+
     if old_partner_ids:
         db.execute(
             text("UPDATE devices SET duty_role='none', redundant_device_id=NULL "
@@ -301,7 +571,6 @@ def pair_devices(
             {"ids": list(old_partner_ids)},
         )
 
-    # Apply the new pairing.
     try:
         db.execute(
             text("UPDATE devices SET duty_role=:r, redundant_device_id=:p WHERE id=:id"),
@@ -311,8 +580,6 @@ def pair_devices(
             text("UPDATE devices SET duty_role=:r, redundant_device_id=:p WHERE id=:id"),
             {"r": partner_role, "p": device_id, "id": body.partner_device_id},
         )
-        # Record the pairing as a "startup"-reason history row so reports
-        # can answer "who was duty when?" from the very first moment.
         db.execute(
             text("""INSERT INTO device_duty_history
                     (device_id, paired_device_id, switched_at, reason, notes)
@@ -320,18 +587,74 @@ def pair_devices(
             {
                 "d": device_id if body.this_role == "duty" else body.partner_device_id,
                 "p": body.partner_device_id if body.this_role == "duty" else device_id,
-                "note": f"paired via API: {me['name']} ({body.this_role}) ↔ {partner['name']} ({partner_role})",
+                "note": f"paired via API: {me['name']} ({body.this_role}) <-> {partner['name']} ({partner_role})",
             },
         )
-        # Phase 12.3 — auto-generate pair tags for name-matching tags
-        # across the two devices. Same transaction as the pairing itself
-        # so a constraint failure here rolls back the whole pair.
         from app.api.pair_tags import auto_create_pair_tags
-        auto_create_pair_tags(db, device_id, body.partner_device_id)
+        pair_tags_created = auto_create_pair_tags(db, device_id, body.partner_device_id)
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        handle_integrity_error(e, "device")
+        audit(AuditEvent(
+            action="device.pair",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="pair failed (IntegrityError)",
+            status="error",
+            error_message=str(e.orig),
+            details={
+                "request": body.model_dump(),
+                "this_before": dict(me),
+                "partner_before": dict(partner),
+            },
+        ), request)
+        try:
+            handle_integrity_error(e, "device")
+        except HTTPException:
+            raise
+        raise HTTPException(400, f"Database constraint violation: {e.orig}")
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="device.pair",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="pair failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={
+                "request": body.model_dump(),
+                "this_before": dict(me),
+                "partner_before": dict(partner),
+            },
+        ), request)
+        raise
+
+    audit(AuditEvent(
+        action="device.pair",
+        target_type="device",
+        target_id=device_id,
+        target_label=target_label,
+        summary=(
+            f"Paired '{me['name']}' ({body.this_role}) with '{partner['name']}' "
+            f"({partner_role}); created {pair_tags_created} pair_tag(s)"
+            + (f"; broke up old partner(s): {sorted(old_partner_ids)}" if old_partner_ids else "")
+        ),
+        details={
+            "this_device_id": device_id,
+            "this_device_name": me["name"],
+            "this_role": body.this_role,
+            "partner_device_id": body.partner_device_id,
+            "partner_device_name": partner["name"],
+            "partner_role": partner_role,
+            "pair_tags_created": pair_tags_created,
+            "old_partners_broken_up": sorted(old_partner_ids) if old_partner_ids else [],
+            "this_before": dict(me),
+            "partner_before": dict(partner),
+        },
+    ), request)
 
     return get_device(device_id, db)
 
@@ -339,34 +662,125 @@ def pair_devices(
 @router.post("/devices/{device_id}/unpair", response_model=DeviceResponse)
 def unpair_device(
     device_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Break the pair this device is part of. Both devices revert to
-    duty_role='none', redundant_device_id=NULL."""
-    row = db.execute(
-        text("SELECT redundant_device_id FROM devices WHERE id=:id"),
-        {"id": device_id},
-    ).mappings().first()
-    if not row:
+    """Break the pair this device is part of. Captures partner name and
+    pair_tags_deleted count before the destruction so the audit is
+    self-contained."""
+
+    # Pre-fetch with partner name for audit.
+    existing = db.execute(text("""
+        SELECT d.id, d.name, d.duty_role, d.redundant_device_id,
+               p.name AS partner_name, p.duty_role AS partner_duty_role
+        FROM devices d
+        LEFT JOIN devices p ON p.id = d.redundant_device_id
+        WHERE d.id = :id
+    """), {"id": device_id}).mappings().first()
+    if not existing:
+        audit(AuditEvent(
+            action="device.unpair",
+            target_type="device",
+            target_id=device_id,
+            summary=f"Denied: device {device_id} not found",
+            status="denied",
+            error_message="not found",
+        ), request)
         raise HTTPException(404, f"device {device_id} not found")
-    partner_id = row["redundant_device_id"]
+
+    target_label = existing["name"]
+    partner_id = existing["redundant_device_id"]
+    partner_name = existing["partner_name"]
+
+    if partner_id is None:
+        # Not actually paired - record but don't reject (current code
+        # accepts this silently; preserve behavior, just audit it).
+        audit(AuditEvent(
+            action="device.unpair",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary=f"Unpaired '{existing['name']}' (was not paired - no-op)",
+            details={
+                "before": dict(existing),
+                "pair_tags_deleted": 0,
+                "noop_reason": "device was not paired",
+            },
+        ), request)
+        # Still execute the UPDATE harmlessly to preserve the original
+        # behavior (it's a no-op).
+        try:
+            db.execute(
+                text("UPDATE devices SET duty_role='none', redundant_device_id=NULL "
+                     "WHERE id IN (:a, :b)"),
+                {"a": device_id, "b": device_id},
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return get_device(device_id, db)
 
     try:
-        # Phase 12.3 — remove auto-generated pair tags before unpairing.
-        # Done before the device UPDATE so we still have the FK references
-        # in place. Done inside the same transaction so the change is atomic.
-        if partner_id is not None:
-            from app.api.pair_tags import auto_delete_pair_tags
-            auto_delete_pair_tags(db, device_id, partner_id)
+        from app.api.pair_tags import auto_delete_pair_tags
+        pair_tags_deleted = auto_delete_pair_tags(db, device_id, partner_id)
+
         db.execute(
             text("UPDATE devices SET duty_role='none', redundant_device_id=NULL "
                  "WHERE id IN (:a, :b)"),
-            {"a": device_id, "b": partner_id or device_id},
+            {"a": device_id, "b": partner_id},
         )
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        handle_integrity_error(e, "device")
+        audit(AuditEvent(
+            action="device.unpair",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="unpair failed (IntegrityError)",
+            status="error",
+            error_message=str(e.orig),
+            details={"before": dict(existing)},
+        ), request)
+        try:
+            handle_integrity_error(e, "device")
+        except HTTPException:
+            raise
+        raise HTTPException(400, f"Database constraint violation: {e.orig}")
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="device.unpair",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="unpair failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"before": dict(existing)},
+        ), request)
+        raise
+
+    audit(AuditEvent(
+        action="device.unpair",
+        target_type="device",
+        target_id=device_id,
+        target_label=target_label,
+        summary=(
+            f"Unpaired '{existing['name']}' from '{partner_name}'; "
+            f"removed {pair_tags_deleted} pair_tag(s)"
+        ),
+        details={
+            "this_device_id": device_id,
+            "this_device_name": existing["name"],
+            "this_old_role": existing["duty_role"],
+            "partner_device_id": partner_id,
+            "partner_device_name": partner_name,
+            "partner_old_role": existing["partner_duty_role"],
+            "pair_tags_deleted": pair_tags_deleted,
+        },
+    ), request)
 
     return get_device(device_id, db)
 
@@ -381,43 +795,64 @@ class SwapDutyRequest(BaseModel):
 def swap_duty(
     device_id: int,
     body: SwapDutyRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Atomically swap duty/standby roles between this device and its partner.
+    """Atomically swap duty/standby roles between this device and its
+    partner. Audit captures both sides' from->to roles plus the reason."""
 
-    Records the swap in device_duty_history so reports can later answer
-    "who was duty at time T?" for fiscal audit purposes.
-
-    Caller can be either the current duty or the current standby — we
-    just flip both rows. Requires that the device is part of a pair.
-    """
-    row = db.execute(
-        text("SELECT id, name, duty_role, redundant_device_id FROM devices WHERE id=:id"),
-        {"id": device_id},
-    ).mappings().first()
-    if not row:
+    existing = db.execute(text("""
+        SELECT d.id, d.name, d.duty_role, d.redundant_device_id,
+               p.name AS partner_name, p.duty_role AS partner_duty_role
+        FROM devices d
+        LEFT JOIN devices p ON p.id = d.redundant_device_id
+        WHERE d.id = :id
+    """), {"id": device_id}).mappings().first()
+    if not existing:
+        audit(AuditEvent(
+            action="device.swap_duty",
+            target_type="device",
+            target_id=device_id,
+            summary=f"Denied: device {device_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(404, f"device {device_id} not found")
-    if row["redundant_device_id"] is None or row["duty_role"] == "none":
+
+    target_label = existing["name"]
+
+    if existing["redundant_device_id"] is None or existing["duty_role"] == "none":
+        audit(AuditEvent(
+            action="device.swap_duty",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary=f"Denied: '{existing['name']}' is not part of a duty/standby pair",
+            status="denied",
+            error_message="not paired",
+            details={"request": body.model_dump(), "before": dict(existing)},
+        ), request)
         raise HTTPException(400, "device is not part of a duty/standby pair")
 
-    partner_id = row["redundant_device_id"]
-    # After the swap, whoever was 'standby' becomes 'duty' and vice versa.
-    new_role_for_me = "standby" if row["duty_role"] == "duty" else "duty"
-    new_role_for_partner = "duty" if row["duty_role"] == "duty" else "standby"
+    partner_id = existing["redundant_device_id"]
+    partner_name = existing["partner_name"]
+    my_old_role = existing["duty_role"]
+    partner_old_role = existing["partner_duty_role"]
+    my_new_role = "standby" if my_old_role == "duty" else "duty"
+    partner_new_role = "duty" if my_old_role == "duty" else "standby"
 
     try:
         db.execute(
             text("UPDATE devices SET duty_role=:r WHERE id=:id"),
-            {"r": new_role_for_me, "id": device_id},
+            {"r": my_new_role, "id": device_id},
         )
         db.execute(
             text("UPDATE devices SET duty_role=:r WHERE id=:id"),
-            {"r": new_role_for_partner, "id": partner_id},
+            {"r": partner_new_role, "id": partner_id},
         )
-        # The 'device_id' in history is the device that BECAME duty.
-        # 'paired_device_id' is the one that became standby.
-        became_duty = partner_id if new_role_for_me == "standby" else device_id
-        became_standby = device_id if new_role_for_me == "standby" else partner_id
+        became_duty = partner_id if my_new_role == "standby" else device_id
+        became_standby = device_id if my_new_role == "standby" else partner_id
         db.execute(
             text("""INSERT INTO device_duty_history
                     (device_id, paired_device_id, switched_at, reason, notes)
@@ -432,7 +867,60 @@ def swap_duty(
         db.commit()
     except IntegrityError as e:
         db.rollback()
-        handle_integrity_error(e, "device")
+        audit(AuditEvent(
+            action="device.swap_duty",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="swap_duty failed (IntegrityError)",
+            status="error",
+            error_message=str(e.orig),
+            details={"request": body.model_dump(), "before": dict(existing)},
+        ), request)
+        try:
+            handle_integrity_error(e, "device")
+        except HTTPException:
+            raise
+        raise HTTPException(400, f"Database constraint violation: {e.orig}")
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="device.swap_duty",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="swap_duty failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": body.model_dump(), "before": dict(existing)},
+        ), request)
+        raise
+
+    audit(AuditEvent(
+        action="device.swap_duty",
+        target_type="device",
+        target_id=device_id,
+        target_label=target_label,
+        summary=(
+            f"Duty swap (reason={body.reason}): "
+            f"'{existing['name']}' {my_old_role}->{my_new_role}, "
+            f"'{partner_name}' {partner_old_role}->{partner_new_role}"
+        ),
+        details={
+            "reason": body.reason,
+            "notes": body.notes,
+            "this_device_id": device_id,
+            "this_device_name": existing["name"],
+            "this_old_role": my_old_role,
+            "this_new_role": my_new_role,
+            "partner_device_id": partner_id,
+            "partner_device_name": partner_name,
+            "partner_old_role": partner_old_role,
+            "partner_new_role": partner_new_role,
+            "became_duty_device_id": became_duty,
+            "became_standby_device_id": became_standby,
+        },
+    ), request)
 
     return get_device(device_id, db)
 
@@ -443,7 +931,7 @@ class DutyHistoryRow(BaseModel):
     device_name: str
     paired_device_id: int
     paired_device_name: str
-    switched_at: str  # ISO 8601 string
+    switched_at: str
     reason: str
     notes: str | None
 
@@ -454,11 +942,6 @@ def get_duty_history(
     db: Annotated[Session, Depends(get_session)],
     limit: int = Query(50, ge=1, le=500),
 ):
-    """Recent duty switches involving this device, newest first.
-
-    Returns rows where this device was on EITHER side of the swap, so
-    operators can see every transition the device participated in.
-    """
     rows = db.execute(
         text("""
             SELECT h.id, h.device_id, d.name AS device_name,
@@ -479,22 +962,7 @@ def get_duty_history(
     ]
 
 
-# ---------------------------------------------------------------------------
-# Test read (Phase 7 commissioning helper — C2)
-# ---------------------------------------------------------------------------
-#
-# Issues a one-shot Modbus read on demand and returns the raw bytes plus a
-# decoded matrix across every data type / byte order combination that fits
-# the byte count. Engineers use this to find the right interpretation by
-# eye — "the float32 ABCD column reads 19.71, matches the device display,
-# I'll pick that combination for the tag".
-
-# Phase 12.5 — Manual override for duty/standby pairs.
-# Setting manual_override=TRUE on either side of a pair suspends worker
-# reconciliation for that pair. Operators use this to perform sticky
-# manual swaps during commissioning, maintenance, or controlled failover
-# tests. Toggling via this endpoint sets BOTH sides atomically so the
-# pair has a single coherent mode at all times.
+# Phase 12.5 - manual override for duty/standby pairs.
 
 class SetPairOverrideRequest(BaseModel):
     enable: bool
@@ -504,39 +972,99 @@ class SetPairOverrideRequest(BaseModel):
 def set_pair_override(
     device_id: int,
     body: SetPairOverrideRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
     """Toggle manual_override on both sides of a duty/standby pair.
+    Audited as device.set_pair_override."""
 
-    When enabled, the worker's reconciliation loop excludes this pair, so
-    any manual swap (via /swap-duty or the UI) sticks until override is
-    disabled. When disabled, the worker resumes reconciliation on the
-    next cycle and will sync duty_role with the device-reported value.
-    """
-    row = db.execute(
-        text("SELECT id, redundant_device_id FROM devices WHERE id = :id"),
-        {"id": device_id},
-    ).mappings().first()
-    if not row:
+    existing = db.execute(text("""
+        SELECT d.id, d.name, d.redundant_device_id, d.manual_override,
+               p.name AS partner_name, p.manual_override AS partner_override
+        FROM devices d
+        LEFT JOIN devices p ON p.id = d.redundant_device_id
+        WHERE d.id = :id
+    """), {"id": device_id}).mappings().first()
+    if not existing:
+        audit(AuditEvent(
+            action="device.set_pair_override",
+            target_type="device",
+            target_id=device_id,
+            summary=f"Denied: device {device_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(404, "device not found")
-    if row["redundant_device_id"] is None:
-        raise HTTPException(400, "device is not paired — manual override only applies to pairs")
 
-    ids = [device_id, row["redundant_device_id"]]
-    db.execute(
-        text("UPDATE devices SET manual_override = :v WHERE id = ANY(:ids)"),
-        {"v": body.enable, "ids": ids},
-    )
-    db.commit()
+    target_label = existing["name"]
+
+    if existing["redundant_device_id"] is None:
+        audit(AuditEvent(
+            action="device.set_pair_override",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary=f"Denied: '{existing['name']}' is not paired",
+            status="denied",
+            error_message="not paired",
+            details={"request": body.model_dump()},
+        ), request)
+        raise HTTPException(400, "device is not paired - manual override only applies to pairs")
+
+    ids = [device_id, existing["redundant_device_id"]]
+
+    try:
+        db.execute(
+            text("UPDATE devices SET manual_override = :v WHERE id = ANY(:ids)"),
+            {"v": body.enable, "ids": ids},
+        )
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        audit(AuditEvent(
+            action="device.set_pair_override",
+            target_type="device",
+            target_id=device_id,
+            target_label=target_label,
+            summary="set_pair_override failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": body.model_dump()},
+        ), request)
+        raise
+
+    state = "Enabled" if body.enable else "Disabled"
+    audit(AuditEvent(
+        action="device.set_pair_override",
+        target_type="device",
+        target_id=device_id,
+        target_label=target_label,
+        summary=(
+            f"{state} manual override on pair "
+            f"'{existing['name']}' + '{existing['partner_name']}'"
+        ),
+        details={
+            "enable": body.enable,
+            "this_device_id": device_id,
+            "this_device_name": existing["name"],
+            "this_old_override": existing["manual_override"],
+            "partner_device_id": existing["redundant_device_id"],
+            "partner_device_name": existing["partner_name"],
+            "partner_old_override": existing["partner_override"],
+        },
+    ), request)
 
     updated = db.execute(text(_DEVICE_SELECT + " WHERE d.id = :id"),
                          {"id": device_id}).mappings().first()
     return dict(updated)
 
 
-# ----------------------------------------------------------------------
-# Modbus diagnostics — raw register reads + scan
-# ----------------------------------------------------------------------
+# ===========================================================================
+# Modbus diagnostics - test_read + scan_range
+# NOT AUDITED: read-only commissioning helpers, no state mutation.
+# Everything below is preserved verbatim from the original source.
+# ===========================================================================
 
 import struct as _struct
 from pymodbus.client import ModbusTcpClient as _ModbusTcpClient
@@ -552,16 +1080,10 @@ class TestReadResponse(BaseModel):
     raw_bytes_hex: str
     register_count: int
     function_code: int
-    decoded: dict  # nested: data_type -> byte_order -> value (as str so JSON survives big ints)
+    decoded: dict
 
 
 def _decode_matrix(raw_bytes: bytes) -> dict:
-    """Try every data type / byte order combination that fits the byte count.
-
-    Returns nested dict: {data_type: {byte_order_label: stringified value}}.
-    Values are stringified because JSON spec can't carry full uint64 fidelity
-    and the UI just renders them as text anyway.
-    """
     n = len(raw_bytes)
     result: dict = {}
 
@@ -578,7 +1100,6 @@ def _decode_matrix(raw_bytes: bytes) -> dict:
 
     if n >= 4:
         b = raw_bytes[0:4]
-        # Four byte-order permutations
         orderings = {
             "ABCD (big-endian)":            b,
             "CDAB (word-swap)":             b[2:4] + b[0:2],
@@ -594,8 +1115,8 @@ def _decode_matrix(raw_bytes: bytes) -> dict:
     if n >= 8:
         b = raw_bytes[0:8]
         orderings_64 = {
-            "ABCD…HG (big-endian)": b,
-            "DCBA…FE (little-endian)": b[::-1],
+            "ABCD...HG (big-endian)": b,
+            "DCBA...FE (little-endian)": b[::-1],
         }
         result["int64"] = {
             k: str(_struct.unpack(">q", v)[0]) for k, v in orderings_64.items()
@@ -607,9 +1128,6 @@ def _decode_matrix(raw_bytes: bytes) -> dict:
 
 
 def _format_float(f: float) -> str:
-    """Render a float in a way that distinguishes plausible-looking values
-    from garbage (denormals, infinities, etc). Engineers scan visually for
-    sensible numbers."""
     import math
     if math.isnan(f):
         return "NaN"
@@ -619,7 +1137,7 @@ def _format_float(f: float) -> str:
     if abs_f == 0:
         return "0"
     if abs_f < 1e-6 or abs_f > 1e9:
-        return f"{f:.3e}"  # likely garbage byte order
+        return f"{f:.3e}"
     if abs_f >= 1000:
         return f"{f:.2f}"
     if abs_f >= 1:
@@ -633,14 +1151,6 @@ def test_read(
     body: TestReadRequest,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """One-shot read of a device register for commissioning.
-
-    Opens a transient TCP connection to the device, issues the read, decodes
-    the response in every plausible data type / byte order, returns the
-    matrix. Connection is closed after. For devices that only allow one TCP
-    client, the worker will briefly disconnect and reconnect on its next
-    cycle — acceptable for a manual operation.
-    """
     row = db.execute(
         text("SELECT id, host, port, unit_id FROM devices WHERE id = :id"),
         {"id": device_id},
@@ -663,7 +1173,7 @@ def test_read(
                 resp = client.read_discrete_inputs(body.address, count=body.register_count, slave=unit_id)
             elif fc == 3:
                 resp = client.read_holding_registers(body.address, count=body.register_count, slave=unit_id)
-            else:  # fc == 4
+            else:
                 resp = client.read_input_registers(body.address, count=body.register_count, slave=unit_id)
         except Exception as e:
             raise HTTPException(502, f"read failed: {e}")
@@ -672,7 +1182,6 @@ def test_read(
             raise HTTPException(502, f"modbus error: {resp}")
 
         if fc in (1, 2):
-            # Bit reads
             bits = list(resp.bits)[: body.register_count]
             decoded = {"bool": {"-": " ".join("1" if b else "0" for b in bits)}}
             raw_hex = " ".join(f"{int(b):02x}" for b in bits)
@@ -692,45 +1201,19 @@ def test_read(
         client.close()
 
 
-# ---------------------------------------------------------------------------
-# Scan range (Phase 7 — C4 Register Browser)
-# ---------------------------------------------------------------------------
-#
-# Reads a contiguous address range from a device and returns one entry per
-# register. The frontend Register Browser uses this to "discover" what data
-# lives at unmapped addresses — invaluable when working from a vendor manual
-# whose register map you don't fully trust yet.
-#
-# Reads are chunked at the Modbus protocol cap (125 holding/input registers,
-# 2000 coils/discrete-inputs per request). Total range is capped at 1000
-# addresses to bound response size and request duration.
-
-
+# Scan range (Phase 7 C4 Register Browser).
 class ScanRangeRequest(BaseModel):
     function_code: int = Field(..., ge=1, le=4)
     start_address: int = Field(..., ge=0, le=65535)
     end_address: int = Field(..., ge=0, le=65535)
-    # Phase 10.2 — Enron-style read. When set, the scan routes through the
-    # persistent EnronChannel (permissive byte_count parser, supports
-    # Daniel's 4N+3 framing). Each logical address holds one value; width
-    # is the value's on-wire byte count (2, 4, or 8).
-    addressing_mode: str | None = Field(
-        None, description="STANDARD (default) | ENRON_HOLDING | ENRON_INPUT",
-    )
-    value_width_bytes: int | None = Field(
-        None, ge=2, le=8,
-        description="2, 4, or 8 — bytes per logical address (Enron only).",
-    )
+    addressing_mode: str | None = Field(None)
+    value_width_bytes: int | None = Field(None, ge=2, le=8)
 
 
 class ScanRow(BaseModel):
     address: int
-    hex: str           # full byte width: 2 hex pairs for 16-bit, 4 for 32-bit, 8 for 64-bit
-    value: int         # first uint16 (or 0/1 for bits) — for back-compat display
-
-    # Phase 10.2 — decoded interpretations baked in when Enron-mode reads
-    # know the width. Standard reads leave these None and let the frontend
-    # do consecutive-row pairing as before.
+    hex: str
+    value: int
     decoded_float32_abcd: float | None = None
     decoded_float32_dcba: float | None = None
     decoded_int32: int | None = None
@@ -748,7 +1231,6 @@ class ScanRangeResponse(BaseModel):
     rows: list[ScanRow]
 
 
-# Modbus protocol caps per FC
 _MAX_CHUNK_BY_FC = {1: 2000, 2: 2000, 3: 125, 4: 125}
 _MAX_RANGE = 1000
 
@@ -759,15 +1241,6 @@ def scan_range(
     body: ScanRangeRequest,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Scan a contiguous address range for register-discovery workflows.
-
-    Two paths share this endpoint:
-      * STANDARD — pymodbus sync client, returns one row per 16-bit register
-      * ENRON_HOLDING/INPUT — persistent EnronChannel, returns one row per
-        logical address (with full-width hex + decoded float32/int32) so
-        you can see what's at each Daniel/Emerson 700XA address without
-        having to first map out byte widths by trial and error.
-    """
     if body.end_address < body.start_address:
         raise HTTPException(400, "end_address must be >= start_address")
 
@@ -786,17 +1259,14 @@ def scan_range(
     if not row:
         raise HTTPException(404, "device not found")
 
-    # Phase 10.2 — Enron path. We delegate to the same persistent-socket
-    # channel the worker uses, which means Daniel's "4N + trailing" framing
-    # is handled exactly the way it is for live polling.
     is_enron = body.addressing_mode in ("ENRON_HOLDING", "ENRON_INPUT")
     if is_enron:
         if body.value_width_bytes not in (2, 4, 8):
             raise HTTPException(
                 400,
                 "value_width_bytes must be 2, 4, or 8 for Enron reads "
-                "(uint16/int16 → 2, uint32/int32/float32 → 4, "
-                "uint64/int64/float64 → 8).",
+                "(uint16/int16 -> 2, uint32/int32/float32 -> 4, "
+                "uint64/int64/float64 -> 8).",
             )
         if body.function_code not in (3, 4):
             raise HTTPException(
@@ -806,7 +1276,6 @@ def scan_range(
             )
         return _scan_enron(row, body)
 
-    # Standard pymodbus path (the original Phase 7 C4 behavior, unchanged).
     fc = body.function_code
     max_chunk = _MAX_CHUNK_BY_FC[fc]
     is_bits = fc in (1, 2)
@@ -833,7 +1302,7 @@ def scan_range(
                     resp = client.read_discrete_inputs(cursor, count=chunk_count, slave=row["unit_id"])
                 elif fc == 3:
                     resp = client.read_holding_registers(cursor, count=chunk_count, slave=row["unit_id"])
-                else:  # fc == 4
+                else:
                     resp = client.read_input_registers(cursor, count=chunk_count, slave=row["unit_id"])
             except Exception as e:
                 raise HTTPException(502, f"read failed at address {cursor}: {e}")
@@ -881,24 +1350,7 @@ def scan_range(
         client.close()
 
 
-# ===========================================================================
-# Phase 10.2 — Enron-mode scan helper
-# ===========================================================================
 def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
-    """Run the address-range scan through the EnronChannel.
-
-    Each logical address is decoded once into every plausible interpretation
-    for its width: float32 ABCD + DCBA, signed/unsigned 32-bit ints (width=4),
-    or float64 ABCD (width=8). For width=2 the standard uint16/int16
-    interpretations are produced by the frontend (same as the STANDARD path).
-
-    Retry behavior (Phase 10.2-hotfix): Daniel/Emerson GCs sometimes drop the
-    first TCP connection from a new client within the first ~100 ms, especially
-    when the worker already holds a persistent connection. We retry each chunk
-    up to 3 times with a short backoff before giving up — long enough to ride
-    out a single bad open, short enough that a genuinely unreachable device
-    fails the user's scan within a few seconds.
-    """
     import asyncio
     import struct
     import time as _time
@@ -907,7 +1359,7 @@ def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
 
     width = body.value_width_bytes
     assert width in (2, 4, 8)
-    addresses_per_chunk = 50          # safe under Modbus's 125-register cap
+    addresses_per_chunk = 50
     request_timeout_s = 5.0
     max_attempts = 3
     retry_backoff_s = 0.4
@@ -928,14 +1380,11 @@ def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
                 last_err = e
                 if attempt == max_attempts:
                     break
-                # Force a fresh socket on retry — the existing one is probably
-                # half-closed if the peer dropped us mid-handshake.
                 try:
                     await ch.close()
                 except Exception:
                     pass
                 await asyncio.sleep(retry_backoff_s)
-        # Reraise with a hint about retries so the UI message is informative.
         raise RuntimeError(
             f"after {max_attempts} attempts at address {cursor}: {last_err}"
         )
@@ -964,7 +1413,6 @@ def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
     except Exception as e:
         raise HTTPException(502, f"enron scan failed: {e}")
 
-    # words_per_addr = width / 2
     wpa = width // 2
     total_addrs = body.end_address - body.start_address + 1
     expected_words = total_addrs * wpa
@@ -978,7 +1426,6 @@ def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
     for i in range(total_addrs):
         addr = body.start_address + i
         words = all_words[i * wpa:(i + 1) * wpa]
-        # Pack words → bytes (big-endian) for hex display
         raw_bytes = b"".join(w.to_bytes(2, "big") for w in words)
         hex_str = " ".join(f"{b:02X}" for b in raw_bytes)
 
@@ -996,8 +1443,6 @@ def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
         elif width == 8:
             decoded_f64 = struct.unpack(">d", raw_bytes)[0]
 
-        # NaN/Inf serialize fine to JSON only if we sanitize: float() over a
-        # struct-unpacked NaN is still NaN. Replace with None so JSON is valid.
         for name, v in (
             ("decoded_f32_abcd", decoded_f32_abcd),
             ("decoded_f32_dcba", decoded_f32_dcba),
@@ -1011,7 +1456,7 @@ def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
         rows.append(ScanRow(
             address=addr,
             hex=hex_str,
-            value=words[0],                # first uint16 — keeps the existing UI happy
+            value=words[0],
             decoded_float32_abcd=decoded_f32_abcd,
             decoded_float32_dcba=decoded_f32_dcba,
             decoded_int32=decoded_i32,

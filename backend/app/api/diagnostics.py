@@ -311,7 +311,8 @@ def list_tag_overlaps(db: Annotated[Session, Depends(get_session)]):
          AND t1.function_code = t2.function_code
          AND t1.id < t2.id
         JOIN devices d ON d.id = t1.device_id
-        WHERE t1.address < t2.address + t2.effective_span
+        WHERE d.protocol <> 'computed'
+        AND t1.address < t2.address + t2.effective_span
           AND t2.address < t1.address + t1.effective_span
         ORDER BY t1.device_id, t1.function_code, t1.address
     """)).mappings().all()

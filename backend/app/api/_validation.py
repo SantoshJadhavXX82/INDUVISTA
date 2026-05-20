@@ -1,14 +1,11 @@
 """Shared validation helpers — pure functions that return data, no exceptions.
-
 Used by:
   * app/api/diagnostics.py — lists all currently-problematic rows
   * app/api/tags.py        — rejects new/modified tags that would create problems
-
 Keeping these here means the rules of what "valid" means live in one file.
 Both consumers agree on the definition.
 """
 from __future__ import annotations
-
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -30,7 +27,22 @@ def find_tag_overlaps(
 
     `exclude_tag_id` lets PATCH check overlap against everything *except* the
     row being updated — otherwise updating any tag would "overlap with itself".
+
+    Phase 17.0a: computed tags carry sentinel function_code=3 and address=0
+    in the tags table (those columns are NOT NULL but meaningless for
+    computed tags — the calc evaluator produces values without a Modbus
+    target). All computed tags on a given computed device would therefore
+    appear to "overlap" each other. Short-circuit: if the device is
+    protocol='computed', no overlap check applies — return [].
     """
+    # Cheap early-out: skip overlap detection entirely for computed devices.
+    device_protocol = db.execute(
+        text("SELECT protocol FROM devices WHERE id = :id"),
+        {"id": device_id},
+    ).scalar()
+    if device_protocol == "computed":
+        return []
+
     sql = """
         SELECT id, name, address, register_count, function_code
         FROM tags
@@ -70,6 +82,10 @@ def check_tag_fits_block(
     If the block doesn't exist, this returns None — the FK constraint will
     surface that error at INSERT time with a clearer message than we could
     produce here.
+
+    Note: computed tags never have a register_block_id (they're created via
+    /api/computed-tags which sets register_block_id IS NULL), so this
+    function is never called for them.
     """
     row = db.execute(
         text("""
@@ -81,7 +97,6 @@ def check_tag_fits_block(
     ).mappings().first()
     if not row:
         return None
-
     if function_code != row["function_code"]:
         return (
             f"tag function_code={function_code} doesn't match "

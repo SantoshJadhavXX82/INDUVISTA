@@ -1,4 +1,5 @@
 """Phase 15.2 - Calc definitions CRUD API.
+Phase 16.0h - audit() calls on every mutating endpoint.
 
 Endpoints under /api/calc:
 
@@ -6,15 +7,20 @@ Endpoints under /api/calc:
   GET    /api/calc/definitions               - list calc definitions (with stats)
   GET    /api/calc/definitions/{id}          - one definition
   GET    /api/calc/definitions/{id}/stats    - full execution stats row
-  POST   /api/calc/definitions               - create
-  PATCH  /api/calc/definitions/{id}          - update (rate, type, config, enabled)
-  DELETE /api/calc/definitions/{id}          - delete
+  POST   /api/calc/definitions               - create   [audited as calc.create]
+  PATCH  /api/calc/definitions/{id}          - update   [audited as calc.update or calc.toggle]
+  DELETE /api/calc/definitions/{id}          - delete   [audited as calc.delete]
 
 15.2 additions vs 15.1:
   - execution_rate_ms field on create/update/response, validated
     against the allowed industrial rate set
   - execution stats joined into list/detail responses
   - dedicated /stats endpoint for ops/admin views
+
+16.0h additions:
+  - audit() calls on POST/PATCH/DELETE for success/denied/error paths
+  - PATCH action discrimination: calc.toggle (only enabled changed) vs calc.update
+  - DELETE captures full before-state in audit details for compliance
 """
 
 from __future__ import annotations
@@ -23,12 +29,13 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.utils.audit import audit, AuditEvent
 from app.workers.calc_blocks import get_block, BLOCK_REGISTRY
 
 
@@ -339,6 +346,10 @@ def get_stats(
     return dict(row)
 
 
+# ---------------------------------------------------------------------------
+# Mutating endpoints - all audited (Phase 16.0h)
+# ---------------------------------------------------------------------------
+
 @router.post(
     "/definitions",
     response_model=CalcDefinitionResponse,
@@ -346,28 +357,65 @@ def get_stats(
 )
 def create_definition(
     body: CalcDefinitionCreate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
+    # 1. Tag must exist.
     exists = db.execute(
-        text("SELECT id FROM tags WHERE id = :id"),
+        text("SELECT id, name FROM tags WHERE id = :id"),
         {"id": body.tag_id},
-    ).scalar_one_or_none()
+    ).mappings().first()
     if exists is None:
+        audit(AuditEvent(
+            action="calc.create",
+            target_type="calc_definition",
+            target_label=f"{body.block_type} -> tag #{body.tag_id}",
+            summary=f"Denied: tag {body.tag_id} does not exist",
+            status="denied",
+            error_message=f"Tag {body.tag_id} not found",
+            details={"request": body.model_dump()},
+        ), request)
         raise HTTPException(400, f"Tag {body.tag_id} does not exist")
 
+    # 2. Tag must not already have a calc.
     has_calc = db.execute(
         text("SELECT id FROM calc_definitions WHERE tag_id = :id"),
         {"id": body.tag_id},
     ).scalar_one_or_none()
     if has_calc is not None:
+        audit(AuditEvent(
+            action="calc.create",
+            target_type="calc_definition",
+            target_label=f"{body.block_type} -> {exists['name']}",
+            summary=f"Denied: tag {exists['name']} already has calc #{has_calc}",
+            status="denied",
+            error_message=f"Duplicate calc on tag {body.tag_id}",
+            details={"request": body.model_dump(), "existing_calc_id": has_calc},
+        ), request)
         raise HTTPException(
             409,
             f"Tag {body.tag_id} already has a calc definition (id={has_calc})"
         )
 
-    _validate_block(db, body.block_type, body.block_config,
-                    self_tag_id=body.tag_id, self_calc_id=None)
+    # 3. Block-type + config validation (cycle check included).
+    try:
+        _validate_block(
+            db, body.block_type, body.block_config,
+            self_tag_id=body.tag_id, self_calc_id=None,
+        )
+    except HTTPException as e:
+        audit(AuditEvent(
+            action="calc.create",
+            target_type="calc_definition",
+            target_label=f"{body.block_type} -> {exists['name']}",
+            summary="Denied: block validation failed",
+            status="denied",
+            error_message=str(e.detail),
+            details={"request": body.model_dump()},
+        ), request)
+        raise
 
+    # 4. Insert.
     try:
         db.execute(text("""
             INSERT INTO calc_definitions
@@ -383,14 +431,41 @@ def create_definition(
             "rate": body.execution_rate_ms,
         })
         db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
+        audit(AuditEvent(
+            action="calc.create",
+            target_type="calc_definition",
+            target_label=f"{body.block_type} -> {exists['name']}",
+            summary="INSERT failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": body.model_dump()},
+        ), request)
         raise
 
     new_id = db.execute(
         text("SELECT id FROM calc_definitions WHERE tag_id = :id"),
         {"id": body.tag_id},
     ).scalar_one()
+
+    # 5. Success.
+    audit(AuditEvent(
+        action="calc.create",
+        target_type="calc_definition",
+        target_id=new_id,
+        target_label=f"{body.block_type} -> {exists['name']}",
+        summary=f"Created {body.block_type} calc on tag '{exists['name']}'",
+        details={
+            "block_type": body.block_type,
+            "block_config": body.block_config,
+            "execution_rate_ms": body.execution_rate_ms,
+            "enabled": body.enabled,
+            "tag_id": body.tag_id,
+            "tag_name": exists["name"],
+        },
+    ), request)
+
     return get_definition(def_id=new_id, db=db)
 
 
@@ -401,29 +476,66 @@ def create_definition(
 def update_definition(
     def_id: int,
     body: CalcDefinitionUpdate,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
+    # Discriminate toggle vs update for clean audit history.
+    fields = body.model_dump(exclude_unset=True)
+    is_toggle = (len(fields) == 1 and "enabled" in fields)
+    action = "calc.toggle" if is_toggle else "calc.update"
+
+    # 1. Fetch existing (for 404 + before-snapshot).
     existing = db.execute(
         text("""
-            SELECT id, tag_id, block_type, block_config, execution_rate_ms
-            FROM calc_definitions WHERE id = :id
+            SELECT cd.id, cd.tag_id, t.name AS tag_name, cd.block_type,
+                   cd.block_config, cd.enabled, cd.execution_rate_ms
+            FROM calc_definitions cd
+            LEFT JOIN tags t ON t.id = cd.tag_id
+            WHERE cd.id = :id
         """),
         {"id": def_id},
     ).mappings().first()
     if existing is None:
+        audit(AuditEvent(
+            action=action,
+            target_type="calc_definition",
+            target_id=def_id,
+            summary=f"Denied: calc #{def_id} not found",
+            status="denied",
+            error_message="not found",
+            details={"request": fields},
+        ), request)
         raise HTTPException(404, f"Calc definition {def_id} not found")
 
-    fields = body.model_dump(exclude_unset=True)
+    target_label = f"{existing['block_type']} -> {existing['tag_name']}"
+
+    # No-op PATCH (empty body) -> just return current state, no audit.
     if not fields:
         return get_definition(def_id, db)
 
-    # Re-validate the block whenever type or config change.
+    # 2. Re-validate block if type/config changed.
     if "block_type" in fields or "block_config" in fields:
         final_block_type = fields.get("block_type", existing["block_type"])
         final_config = fields.get("block_config", existing["block_config"] or {})
-        _validate_block(db, final_block_type, final_config,
-                        self_tag_id=existing["tag_id"], self_calc_id=def_id)
+        try:
+            _validate_block(
+                db, final_block_type, final_config,
+                self_tag_id=existing["tag_id"], self_calc_id=def_id,
+            )
+        except HTTPException as e:
+            audit(AuditEvent(
+                action=action,
+                target_type="calc_definition",
+                target_id=def_id,
+                target_label=target_label,
+                summary="Denied: block validation failed",
+                status="denied",
+                error_message=str(e.detail),
+                details={"request": fields, "before": _summarize(existing)},
+            ), request)
+            raise
 
+    # 3. Apply UPDATE.
     set_clauses = []
     params: dict[str, Any] = {"id": def_id}
     for k, v in fields.items():
@@ -440,9 +552,39 @@ def update_definition(
             params,
         )
         db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
+        audit(AuditEvent(
+            action=action,
+            target_type="calc_definition",
+            target_id=def_id,
+            target_label=target_label,
+            summary="UPDATE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"request": fields, "before": _summarize(existing)},
+        ), request)
         raise
+
+    # 4. Success - readable summary per action type.
+    if is_toggle:
+        new_state = "Enabled" if fields["enabled"] else "Disabled"
+        summary = f"{new_state} calc {existing['block_type']} -> {existing['tag_name']}"
+    else:
+        summary = f"Updated calc {existing['block_type']} -> {existing['tag_name']} ({', '.join(fields.keys())})"
+
+    audit(AuditEvent(
+        action=action,
+        target_type="calc_definition",
+        target_id=def_id,
+        target_label=target_label,
+        summary=summary,
+        details={
+            "changed_fields": list(fields.keys()),
+            "request": fields,
+            "before": _summarize(existing),
+        },
+    ), request)
 
     return get_definition(def_id, db)
 
@@ -450,14 +592,33 @@ def update_definition(
 @router.delete("/definitions/{def_id}", status_code=204)
 def delete_definition(
     def_id: int,
+    request: Request,
     db: Annotated[Session, Depends(get_session)],
 ):
-    exists = db.execute(
-        text("SELECT id FROM calc_definitions WHERE id = :id"),
+    # Capture full before-state for compliance.
+    existing = db.execute(
+        text("""
+            SELECT cd.id, cd.tag_id, t.name AS tag_name, cd.block_type,
+                   cd.block_config, cd.enabled, cd.execution_rate_ms,
+                   cd.created_at, cd.updated_at
+            FROM calc_definitions cd
+            LEFT JOIN tags t ON t.id = cd.tag_id
+            WHERE cd.id = :id
+        """),
         {"id": def_id},
-    ).scalar_one_or_none()
-    if exists is None:
+    ).mappings().first()
+    if existing is None:
+        audit(AuditEvent(
+            action="calc.delete",
+            target_type="calc_definition",
+            target_id=def_id,
+            summary=f"Denied: calc #{def_id} not found",
+            status="denied",
+            error_message="not found",
+        ), request)
         raise HTTPException(404, f"Calc definition {def_id} not found")
+
+    target_label = f"{existing['block_type']} -> {existing['tag_name']}"
 
     try:
         db.execute(
@@ -465,13 +626,65 @@ def delete_definition(
             {"id": def_id},
         )
         db.commit()
-    except Exception:
+    except Exception as e:
         db.rollback()
+        audit(AuditEvent(
+            action="calc.delete",
+            target_type="calc_definition",
+            target_id=def_id,
+            target_label=target_label,
+            summary="DELETE failed",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={"before": _summarize(existing)},
+        ), request)
         raise
+
+    # Success - record the FULL before-state. Audit DB retains it for
+    # 365 days even after the row is gone from operational DB.
+    audit(AuditEvent(
+        action="calc.delete",
+        target_type="calc_definition",
+        target_id=def_id,
+        target_label=target_label,
+        summary=f"Deleted calc {existing['block_type']} -> {existing['tag_name']}",
+        details={"before": _full_dict(existing)},
+    ), request)
 
     return None
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _to_jsonb(d: dict[str, Any]) -> str:
     import json
     return json.dumps(d)
+
+
+def _summarize(row) -> dict[str, Any]:
+    """Compact before-state for update audits - excludes block_config which
+    can be large. The full snapshot is reserved for deletes."""
+    return {
+        "block_type": row["block_type"],
+        "enabled": row["enabled"],
+        "execution_rate_ms": row["execution_rate_ms"],
+        "tag_id": row["tag_id"],
+    }
+
+
+def _full_dict(row) -> dict[str, Any]:
+    """Full before-state for delete audits. Includes block_config so the
+    deleted calc can be reconstructed from the audit log if needed."""
+    return {
+        "id": row["id"],
+        "tag_id": row["tag_id"],
+        "tag_name": row["tag_name"],
+        "block_type": row["block_type"],
+        "block_config": row["block_config"],
+        "enabled": row["enabled"],
+        "execution_rate_ms": row["execution_rate_ms"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }

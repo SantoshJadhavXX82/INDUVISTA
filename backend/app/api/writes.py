@@ -1,20 +1,43 @@
-"""Phase 8.5 — Tag writes via REST + the audit journal.
+"""Phase 8.5 - Tag writes via REST + the audit journal.
+Phase 16.0h - audit() calls on every write operation.
 
 POST /api/tags/{tag_id}/write
     body: { "value": <stringified value>, "verify": true|false }
-    Triggers a Modbus write to the named tag. Logs to write_journal.
+    Triggers a Modbus write. Logged to BOTH write_journal (operational)
+    and audit_log (compliance) - see double-logging design note below.
 
 GET /api/writes
-    Returns the journal, newest-first, with optional filters:
-      - since         — ISO datetime
-      - tag_id        — filter to a single tag
-      - source        — 'cli' or 'rest'
-      - success_only  — exclude failures
-      - limit         — default 100, max 1000
+    Returns the write_journal, newest-first. Read-only, not audited.
 
-Writes are intentionally a separate API surface from /api/tags PATCH because
-they trigger device I/O, not metadata changes. Auth gates differ (in a future
-slice; for now anonymous is allowed but logged).
+
+# Double-logging design note (Phase 16.0h)
+
+Every successful or failed write to a PLC produces TWO log entries:
+
+  1. write_journal row  - the OPERATIONAL record. Captures full PLC-level
+     detail: requested_value, value_before, verify_value, function_code,
+     address, latency_ms, error. Used by the writer's verify-after-write
+     logic, by the GET /writes audit-viewer page, and by debugging
+     workflows ("did this write actually reach the PLC?").
+
+  2. audit_log event ('tag.write') - the COMPLIANCE record. Captures
+     who/when/what alongside every other audit-tracked action in the
+     system (config changes, alarm acks, etc). Carries journal_id so
+     drill-down to PLC-level detail is a single lookup.
+
+The two stores are NOT transactional with each other:
+  - write_journal commits inside the writer module's session
+  - audit_log commits inside the audit() helper's separate session
+
+If they ever diverge (e.g. audit DB unreachable while write succeeds),
+write_journal remains authoritative for "did the PLC write happen?" and
+audit_log carries journal_id for cross-reference.
+
+The design accepts this divergence because (1) writes are infrequent
+enough that the practical risk is low, (2) the audit() helper never
+raises so audit failures don't break write operations, and (3) the
+audit_log being a separate DB means a corrupted audit store can't
+take down the operational system.
 """
 from __future__ import annotations
 
@@ -28,6 +51,8 @@ from sqlalchemy.orm import Session
 
 from app.db import get_session
 from app.modbus.writer import write_tag
+from app.utils.audit import audit, AuditEvent
+
 
 router = APIRouter(prefix="/api", tags=["writes"])
 
@@ -38,13 +63,11 @@ router = APIRouter(prefix="/api", tags=["writes"])
 
 
 class TagWriteRequest(BaseModel):
-    value: str = Field(..., description="Value to write, as a string. "
-                                        "Parsed per the tag's data_type.")
+    value: str = Field(..., description="Value to write, as a string. Parsed per the tag's data_type.")
     verify: bool = Field(True, description="Read back and verify after write.")
     user_label: str | None = Field(
         None, max_length=128,
-        description="Optional label for the audit journal. If omitted, the "
-                    "request remote IP is used.",
+        description="Optional label for the audit journal. If omitted, the request remote IP is used.",
     )
 
 
@@ -57,6 +80,12 @@ class TagWriteResponse(BaseModel):
     journal_id: int | None
 
 
+def _request_label(request: Request) -> str:
+    """Build a reasonable user_label from request metadata when none provided."""
+    addr = request.client.host if request.client else "unknown"
+    return f"rest@{addr}"
+
+
 @router.post("/tags/{tag_id}/write", response_model=TagWriteResponse)
 async def write_tag_endpoint(
     tag_id: int,
@@ -66,34 +95,167 @@ async def write_tag_endpoint(
 ):
     """Write a value to the named tag via Modbus.
 
-    Resolves tag_id → tag.name (the writer module's API is name-keyed) and
-    then delegates to app.modbus.writer.write_tag. Every call is logged to
-    write_journal regardless of outcome.
+    Audited as 'tag.write' with status:
+      - 'denied'   if the tag doesn't exist or is disabled
+      - 'success'  if the Modbus write succeeded
+      - 'error'    if the Modbus write failed (network, slave busy, etc.)
+                   or if the writer raised an unhandled exception.
 
-    Returns 404 if the tag doesn't exist or is disabled, 400 if the tag
-    sits on a read-only Modbus space (FC2/FC4). Other failures return 200
-    with `success: false` because Modbus errors are operationally normal
-    (network blip, slave busy, etc.) and the journal carries the audit.
+    Both the success path and the error path carry journal_id in the audit
+    details so compliance can drill into the write_journal row for full
+    PLC-level detail.
     """
-    # Resolve tag_id → name. The writer module is name-keyed (legacy decision)
-    # and we keep that surface stable; the REST layer is the only place id
-    # → name mapping happens.
+
+    # ----- Pre-flight: resolve tag and validate -----
     row = db.execute(
-        text("SELECT name, enabled FROM tags WHERE id = :id"),
+        text("SELECT id, name, enabled, device_id FROM tags WHERE id = :id"),
         {"id": tag_id},
     ).mappings().first()
     if not row:
+        audit(AuditEvent(
+            action="tag.write",
+            target_type="tag",
+            target_id=tag_id,
+            summary=f"Denied: tag {tag_id} not found",
+            status="denied",
+            error_message="tag not found",
+            details={
+                "requested_value": body.value,
+                "verify": body.verify,
+                "user_label": body.user_label,
+            },
+        ), request)
         raise HTTPException(404, f"Tag {tag_id} not found")
+
+    target_label = row["name"]
+
     if not row["enabled"]:
-        raise HTTPException(409, f"Tag {tag_id} is disabled — enable before writing")
+        audit(AuditEvent(
+            action="tag.write",
+            target_type="tag",
+            target_id=tag_id,
+            target_label=target_label,
+            summary=f"Denied: tag '{target_label}' is disabled",
+            status="denied",
+            error_message="tag is disabled",
+            details={
+                "requested_value": body.value,
+                "verify": body.verify,
+                "user_label": body.user_label,
+                "device_id": row["device_id"],
+            },
+        ), request)
+        raise HTTPException(409, f"Tag {tag_id} is disabled - enable before writing")
 
     user_label = body.user_label or _request_label(request)
-    result = await write_tag(
-        row["name"], body.value,
-        verify=body.verify,
-        source="rest", user_label=user_label,
-    )
-    # The writer returns dict; map to response model
+
+    # ----- Execute the write -----
+    try:
+        result = await write_tag(
+            row["name"], body.value,
+            verify=body.verify,
+            source="rest", user_label=user_label,
+        )
+    except Exception as e:
+        audit(AuditEvent(
+            action="tag.write",
+            target_type="tag",
+            target_id=tag_id,
+            target_label=target_label,
+            summary=f"Write to '{target_label}' raised exception",
+            status="error",
+            error_message=f"{type(e).__name__}: {e}",
+            details={
+                "requested_value": body.value,
+                "verify": body.verify,
+                "user_label": user_label,
+                "device_id": row["device_id"],
+            },
+        ), request)
+        raise
+
+    # ----- Fetch value_before from write_journal for audit context -----
+    # The journal row is written inside the writer module; we re-query it
+    # to pick up value_before (the live PLC value captured pre-write).
+    # One extra small query per write operation, acceptable given writes
+    # are infrequent.
+    value_before: str | None = None
+    address: int | None = None
+    if result.get("journal_id"):
+        jrow = db.execute(
+            text("""
+                SELECT value_before, address
+                FROM write_journal WHERE id = :id
+            """),
+            {"id": result["journal_id"]},
+        ).mappings().first()
+        if jrow:
+            value_before = jrow["value_before"]
+            address = jrow["address"]
+
+    # ----- Audit success or error -----
+    if result["success"]:
+        verify_suffix = ""
+        if result.get("verify_value") is not None:
+            verify_suffix = f", verified={result['verify_value']}"
+
+        before_suffix = ""
+        if value_before is not None and str(value_before) != body.value:
+            before_suffix = f" (was {value_before})"
+
+        audit(AuditEvent(
+            action="tag.write",
+            target_type="tag",
+            target_id=tag_id,
+            target_label=target_label,
+            summary=(
+                f"Wrote {body.value} to '{target_label}'{before_suffix}"
+                f" (FC={result.get('function_code')}, "
+                f"latency={result.get('latency_ms')}ms{verify_suffix})"
+            ),
+            details={
+                "requested_value": body.value,
+                "value_before": value_before,
+                "verify_value": (
+                    str(result["verify_value"])
+                    if result.get("verify_value") is not None else None
+                ),
+                "verify_requested": body.verify,
+                "function_code": result.get("function_code"),
+                "address": address,
+                "latency_ms": result.get("latency_ms"),
+                "journal_id": result.get("journal_id"),
+                "user_label": user_label,
+                "device_id": row["device_id"],
+            },
+        ), request)
+    else:
+        audit(AuditEvent(
+            action="tag.write",
+            target_type="tag",
+            target_id=tag_id,
+            target_label=target_label,
+            summary=(
+                f"Write to '{target_label}' FAILED: {result.get('error') or 'unknown error'}"
+                f" (requested={body.value}"
+                + (f", was={value_before}" if value_before is not None else "")
+                + ")"
+            ),
+            status="error",
+            error_message=result.get("error") or "modbus write failed",
+            details={
+                "requested_value": body.value,
+                "value_before": value_before,
+                "function_code": result.get("function_code"),
+                "address": address,
+                "latency_ms": result.get("latency_ms"),
+                "journal_id": result.get("journal_id"),
+                "user_label": user_label,
+                "device_id": row["device_id"],
+            },
+        ), request)
+
+    # ----- Build response -----
     return TagWriteResponse(
         success=result["success"],
         error=result["error"],
@@ -106,18 +268,8 @@ async def write_tag_endpoint(
     )
 
 
-def _request_label(request: Request) -> str:
-    """Build a reasonable user_label from request metadata when none provided.
-
-    Until auth lands, fall back to remote address. This is far from
-    auth-grade but at least an IP shows up in the audit trail.
-    """
-    addr = request.client.host if request.client else "unknown"
-    return f"rest@{addr}"
-
-
 # ---------------------------------------------------------------------------
-# GET /api/writes — audit journal
+# GET /api/writes - write_journal viewer (read-only, not audited)
 # ---------------------------------------------------------------------------
 
 
@@ -135,8 +287,6 @@ class WriteJournalEntry(BaseModel):
     error: str | None
     verify_value: str | None
     latency_ms: float | None
-    # Phase 8.5.1 — value from latest_tag_values at write time. Lets the audit
-    # answer "what was this before?" alongside "what was requested?".
     value_before: str | None
 
 
@@ -152,7 +302,13 @@ def list_writes(
     device_id: int | None = Query(None, description="Filter by device id"),
     limit: int = Query(100, ge=1, le=1000),
 ):
-    """Audit-journal viewer. Newest-first."""
+    """Audit-journal viewer. Newest-first.
+
+    This endpoint reads write_journal (operational store). For compliance
+    audit, prefer /api/audit-log?action=tag.write which carries the same
+    information plus actor context, alongside every other audit-tracked
+    action.
+    """
     sql = """
         SELECT j.id, j.time, j.tag_id, j.tag_name_snapshot AS tag_name,
                j.source, j.user_label, j.function_code, j.address,
@@ -175,10 +331,6 @@ def list_writes(
     if success_only:
         sql += " AND j.success = TRUE"
     if device_id is not None:
-        # Match writes against the current tag's device — note this misses
-        # writes to tags that have since been deleted (tag_id is NULL in
-        # those rows). For the Phase 8.5.1 UI this is the right trade-off:
-        # "show writes belonging to device X" naturally excludes orphans.
         sql += " AND t.device_id = :device_id"
         params["device_id"] = device_id
     sql += " ORDER BY j.time DESC LIMIT :limit"
