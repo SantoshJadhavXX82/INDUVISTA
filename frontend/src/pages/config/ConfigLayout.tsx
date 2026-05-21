@@ -5,39 +5,44 @@
  *
  * Phase 8.5: Engineering Units, Groups, and Named Sets moved to /global —
  * they're cross-cutting reference data, not protocol-level setup.
+ *
+ * Phase 18 — refactored to use PageHeader + iOS-style segmented tab strip
+ * (same pattern as Tag Explorer's All/Pair tabs). Each top-level Configure
+ * leaf in the sidebar still lands you on the matching tab; this layout is
+ * effectively the shared chrome.
  */
 import { NavLink, Outlet } from "react-router";
 import { cn } from "@/lib/utils";
+import { PageHeader } from "@/components/ui/page-header";
 
 const tabs = [
   { to: "/config/channels", label: "Networks" },
   { to: "/config/devices", label: "Devices" },
-  { to: "/config/blocks", label: "Register Blocks" },
+  { to: "/config/blocks", label: "Register blocks" },
 ];
 
 export default function ConfigLayout() {
   return (
     <div className="space-y-4 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Configuration</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Edit networks, devices, and register blocks. Changes propagate to
-          workers within ~10 seconds via the Phase 3.5 hot-reload.
-        </p>
-      </div>
+      <PageHeader
+        title="Configuration"
+        subtitle="Edit networks, devices, and register blocks. Changes propagate to workers within ~10 seconds."
+      />
 
-      <div className="flex gap-1 border-b">
+      <div
+        className="flex gap-1 p-1 rounded-lg w-fit"
+        style={{ backgroundColor: "var(--ios-gray-5)" }}
+      >
         {tabs.map((t) => (
           <NavLink
             key={t.to}
             to={t.to}
-            className={({ isActive }) =>
-              cn(
-                "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
-                isActive
-                  ? "border-foreground text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )
+            className={() =>
+              cn("px-4 py-1.5 text-[13px] font-medium rounded-md transition-colors")
+            }
+            style={({ isActive }) => isActive
+              ? { backgroundColor: "var(--bg-elevated)", color: "var(--text-primary)" }
+              : { color: "var(--text-secondary)" }
             }
           >
             {t.label}

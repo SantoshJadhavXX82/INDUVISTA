@@ -14,6 +14,7 @@ import {
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
+import { SectionCard } from "@/components/ui/section-card";
 
 
 // ---------------------------------------------------------------------------
@@ -136,8 +137,8 @@ export default function AuditLog() {
           </button>
         }
       />
-      <Card>
-        <CardContent className="p-3">
+      <SectionCard flush>
+        <div className="p-3">
           {/* Filters */}
           <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
             <select
@@ -248,10 +249,10 @@ export default function AuditLog() {
               </div>
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </SectionCard>
 
-      <p className="px-1 text-[11px] text-muted-foreground">
+      <p className="px-1 text-[11px]" style={{ color: "var(--text-secondary)" }}>
         Audit log is stored in a dedicated database (<code>induvista_audit</code>) with a 1-year
         retention policy via TimescaleDB. Every state-changing API call records here. Read-only.
       </p>

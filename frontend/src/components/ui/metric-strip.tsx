@@ -62,7 +62,11 @@ export function MetricStrip({ items, className }: MetricStripProps) {
     <div
       className={cn("grid gap-2", className)}
       style={{
-        gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))`,
+        // Phase 19 — auto-fit so the strip stays 4-col on wide viewports
+        // and naturally collapses to 2-col on narrow phones (each item
+        // never narrower than 140px). Was previously forced N-column
+        // which made each item ~80px on a 380px phone — cramped.
+        gridTemplateColumns: `repeat(auto-fit, minmax(140px, 1fr))`,
       }}
     >
       {items.map((item, i) => (
@@ -85,6 +89,8 @@ function MetricCard({ item }: { item: MetricItem }) {
         backgroundColor: "var(--bg-elevated)",
         borderRadius: "var(--radius-lg-2)",
         padding: "10px 14px",
+        border: "0.5px solid var(--card-edge)",
+        boxShadow: "var(--card-shadow)",
       }}
       onClick={item.onClick}
       role={interactive ? "button" : undefined}

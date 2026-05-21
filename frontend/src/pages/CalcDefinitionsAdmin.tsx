@@ -23,6 +23,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
+import { SectionCard } from "@/components/ui/section-card";
 import { formatFloat } from "@/lib/format";
 
 import {
@@ -273,8 +274,8 @@ export default function CalcDefinitionsAdmin() {
           </>
         }
       />
-      <Card>
-        <CardContent className="p-3">
+      <SectionCard flush>
+        <div className="p-3">
           <div className="flex flex-wrap items-center gap-2 mb-3 text-xs">
             <Input
               placeholder="Search name, type, device, target…"
@@ -362,10 +363,10 @@ export default function CalcDefinitionsAdmin() {
               )}
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </SectionCard>
 
-      <div className="px-1 text-[11px] text-muted-foreground space-y-1">
+      <div className="px-1 text-[11px] space-y-1" style={{ color: "var(--text-secondary)" }}>
         <p>
           <strong>Current value</strong> column polls every 2 seconds from{" "}
           <code className="text-[10px]">/api/calc/current-values</code>.

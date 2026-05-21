@@ -1,16 +1,22 @@
 /**
  * Phase 18 — SectionCard
  *
- * iOS-style grouped container. White elevated surface floating on the
- * grouped gray background. The Title slot has its own row that stretches
- * across the full card width with optional right-aligned action chips.
+ * iOS-style grouped container. Elevated surface floating on the grouped
+ * background. The Title slot has its own row that stretches across the
+ * full card width with optional right-aligned action chips.
  *
  * Used for: alarm lists, KPI groups, device tag groups, settings sections.
  *
  * Visual hierarchy:
  *   - Card has 14px corner radius (iOS signature)
- *   - No border by default — float on the grouped bg
- *   - 0.5px border activated only when you opt in via `bordered`
+ *   - 0.5px hairline border always — defined via --card-edge token
+ *     (barely visible in light mode, more visible in dark mode where
+ *     it's essential to distinguish the card from the grouped bg)
+ *   - Subtle drop shadow that intensifies in dark mode
+ *
+ * Phase 19 — the `bordered` prop is preserved for backward compat but
+ * the default styling now includes an edge. Use `bordered={false}` to
+ * suppress (rare — only for nested grouped surfaces).
  *
  * Usage:
  *   <SectionCard title="Active alarms" action={<a>View all →</a>}>
@@ -28,6 +34,7 @@ export interface SectionCardProps {
   title?: React.ReactNode;
   subtitle?: React.ReactNode;
   action?: React.ReactNode;
+  /** Default true — the iOS edge token. Pass false for nested cards. */
   bordered?: boolean;
   className?: string;
   /** Removes the inner padding for cases where the children
@@ -37,19 +44,16 @@ export interface SectionCardProps {
 }
 
 export function SectionCard({
-  title, subtitle, action, bordered = false, className, flush = false, children,
+  title, subtitle, action, bordered = true, className, flush = false, children,
 }: SectionCardProps) {
   return (
     <section
-      className={cn(
-        "overflow-hidden",
-        bordered && "border",
-        className,
-      )}
+      className={cn("overflow-hidden", className)}
       style={{
         backgroundColor: "var(--bg-elevated)",
         borderRadius: "var(--radius-lg-2)",
-        borderColor: bordered ? "var(--separator)" : undefined,
+        border: bordered ? "0.5px solid var(--card-edge)" : "none",
+        boxShadow: bordered ? "var(--card-shadow)" : "none",
       }}
     >
       {(title || action) && (
@@ -66,7 +70,7 @@ export function SectionCard({
             {subtitle && (
               <p
                 className="text-[11px] mt-0.5 truncate"
-                style={{ color: "var(--ios-gray-1)" }}
+                style={{ color: "var(--text-secondary)" }}
               >
                 {subtitle}
               </p>

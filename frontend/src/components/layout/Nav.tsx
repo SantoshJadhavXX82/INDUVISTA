@@ -26,12 +26,12 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink, useLocation } from "react-router";
 import {
-  LayoutDashboard, TrendingUp, BellRing, Bell, ListTree,
-  Stethoscope, FileText, Activity,
-  Cpu, Calculator, Wrench, BookOpen,
+  Gauge, TrendingUp, BellRing, Bell, Tag as TagIcon,
+  HeartPulse, FileText, LineChart,
+  Cpu, Sigma, Wrench, SlidersHorizontal,
   ChevronDown, ChevronRight,
   ScanLine, Radio, Zap, FileClock,
-  Ruler, Palette, ListChecks, Tag, Hash, ArrowLeftRight, Network,
+  Ruler, Palette, ListChecks, Tag, Hash, ArrowLeftRight, Network, ListTree,
   type LucideIcon,
 } from "lucide-react";
 
@@ -77,7 +77,7 @@ function useEntries(alarmCount: number): Section[] {
       kind: "section",
       label: "Operate",
       children: [
-        { kind: "leaf", to: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
+        { kind: "leaf", to: "/dashboard", label: "Dashboard", icon: Gauge },
         { kind: "leaf", to: "/trend",     label: "Trend",     icon: TrendingUp, matchPrefix: "/trend" },
         {
           kind: "leaf", to: "/alarms", label: "Alarms",
@@ -91,16 +91,16 @@ function useEntries(alarmCount: number): Section[] {
           matchPrefix: "/alarms",
           badge: alarmCount > 0 ? <AlarmBadge count={alarmCount} /> : undefined,
         },
-        { kind: "leaf", to: "/tags", label: "Tags", icon: ListTree, matchPrefix: "/tags" },
+        { kind: "leaf", to: "/tags", label: "Tags", icon: TagIcon, matchPrefix: "/tags" },
       ],
     },
     {
       kind: "section",
       label: "Diagnose",
       children: [
-        { kind: "leaf", to: "/diagnostics", label: "Health", icon: Stethoscope },
+        { kind: "leaf", to: "/diagnostics", label: "Health", icon: HeartPulse },
         { kind: "leaf", to: "/audit-log",   label: "Audit",  icon: FileText, matchPrefix: "/audit-log" },
-        { kind: "leaf", to: "/data-gaps",   label: "Gaps",   icon: Activity },
+        { kind: "leaf", to: "/data-gaps",   label: "Gaps",   icon: LineChart },
       ],
     },
     {
@@ -110,7 +110,7 @@ function useEntries(alarmCount: number): Section[] {
         { kind: "leaf", to: "/config/channels", label: "Networks",         icon: Network,    matchPrefix: "/config/channels" },
         { kind: "leaf", to: "/config/devices",  label: "Devices",          icon: Cpu,        matchPrefix: "/config/devices" },
         { kind: "leaf", to: "/config/blocks",   label: "Register blocks",  icon: ListTree,   matchPrefix: "/config/blocks" },
-        { kind: "leaf", to: "/global/calc-blocks", label: "Calc tags",     icon: Calculator, matchPrefix: "/global/calc-blocks" },
+        { kind: "leaf", to: "/global/calc-blocks", label: "Calc tags",     icon: Sigma, matchPrefix: "/global/calc-blocks" },
         {
           kind: "group", id: "modbus", label: "Modbus", icon: Wrench,
           matchPrefix: "/modbus", children: [
@@ -126,7 +126,7 @@ function useEntries(alarmCount: number): Section[] {
           // groups, etc.) used to define and classify tags. Networks and
           // Register blocks moved up to top-level Configure entries because
           // they're per-deployment infrastructure, not global vocabulary.
-          kind: "group", id: "global-setup", label: "Global/Setup", icon: BookOpen,
+          kind: "group", id: "global-setup", label: "Global/Setup", icon: SlidersHorizontal,
           matchPrefix: "/global", children: [
             { kind: "leaf", to: "/global/engineering-units",   label: "Units",         icon: Ruler,          matchPrefix: "/global/engineering-units" },
             { kind: "leaf", to: "/global/alarm-severities",    label: "Severities",    icon: Palette,        matchPrefix: "/global/alarm-severities" },
@@ -178,7 +178,7 @@ function SectionBlock({
     <div>
       <div
         className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-wider"
-        style={{ color: "var(--ios-gray-1)" }}
+        style={{ color: "var(--text-secondary)" }}
       >
         {section.label}
       </div>
@@ -199,7 +199,7 @@ function LeafLink({ item, nested = false }: { item: Leaf; nested?: boolean }) {
     <NavLink
       to={item.to}
       end={!item.matchPrefix}
-      className={({ isActive: _ }) =>
+      className={() =>
         cn(
           "flex items-center gap-3 rounded-md text-[13px] transition-colors",
           nested ? "pl-9 pr-3 py-1.5" : "px-3 py-1.5",
@@ -211,15 +211,26 @@ function LeafLink({ item, nested = false }: { item: Leaf; nested?: boolean }) {
             color: "var(--ios-blue-on-soft)",
             fontWeight: 500,
           }
-        : { color: "var(--ios-gray-1)" }
+        : { color: "var(--text-secondary)" }
       }
     >
-      <item.icon
-        className={cn("h-4 w-4 shrink-0", item.iconClassName)}
-        style={item.iconStyle}
-      />
-      <span className="flex-1 truncate">{item.label}</span>
-      {item.badge}
+      {({ isActive }) => (
+        <>
+          {/* Phase 18 polish — filled-on-active: when this nav item is the
+              current route, the icon gets fill=currentColor (becomes a
+              "weight increase" you can feel in peripheral vision). When
+              inactive it stays clean outline. iOS Settings does this. */}
+          <item.icon
+            className={cn("h-4 w-4 shrink-0", item.iconClassName)}
+            style={item.iconStyle}
+            fill={isActive && !item.iconStyle ? "currentColor" : "none"}
+            fillOpacity={isActive && !item.iconStyle ? 0.18 : undefined}
+            strokeWidth={isActive ? 2 : 1.75}
+          />
+          <span className="flex-1 truncate">{item.label}</span>
+          {item.badge}
+        </>
+      )}
     </NavLink>
   );
 }
@@ -250,9 +261,14 @@ function ExpandableBlock({
         className="w-full flex items-center gap-3 px-3 py-1.5 rounded-md text-[13px] transition-colors"
         style={childIsActive
           ? { color: "var(--ios-blue-on-soft)", fontWeight: 500 }
-          : { color: "var(--ios-gray-1)" }}
+          : { color: "var(--text-secondary)" }}
       >
-        <group.icon className="h-4 w-4 shrink-0" />
+        <group.icon
+          className="h-4 w-4 shrink-0"
+          fill={childIsActive ? "currentColor" : "none"}
+          fillOpacity={childIsActive ? 0.18 : undefined}
+          strokeWidth={childIsActive ? 2 : 1.75}
+        />
         <span className="flex-1 text-left truncate">{group.label}</span>
         {open
           ? <ChevronDown className="h-3.5 w-3.5 opacity-60" />

@@ -44,6 +44,7 @@ import TrendSummaryPanel from "@/components/TrendSummaryPanel";
 import RawDataTable from "@/components/RawDataTable";
 import LiveValuePanel from "@/components/LiveValuePanel";
 import SavedViews from "@/components/SavedViews";
+import { CalendarHeatmapCard } from "@/components/trend/calendar-heatmap";
 import AggregationSelector, {
   type AggregationOption,
 } from "@/components/AggregationSelector";
@@ -606,6 +607,11 @@ export default function Trend() {
           showRoc={mode === "live"}
         />
       )}
+
+      {/* Phase 23.3 — Calendar heatmap. Surfaces day-of-week/hour patterns
+          that a time-series chart can't easily show. Defaults to the
+          first selected tag; users can switch via the in-card dropdown. */}
+      <CalendarHeatmapCard initialTagId={selectedIds[0]} />
     </div>
   );
 }

@@ -41,7 +41,7 @@ Notes
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -1079,3 +1079,205 @@ def _full_rule(row) -> dict[str, Any]:
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 — Alarm density heatmap
+#
+# Counts alarm activations per (rule, time-bin) over a window. Answers
+# operational questions like:
+#   "When during the day do we get the most alarms?"
+#   "Which alarm rules are noisy?"
+#   "Is there a Monday-morning spike from batch startup?"
+#
+# Y-axis: one row per alarm rule (or aggregated per severity)
+# X-axis: time bins (e.g., 96 × 15-minute over 24h, or 168 × 1-hour over 1w)
+# Color: alarm count in that bin (continuous heat ramp, not categorical)
+# ---------------------------------------------------------------------------
+
+class AlarmDensityRule(BaseModel):
+    rule_id: int
+    rule_name: str | None
+    tag_name: str
+    severity: str
+
+
+class AlarmDensityBin(BaseModel):
+    start: datetime
+
+
+class AlarmDensityResponse(BaseModel):
+    window_hours: int
+    bin_minutes: int
+    rules: list[AlarmDensityRule]
+    bins: list[AlarmDensityBin]
+    # counts[i][j] = number of "activated" events for rules[i] in bins[j]
+    counts: list[list[int]]
+    max_count: int  # for client-side gradient normalization
+
+
+@router.get("/density-heatmap", response_model=AlarmDensityResponse)
+def alarm_density_heatmap(
+    db: Annotated[Session, Depends(get_session)],
+    window_hours: Annotated[int, Query(ge=1, le=168)] = 24,
+    bin_minutes: Annotated[int, Query(ge=1, le=240)] = 15,
+    severity: Annotated[str | None, Query()] = None,
+):
+    """Aggregate alarm-activation events into time bins per rule.
+
+    Performance design (Phase 19.2):
+      1. Single SQL query joins alarm_events → alarm_rules → tags and
+         aggregates in one pass.
+      2. In-process TTL cache (60s) matches React Query's refetchInterval.
+      3. NO statement_timeout. The bare cap at 10s was killing queries
+         that just needed a few more seconds when the DB was warming up.
+         Letting them finish and caching the result is better UX.
+      4. Wrapped in try/except so failures log a clear traceback to docker
+         logs and return a 503 with the exception detail.
+    """
+    cache_key = ("alarm_density", window_hours, bin_minutes, severity)
+    cached = _density_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        result = _build_alarm_density(db, window_hours, bin_minutes, severity)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception(
+            "alarm_density_heatmap failed: window=%dh bin=%dm severity=%s",
+            window_hours, bin_minutes, severity,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Alarm density query failed: {type(exc).__name__}: {exc}",
+        )
+
+    _density_cache_set(cache_key, result)
+    return result
+
+
+def _build_alarm_density(
+    db: Session,
+    window_hours: int,
+    bin_minutes: int,
+    severity: str | None,
+) -> "AlarmDensityResponse":
+    """Cache-miss branch of alarm_density_heatmap, extracted for cleanliness."""
+
+    now = datetime.now(timezone.utc)
+    bin_width = timedelta(minutes=bin_minutes)
+    bucket_secs = bin_minutes * 60
+    window_start_epoch = int((now - timedelta(hours=window_hours)).timestamp())
+    snap = window_start_epoch - (window_start_epoch % bucket_secs)
+    aligned_start = datetime.fromtimestamp(snap, tz=timezone.utc)
+
+    bins: list[AlarmDensityBin] = []
+    cursor = aligned_start
+    while cursor < now:
+        bins.append(AlarmDensityBin(start=cursor))
+        cursor += bin_width
+    bin_index: dict[datetime, int] = {b.start: i for i, b in enumerate(bins)}
+
+    # Single combined query: aggregate events AND join metadata in one pass.
+    # Only rules that fired at least once in the window appear in the result
+    # (because of the INNER JOIN with the activated CTE).
+    #
+    # Note: alarm_rules has no `name` column — rules are identified by their
+    # (tag, rule_type, threshold) triple. We select rule_type + threshold and
+    # compose a readable label in Python below.
+    sev_clause = "AND ar.severity = :severity" if severity else ""
+    combined_sql = f"""
+        WITH activated AS (
+            SELECT rule_id,
+                   time_bucket(make_interval(mins => :bin_minutes), event_time) AS bucket,
+                   COUNT(*) AS n
+            FROM alarm_events
+            WHERE event_type = 'activated'
+              AND event_time >= :since
+            GROUP BY rule_id, bucket
+        )
+        SELECT a.rule_id, a.bucket, a.n,
+               ar.rule_type,
+               ar.threshold,
+               ar.severity,
+               t.name AS tag_name
+        FROM activated a
+        JOIN alarm_rules ar ON ar.id = a.rule_id
+        JOIN tags t ON t.id = ar.tag_id
+        WHERE 1=1 {sev_clause}
+        ORDER BY ar.severity, t.name, ar.rule_type, a.bucket
+    """
+    params: dict = {"since": aligned_start, "bin_minutes": bin_minutes}
+    if severity:
+        params["severity"] = severity
+
+    # Single pass: build rule list AND counts matrix from the same result set.
+    rules: list[AlarmDensityRule] = []
+    rule_index: dict[int, int] = {}
+    counts: list[list[int]] = []
+    max_count = 0
+
+    for row in db.execute(text(combined_sql), params).mappings():
+        rid = row["rule_id"]
+        if rid not in rule_index:
+            rule_index[rid] = len(rules)
+            # Compose a readable rule label: "hi_hi @ 95.0".
+            # The frontend already shows tag_name as a secondary line, so
+            # we don't repeat it here. Threshold uses :g so 95.0 → "95".
+            threshold = row["threshold"]
+            rule_label = f"{row['rule_type']} @ {threshold:g}" if threshold is not None else str(row["rule_type"])
+            rules.append(AlarmDensityRule(
+                rule_id=rid,
+                rule_name=rule_label,
+                tag_name=row["tag_name"],
+                severity=row["severity"],
+            ))
+            counts.append([0] * len(bins))
+        ri = rule_index[rid]
+        bi = bin_index.get(row["bucket"])
+        if bi is None:
+            continue
+        n = int(row["n"])
+        counts[ri][bi] = n
+        if n > max_count:
+            max_count = n
+
+    result = AlarmDensityResponse(
+        window_hours=window_hours,
+        bin_minutes=bin_minutes,
+        rules=rules,
+        bins=bins,
+        counts=counts,
+        max_count=max_count,
+    )
+    return result
+
+
+# ── In-process TTL cache for alarm density ─────────────────────────────
+# Same pattern as the quality-heatmap cache in diagnostics.py. Kept
+# local to this module so a future refactor can swap one without
+# touching the other.
+
+import time as _density_time
+_DENSITY_CACHE: dict[tuple, tuple[float, Any]] = {}
+_DENSITY_CACHE_TTL = 60.0
+_DENSITY_CACHE_MAX = 32
+
+
+def _density_cache_get(key: tuple):
+    entry = _DENSITY_CACHE.get(key)
+    if entry is None:
+        return None
+    expiry, value = entry
+    if _density_time.monotonic() > expiry:
+        _DENSITY_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _density_cache_set(key: tuple, value: Any) -> None:
+    _DENSITY_CACHE[key] = (_density_time.monotonic() + _DENSITY_CACHE_TTL, value)
+    if len(_DENSITY_CACHE) > _DENSITY_CACHE_MAX:
+        oldest = min(_DENSITY_CACHE.items(), key=lambda kv: kv[1][0])
+        _DENSITY_CACHE.pop(oldest[0], None)

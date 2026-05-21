@@ -11,41 +11,42 @@
  * `named_sets` (and the API stays /api/named-sets). We renamed the UI label
  * because "Named Sets" collides with DeltaV's identical concept — keeping
  * vocabulary distinct avoids confusion during DeltaV-side integration work.
+ *
+ * Phase 18 — PageHeader + iOS segmented tabs.
  */
 import { NavLink, Outlet } from "react-router";
 import { cn } from "@/lib/utils";
+import { PageHeader } from "@/components/ui/page-header";
 
 const tabs = [
-  { to: "/global/engineering-units", label: "Engineering Units" },
+  { to: "/global/engineering-units", label: "Units" },
   { to: "/global/groups", label: "Groups" },
   { to: "/global/named-sets", label: "Enumerations" },
-  { to: "/global/duty-standby-values", label: "Duty/Standby Values" },
+  { to: "/global/duty-standby-values", label: "Duty/standby" },
 ];
 
 export default function GlobalLayout() {
   return (
     <div className="space-y-4 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Global Reference Data</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Cross-cutting masters that tags reference: engineering units (with
-          146 seeded SI/IEC entries), tag groups, and enumeration state
-          machines (boolean + integer value-to-label mappings).
-        </p>
-      </div>
+      <PageHeader
+        title="Global / Setup"
+        subtitle="Cross-product reference data — engineering units, tag groups, enumeration state machines, duty/standby values. Used by tags across every device."
+      />
 
-      <div className="flex gap-1 border-b">
+      <div
+        className="flex gap-1 p-1 rounded-lg w-fit"
+        style={{ backgroundColor: "var(--ios-gray-5)" }}
+      >
         {tabs.map((t) => (
           <NavLink
             key={t.to}
             to={t.to}
-            className={({ isActive }) =>
-              cn(
-                "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
-                isActive
-                  ? "border-foreground text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )
+            className={() =>
+              cn("px-4 py-1.5 text-[13px] font-medium rounded-md transition-colors")
+            }
+            style={({ isActive }) => isActive
+              ? { backgroundColor: "var(--bg-elevated)", color: "var(--text-primary)" }
+              : { color: "var(--text-secondary)" }
             }
           >
             {t.label}

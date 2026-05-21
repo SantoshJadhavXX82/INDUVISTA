@@ -102,6 +102,16 @@ body {
   .induvista-bell-shake { animation: none; }
 }
 
+/* Phase 19 — slide-up keyframes used by the mobile "More" sheet and any
+ * other bottom-sheet modals. iOS-feel: starts off-screen, eases up. */
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [style*="slide-up"] { animation: none !important; }
+}
+
 /* ===========================================================================
  * Phase 18 — iOS-inspired design token layer
  *
@@ -168,6 +178,15 @@ body {
   --bg-elevated-soft:  #FAFAFC;   /* nested grouped row inside an elevated card */
   --separator:         rgba(60, 60, 67, 0.18);
   --separator-strong:  rgba(60, 60, 67, 0.36);
+
+  /* Card edge — applied to every SectionCard so the boundary is defined.
+   * In light mode this is almost invisible (just enough to feel an edge).
+   * In dark mode it's a subtle white-ish line — essential on LCD monitors
+   * where pure black bg + #1C1C1E surface have too little contrast to
+   * define the card on their own. iOS handles this on OLED phones via
+   * the physical pixel boundary; on a desktop we need a stylistic edge. */
+  --card-edge:         rgba(0, 0, 0, 0.06);
+  --card-shadow:       0 1px 3px rgba(0, 0, 0, 0.04);
 
   /* ----- Status semantics — what UI components reach for ----- */
   --status-good:    var(--ios-green);
@@ -236,12 +255,40 @@ body {
   --space-6: 24px;
   --space-8: 32px;
   --space-10: 40px;
+
+  /* ----- Text label hierarchy (iOS Human Interface convention) -----
+   * Primary   = body and titles, full contrast
+   * Secondary = supporting info, secondary labels
+   * Tertiary  = placeholders, hint text, inactive
+   * Each gets a dark-mode override below. Use these everywhere instead
+   * of hard-coding "#000" or muted-gray hex values. */
+  --text-primary:    #000000;
+  --text-secondary:  rgba(60, 60, 67, 0.60);
+  --text-tertiary:   rgba(60, 60, 67, 0.30);
+
+  /* Inverted (always white on colored bg). Same in both modes. */
+  --text-on-accent:  #FFFFFF;
 }
 
-/* ----- Dark mode token overrides (preserved for future activation) ------
- * Activate by adding `data-theme="dark"` to <html>. iOS color palette
- * shifts to its dark variants; soft backgrounds become deeper tints. */
-:where([data-theme="dark"]) {
+/* ----- Dark mode token overrides -----
+ * Active when data-theme="dark" is set on <html> (see lib/theme.ts).
+ *
+ * CRITICAL: NO `:where()` wrapper. The previous version used
+ * `:where([data-theme="dark"])` which has CSS specificity 0 — but :root
+ * (where the light-mode defaults live) has specificity (0, 1, 0). So
+ * :root always won, and the dark overrides were ignored for any
+ * variable also defined in :root. The plain `[data-theme="dark"]`
+ * selector has the same (0, 1, 0) specificity as :root, and since the
+ * dark block comes later in source order, it wins on the tie.
+ *
+ * Symptom that motivated this fix: shadcn-derived elements (Badge,
+ * Input, native selects with bg-card) stayed in light-mode foreground
+ * colors in dark mode — invisible text on dark surfaces.
+ *
+ * iOS palette shifts to its dark variants; soft backgrounds become deeper
+ * tints; text colors invert. */
+[data-theme="dark"] {
+  /* iOS system palette — dark variants */
   --ios-blue: #0A84FF;       --ios-blue-soft: #0A2A52;       --ios-blue-on-soft: #7FB8FF;
   --ios-green: #30D158;      --ios-green-soft: #0E3A1F;      --ios-green-on-soft: #6DE38C;
   --ios-red: #FF453A;        --ios-red-soft: #4A1410;        --ios-red-on-soft: #FF8E87;
@@ -252,12 +299,150 @@ body {
   --ios-pink: #FF375F;       --ios-pink-soft: #4A0F1F;       --ios-pink-on-soft: #FF8AA1;
   --ios-teal: #64D2FF;       --ios-teal-soft: #103340;       --ios-teal-on-soft: #9BE3FF;
 
-  --ios-gray-1: #8E8E93;
+  /* iOS grayscale — INVERTED for dark mode (#1C1C1E is the darkest stop) */
+  --ios-gray-1: #8E8E93;   /* unchanged — neutral mid */
+  --ios-gray-2: #636366;
+  --ios-gray-3: #48484A;
+  --ios-gray-4: #3A3A3C;
+  --ios-gray-5: #2C2C2E;
   --ios-gray-6: #1C1C1E;
 
-  --bg-grouped:        #000000;
+  /* Surfaces */
+  --bg-grouped:        #000000;   /* OLED-friendly true black */
   --bg-elevated:       #1C1C1E;
   --bg-elevated-soft:  #2C2C2E;
-  --separator:         rgba(84, 84, 88, 0.65);
-  --separator-strong:  rgba(84, 84, 88, 0.85);
+  --separator:         rgba(255, 255, 255, 0.10);
+  --separator-strong:  rgba(255, 255, 255, 0.18);
+
+  /* Card edge — significantly more visible in dark. On LCD monitors the
+   * 10% lightness difference between #000 and #1C1C1E loses card edges,
+   * so we add a thin white-ish hairline border to every elevated surface. */
+  --card-edge:         rgba(255, 255, 255, 0.10);
+  --card-shadow:       0 1px 3px rgba(0, 0, 0, 0.40);
+
+  /* Status-neutral overrides for dark mode — light-mode default uses
+   * --ios-gray-6 (= #1C1C1E in dark) which equals --bg-elevated, making
+   * neutral badges invisible on cards. Use a slightly lighter stop. */
+  --status-neutral-soft:    #2C2C2E;
+  --status-neutral-on-soft: #EBEBF5;
+
+  /* Text label hierarchy — inverted from light */
+  --text-primary:    #FFFFFF;
+  --text-secondary:  rgba(235, 235, 245, 0.60);
+  --text-tertiary:   rgba(235, 235, 245, 0.30);
+
+  /* shadcn vars — dark variants so existing Card/Badge/Button etc. work */
+  --background:            oklch(0.145 0 0);
+  --foreground:            oklch(0.985 0 0);
+  --card:                  oklch(0.205 0 0);
+  --card-foreground:       oklch(0.985 0 0);
+  --popover:               oklch(0.205 0 0);
+  --popover-foreground:    oklch(0.985 0 0);
+  --primary:               oklch(0.922 0 0);
+  --primary-foreground:    oklch(0.205 0 0);
+  --secondary:             oklch(0.269 0 0);
+  --secondary-foreground:  oklch(0.985 0 0);
+  --muted:                 oklch(0.269 0 0);
+  --muted-foreground:      oklch(0.708 0 0);
+  --accent:                oklch(0.269 0 0);
+  --accent-foreground:     oklch(0.985 0 0);
+  --destructive:           oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border:                oklch(0.32 0 0);    /* brighter so Card/Input edges are visible */
+  --input:                 oklch(0.32 0 0);    /* matches --border for consistency */
+  --ring:                  oklch(0.55 0 0);
 }
+
+
+/* =================================================================
+ * Dark-mode SEMANTIC-COLOR BLANKET OVERRIDES.
+ *
+ * Throughout the app, ~150 places use hardcoded Tailwind classes like
+ *   bg-emerald-100 text-emerald-700   (success state)
+ *   bg-amber-50 text-amber-900        (warning state)
+ *   bg-red-100 text-red-700           (error state)
+ *   bg-blue-50 text-blue-800          (info / pair tags state)
+ *
+ * These are FIXED light-mode colors — light tile + dark text on text.
+ * In dark mode they become low-contrast (dark text on barely-visible
+ * light tile, on already-dark surface). Unreadable.
+ *
+ * Refactoring every callsite to use CSS variables would touch ~50 files.
+ * Instead, this block remaps the semantic Tailwind classes to the iOS
+ * status tokens (which DO adapt) when the page is in dark mode.
+ *
+ * The `!important` is unavoidable — Tailwind utility classes ARE class
+ * selectors with specificity (0, 1, 0), and a less-specific attribute
+ * selector would lose. !important forces the cascade.
+ *
+ * If a specific component needs to override these defaults, use inline
+ * styles or use the new --status-* tokens directly. ================ */
+[data-theme="dark"] .bg-emerald-50,
+[data-theme="dark"] .bg-emerald-100   { background-color: var(--status-good-soft) !important; }
+[data-theme="dark"] .text-emerald-600,
+[data-theme="dark"] .text-emerald-700,
+[data-theme="dark"] .text-emerald-800,
+[data-theme="dark"] .text-emerald-900 { color: var(--status-good-on-soft) !important; }
+[data-theme="dark"] .border-emerald-200,
+[data-theme="dark"] .border-emerald-300 { border-color: var(--status-good-on-soft) !important; }
+
+[data-theme="dark"] .bg-green-50,
+[data-theme="dark"] .bg-green-100     { background-color: var(--status-good-soft) !important; }
+[data-theme="dark"] .text-green-600,
+[data-theme="dark"] .text-green-700,
+[data-theme="dark"] .text-green-800,
+[data-theme="dark"] .text-green-900   { color: var(--status-good-on-soft) !important; }
+
+[data-theme="dark"] .bg-amber-50,
+[data-theme="dark"] .bg-amber-100     { background-color: var(--status-warn-soft) !important; }
+[data-theme="dark"] .text-amber-600,
+[data-theme="dark"] .text-amber-700,
+[data-theme="dark"] .text-amber-800,
+[data-theme="dark"] .text-amber-900   { color: var(--status-warn-on-soft) !important; }
+[data-theme="dark"] .border-amber-200,
+[data-theme="dark"] .border-amber-300 { border-color: var(--status-warn-on-soft) !important; }
+
+[data-theme="dark"] .bg-yellow-50,
+[data-theme="dark"] .bg-yellow-100    { background-color: var(--status-warn-soft) !important; }
+[data-theme="dark"] .text-yellow-700,
+[data-theme="dark"] .text-yellow-800,
+[data-theme="dark"] .text-yellow-900  { color: var(--status-warn-on-soft) !important; }
+
+[data-theme="dark"] .bg-red-50,
+[data-theme="dark"] .bg-red-100       { background-color: var(--status-error-soft) !important; }
+[data-theme="dark"] .text-red-600,
+[data-theme="dark"] .text-red-700,
+[data-theme="dark"] .text-red-800,
+[data-theme="dark"] .text-red-900     { color: var(--status-error-on-soft) !important; }
+[data-theme="dark"] .border-red-200,
+[data-theme="dark"] .border-red-300   { border-color: var(--status-error-on-soft) !important; }
+
+[data-theme="dark"] .bg-blue-50,
+[data-theme="dark"] .bg-blue-100      { background-color: var(--ios-blue-soft) !important; }
+[data-theme="dark"] .text-blue-600,
+[data-theme="dark"] .text-blue-700,
+[data-theme="dark"] .text-blue-800,
+[data-theme="dark"] .text-blue-900    { color: var(--ios-blue-on-soft) !important; }
+[data-theme="dark"] .border-blue-200,
+[data-theme="dark"] .border-blue-300  { border-color: var(--ios-blue-on-soft) !important; }
+
+[data-theme="dark"] .bg-slate-50,
+[data-theme="dark"] .bg-slate-100,
+[data-theme="dark"] .bg-zinc-50,
+[data-theme="dark"] .bg-zinc-100,
+[data-theme="dark"] .bg-gray-50,
+[data-theme="dark"] .bg-gray-100      { background-color: var(--status-neutral-soft) !important; }
+[data-theme="dark"] .text-slate-600,
+[data-theme="dark"] .text-slate-700,
+[data-theme="dark"] .text-slate-800,
+[data-theme="dark"] .text-slate-900,
+[data-theme="dark"] .text-zinc-700,
+[data-theme="dark"] .text-zinc-800,
+[data-theme="dark"] .text-gray-700,
+[data-theme="dark"] .text-gray-800,
+[data-theme="dark"] .text-gray-900    { color: var(--status-neutral-on-soft) !important; }
+
+/* Tailwind v3 muted-foreground utility (used in many places for "subtle
+ * gray text"). The shadcn --muted-foreground already adapts, but some
+ * places use it as a raw text color where it can read too dim in dark.
+ * No override here — letting the token system handle it. */

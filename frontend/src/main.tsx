@@ -5,6 +5,24 @@ import { BrowserRouter } from "react-router";
 import App from "@/App";
 import "@/index.css";
 
+// Phase 18 — apply the saved theme SYNCHRONOUSLY before any React render.
+// Without this, refreshing into dark mode would briefly show light theme
+// while React mounts ("flash of wrong theme"). One localStorage read, one
+// matchMedia check, one DOM attribute write — done in ~0.1ms.
+(() => {
+  try {
+    const stored = window.localStorage.getItem("induvista:theme");
+    const choice = stored === "light" || stored === "dark" || stored === "system"
+      ? stored
+      : "system";
+    const resolved = choice === "system"
+      ? (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")
+      : choice;
+    document.documentElement.setAttribute("data-theme", resolved);
+    document.documentElement.style.colorScheme = resolved;
+  } catch { /* localStorage may be disabled — silently fall through to light */ }
+})();
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

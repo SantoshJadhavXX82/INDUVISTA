@@ -29,6 +29,8 @@ import { MetricStrip, type MetricItem } from "@/components/ui/metric-strip";
 import { SectionCard } from "@/components/ui/section-card";
 import { AlarmRow } from "@/components/ui/alarm-row";
 import { StatusPill } from "@/components/ui/status-pill";
+import { SwipeCarousel } from "@/components/ui/swipe-carousel";
+import { useIsMobile } from "@/lib/use-media-query";
 
 const REFRESH_MS = 2_000;
 const SPARK_REFRESH_MS = 10_000;
@@ -122,25 +124,18 @@ export default function Dashboard() {
     });
   }, [tags.data, activeDeviceId, group, search, statusFilter]);
 
-  return (
-    <div className="space-y-4 max-w-7xl mx-auto">
-      <PageHeader
-        title="Dashboard"
-        subtitle={`${tags.data?.length ?? "—"} tags · refreshed every ${REFRESH_MS / 1000}s`}
-        actions={
-          <span className="text-xs flex items-center gap-1.5" style={{ color: "var(--ios-gray-1)" }}>
-            <RefreshCw className={cn("h-3 w-3", tags.isFetching && "animate-spin")} />
-            live
-          </span>
-        }
-      />
+  // Phase 19 — mobile gets swipe-between-pages; desktop gets stacked.
+  const isMobile = useIsMobile();
 
-      <DashboardHero
-        tagCount={tags.data?.length ?? 0}
-        liveTags={tags.data ?? []}
-      />
+  const hero = (
+    <DashboardHero
+      tagCount={tags.data?.length ?? 0}
+      liveTags={tags.data ?? []}
+    />
+  );
 
-      <SectionCard title="Browse tags" subtitle="Filter and inspect current values per device">
+  const browseTags = (
+    <SectionCard title="Browse tags" subtitle="Filter and inspect current values per device">
       {/* Device picker */}
       <div className="mb-3">
         <DevicePicker
@@ -240,6 +235,49 @@ export default function Dashboard() {
         )
       )}
       </SectionCard>
+  );
+
+  return (
+    <div className="space-y-4 max-w-7xl mx-auto">
+      <PageHeader
+        title="Dashboard"
+        subtitle={`${tags.data?.length ?? "—"} tags · refreshed every ${REFRESH_MS / 1000}s`}
+        actions={
+          <span className="text-xs flex items-center gap-1.5" style={{ color: "var(--text-secondary)" }}>
+            <RefreshCw className={cn("h-3 w-3", tags.isFetching && "animate-spin")} />
+            live
+          </span>
+        }
+      />
+
+      {/* Phase 19 — mobile gets swipe carousel between Overview and Browse;
+          desktop keeps them stacked vertically. The hero contains its own
+          KPI strip + alarm summary + live values, so two slides is enough.
+          Operators get the most-important state on slide 1, drill into
+          per-tag details on slide 2. */}
+      {isMobile ? (
+        <SwipeCarousel>
+          <div className="space-y-3">
+            <div
+              className="text-[10px] font-semibold uppercase tracking-wider px-1 mb-1"
+              style={{ color: "var(--text-secondary)" }}
+            >Overview</div>
+            {hero}
+          </div>
+          <div className="space-y-3">
+            <div
+              className="text-[10px] font-semibold uppercase tracking-wider px-1 mb-1"
+              style={{ color: "var(--text-secondary)" }}
+            >Browse</div>
+            {browseTags}
+          </div>
+        </SwipeCarousel>
+      ) : (
+        <>
+          {hero}
+          {browseTags}
+        </>
+      )}
     </div>
   );
 }
@@ -416,7 +454,14 @@ function DashboardHero({
           >
             Live values · most recent
           </div>
-          <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(4, minmax(0, 1fr))" }}>
+          <div
+            className="grid gap-2"
+            style={{
+              // Auto-fit: 4 cards fit on desktop, naturally collapses to
+              // 2 cards on phones. Was forced 4-col before.
+              gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+            }}
+          >
             {pinnedTags.map(t => (
               <KpiCard
                 key={t.tag_id}
