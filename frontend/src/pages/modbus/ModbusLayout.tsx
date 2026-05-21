@@ -9,41 +9,42 @@
  * Reads happen automatically via the worker; this section is for the
  * interactive / forensic tools an engineer reaches for when commissioning
  * or troubleshooting a link.
+ *
+ * Phase 18 — PageHeader + iOS segmented tabs.
  */
 import { NavLink, Outlet } from "react-router";
 import { cn } from "@/lib/utils";
+import { PageHeader } from "@/components/ui/page-header";
 
 const tabs = [
-  { to: "/modbus/frames", label: "Frame Inspector" },
-  { to: "/modbus/registers", label: "Register Browser" },
-  { to: "/modbus/write-console", label: "Write Console" },
-  { to: "/modbus/write-audit", label: "Write Audit" },
+  { to: "/modbus/frames", label: "Frames" },
+  { to: "/modbus/registers", label: "Registers" },
+  { to: "/modbus/write-console", label: "Write" },
+  { to: "/modbus/write-audit", label: "Audit" },
 ];
 
 export default function ModbusLayout() {
   return (
     <div className="space-y-4 max-w-7xl mx-auto">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Modbus TCP/IP</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Live protocol tools: inspect captured frames, browse arbitrary
-          register ranges, write to coils and holding registers, and review
-          the write audit journal.
-        </p>
-      </div>
+      <PageHeader
+        title="Modbus TCP/IP"
+        subtitle="Live protocol tools — inspect frames, browse register ranges, write to coils and holding registers, review the audit journal."
+      />
 
-      <div className="flex gap-1 border-b">
+      <div
+        className="flex gap-1 p-1 rounded-lg w-fit"
+        style={{ backgroundColor: "var(--ios-gray-5)" }}
+      >
         {tabs.map((t) => (
           <NavLink
             key={t.to}
             to={t.to}
-            className={({ isActive }) =>
-              cn(
-                "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
-                isActive
-                  ? "border-foreground text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground",
-              )
+            className={() =>
+              cn("px-4 py-1.5 text-[13px] font-medium rounded-md transition-colors")
+            }
+            style={({ isActive }) => isActive
+              ? { backgroundColor: "var(--bg-elevated)", color: "var(--text-primary)" }
+              : { color: "var(--text-secondary)" }
             }
           >
             {t.label}

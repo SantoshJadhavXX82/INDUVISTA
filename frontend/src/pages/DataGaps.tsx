@@ -18,6 +18,7 @@ import { api, ApiError } from "@/lib/api";
 import { type LiveTag } from "@/types/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
+import { SectionCard } from "@/components/ui/section-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -107,8 +108,8 @@ export default function DataGaps() {
         subtitle="Find intervals where a tag wasn't being sampled — debug connectivity, validate stale-detection thresholds, quantify uptime"
       />
 
-      <Card>
-        <CardContent className="p-4 space-y-3">
+      <SectionCard flush>
+        <div className="p-4 space-y-3">
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
               <Label htmlFor="tag-search">Tag</Label>
@@ -199,16 +200,16 @@ export default function DataGaps() {
               {gaps.isFetching ? "Finding gaps…" : "Find gaps"}
             </Button>
           </div>
-        </CardContent>
-      </Card>
+        </div>
+      </SectionCard>
 
       {gaps.data && runKey && <GapResults gaps={gaps.data} windowSec={runKey.windowSec} minGap={runKey.minGap} />}
       {gaps.isError && (
-        <Card>
-          <CardContent className="p-4 text-sm text-red-700">
+        <SectionCard>
+          <div className="text-sm" style={{ color: "var(--status-error-on-soft)" }}>
             {gaps.error instanceof ApiError ? gaps.error.detail : String(gaps.error)}
-          </CardContent>
-        </Card>
+          </div>
+        </SectionCard>
       )}
     </div>
   );
@@ -240,40 +241,38 @@ function GapResults({ gaps, windowSec, minGap }: { gaps: DataGap[]; windowSec: n
       </div>
 
       {sorted.length === 0 ? (
-        <Card>
-          <CardContent className="p-6 text-sm text-muted-foreground text-center">
+        <SectionCard>
+          <div className="text-sm text-center py-2" style={{ color: "var(--text-secondary)" }}>
             No gaps found in this window above the minimum-gap threshold of {minGap}s.
-          </CardContent>
-        </Card>
+          </div>
+        </SectionCard>
       ) : (
-        <Card>
-          <CardContent className="p-0">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-12 text-right">#</TableHead>
-                  <TableHead>Start</TableHead>
-                  <TableHead>End</TableHead>
-                  <TableHead className="text-right">Duration</TableHead>
+        <SectionCard flush>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-12 text-right">#</TableHead>
+                <TableHead>Start</TableHead>
+                <TableHead>End</TableHead>
+                <TableHead className="text-right">Duration</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {sorted.map((g, i) => (
+                <TableRow key={`${g.gap_start}-${i}`}>
+                  <TableCell className="text-right tabular-nums text-xs" style={{ color: "var(--text-secondary)" }}>
+                    {i + 1}
+                  </TableCell>
+                  <TableCell className="text-xs font-mono">{formatTimestamp(g.gap_start)}</TableCell>
+                  <TableCell className="text-xs font-mono">{formatTimestamp(g.gap_end)}</TableCell>
+                  <TableCell className="text-right tabular-nums text-xs">
+                    {formatDuration(g.gap_seconds)}
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {sorted.map((g, i) => (
-                  <TableRow key={`${g.gap_start}-${i}`}>
-                    <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
-                      {i + 1}
-                    </TableCell>
-                    <TableCell className="text-xs font-mono">{formatTimestamp(g.gap_start)}</TableCell>
-                    <TableCell className="text-xs font-mono">{formatTimestamp(g.gap_end)}</TableCell>
-                    <TableCell className="text-right tabular-nums text-xs">
-                      {formatDuration(g.gap_seconds)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
+              ))}
+            </TableBody>
+          </Table>
+        </SectionCard>
       )}
     </div>
   );
@@ -281,13 +280,11 @@ function GapResults({ gaps, windowSec, minGap }: { gaps: DataGap[]; windowSec: n
 
 function StatCard({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <Card>
-      <CardContent className="p-3">
-        <div className="text-xs text-muted-foreground uppercase tracking-wider">{label}</div>
-        <div className="text-2xl font-bold tabular-nums mt-1">{value}</div>
-        {hint && <div className="text-xs text-muted-foreground">{hint}</div>}
-      </CardContent>
-    </Card>
+    <SectionCard>
+      <div className="text-[10px] uppercase tracking-wider" style={{ color: "var(--text-secondary)" }}>{label}</div>
+      <div className="text-[22px] font-semibold tabular-nums mt-1" style={{ letterSpacing: "-0.02em" }}>{value}</div>
+      {hint && <div className="text-xs" style={{ color: "var(--text-secondary)" }}>{hint}</div>}
+    </SectionCard>
   );
 }
 

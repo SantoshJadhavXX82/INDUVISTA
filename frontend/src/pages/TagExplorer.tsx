@@ -17,7 +17,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
 import { Search, Trash2, AlertCircle, Plus, Upload, Download, RefreshCw } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import { type LiveTag, type PairTagLive, type BulkResult } from "@/types/api";
+import { type LiveTag, type PairTagLive, type BulkResult, type TagSparkline } from "@/types/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +34,7 @@ import { NamedSetSelect } from "@/components/forms/named-set-select";
 import { HelpTip } from "@/components/ui/help-tip";
 import { help } from "@/lib/help-text";
 import { useNamedSetMap, resolveNamedSet } from "@/lib/named-set-resolve";
+import { Sparkline } from "@/components/ui/sparkline";
 import {
   Table,
   TableBody,
@@ -128,6 +129,22 @@ export default function TagExplorer() {
     queryFn: () => api.get<PairTagLive[]>("/pair-tags/live"),
     refetchInterval: 5_000,
   });
+
+  // Phase 19 — sparklines per tag. Fetched on a slower 10s cadence
+  // (the small SVG strokes don't need 2s refresh and it keeps the
+  // /api/live response lean). Reuses the same query key as Dashboard
+  // so React Query dedupes — switching between the two pages doesn't
+  // re-fetch. The sparkByTag derived map is identical to Dashboard's.
+  const sparklines = useQuery({
+    queryKey: ["live", "sparklines"],
+    queryFn: () => api.get<TagSparkline[]>("/live/sparklines"),
+    refetchInterval: 10_000,
+  });
+  const sparkByTag = useMemo(() => {
+    const m: Record<number, TagSparkline["points"]> = {};
+    sparklines.data?.forEach((s) => { m[s.tag_id] = s.points; });
+    return m;
+  }, [sparklines.data]);
 
   // Phase 8.3 — for resolving display_text alongside live values
   const { map: namedSetMap } = useNamedSetMap();
@@ -330,7 +347,7 @@ export default function TagExplorer() {
             "px-4 py-1.5 text-[13px] font-medium rounded-md transition-colors",
           )}
           style={viewMode === "all"
-            ? { backgroundColor: "var(--bg-elevated)", color: "#000" }
+            ? { backgroundColor: "var(--bg-elevated)", color: "var(--text-primary)" }
             : { color: "var(--ios-gray-1)" }}
         >
           All tags
@@ -344,7 +361,7 @@ export default function TagExplorer() {
             onClick={() => setViewMode("pair")}
             className="px-4 py-1.5 text-[13px] font-medium rounded-md transition-colors"
             style={viewMode === "pair"
-              ? { backgroundColor: "var(--bg-elevated)", color: "#000" }
+              ? { backgroundColor: "var(--bg-elevated)", color: "var(--text-primary)" }
               : { color: "var(--ios-gray-1)" }}
           >
             Pair tags
@@ -474,6 +491,7 @@ export default function TagExplorer() {
                 <TableHead>Type</TableHead>
                 <TableHead>Unit</TableHead>
                 <TableHead className="text-right">Current</TableHead>
+                <TableHead className="text-center">Trend</TableHead>
                 <TableHead>Quality</TableHead>
               </TableRow>
             </TableHeader>
@@ -495,24 +513,34 @@ export default function TagExplorer() {
                   return (
                     <TableRow
                       key={`pair-${pt.pair_tag_id}`}
-                      className="bg-blue-50/30 hover:bg-blue-50/50 cursor-default"
+                      className="cursor-default"
+                      style={{ backgroundColor: "color-mix(in oklab, var(--ios-blue-soft) 30%, transparent)" }}
                     >
                       <TableCell />
                       <TableCell className="font-medium">
                         <span className="inline-flex items-center gap-1.5">
                           {pt.tag_name}
-                          <span className="inline-flex items-center rounded bg-blue-100 text-blue-800 px-1.5 py-0.5 text-[9px] font-medium tracking-wider">
+                          <span
+                            className="inline-flex items-center rounded px-1.5 py-0.5 text-[9px] font-medium tracking-wider"
+                            style={{
+                              backgroundColor: "var(--ios-blue-soft)",
+                              color: "var(--ios-blue-on-soft)",
+                            }}
+                          >
                             PAIR
                           </span>
                         </span>
                       </TableCell>
                       <TableCell />
                       <TableCell className="text-xs">
-                        <span className="text-emerald-700 font-medium">
+                        <span
+                          className="font-medium"
+                          style={{ color: "var(--status-good-on-soft)" }}
+                        >
                           {pt.active_device_name ?? "—"}
                         </span>
                         {pt.active_device_name && (
-                          <span className="ml-1 text-muted-foreground">(duty)</span>
+                          <span className="ml-1" style={{ color: "var(--text-secondary)" }}>(duty)</span>
                         )}
                       </TableCell>
                       <TableCell className="text-right tabular-nums text-xs">{pt.function_code}</TableCell>
@@ -523,6 +551,33 @@ export default function TagExplorer() {
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
                         {formatValue(pt.value_double, pt.value_text, pt.data_type)}
+                      </TableCell>
+                      <TableCell className="py-1">
+                        {(() => {
+                          // Pair tags don't have their own sparkline; fall
+                          // back to the underlying duty tag's history when
+                          // available (active_tag_id is the duty side).
+                          const duty = pt.active_tag_id;
+                          const points = duty ? (sparkByTag[duty] ?? []) : [];
+                          if (points.length === 0 || pt.data_type === "bool") {
+                            return (
+                              <span
+                                className="block text-center text-[11px]"
+                                style={{ color: "var(--text-tertiary)" }}
+                              >—</span>
+                            );
+                          }
+                          return (
+                            <div className="flex justify-center">
+                              <Sparkline
+                                points={points}
+                                width={110}
+                                height={22}
+                                stroke="var(--ios-blue)"
+                              />
+                            </div>
+                          );
+                        })()}
                       </TableCell>
                       <TableCell>
                         <TagQualityBadge
@@ -615,6 +670,31 @@ export default function TagExplorer() {
                         return formatValue(t.value_double, t.value_text, t.data_type);
                       })()}
                     </TableCell>
+                    <TableCell className="py-1">
+                      {(() => {
+                        const points = sparkByTag[t.tag_id] ?? [];
+                        // No history yet (first poll) or boolean tag → render
+                        // an em-dash so the column still feels balanced.
+                        if (points.length === 0 || t.data_type === "bool") {
+                          return (
+                            <span
+                              className="block text-center text-[11px]"
+                              style={{ color: "var(--text-tertiary)" }}
+                            >—</span>
+                          );
+                        }
+                        return (
+                          <div className="flex justify-center">
+                            <Sparkline
+                              points={points}
+                              width={110}
+                              height={22}
+                              stroke="var(--ios-blue)"
+                            />
+                          </div>
+                        );
+                      })()}
+                    </TableCell>
                     <TableCell>
                       <TagQualityBadge
                         st={t.st}
@@ -671,7 +751,7 @@ export default function TagExplorer() {
                   const primaryId = headRow.primary_device_id;
                   return [
                   <TableRow key={`pair-hdr-${g.key}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={10} className="py-1.5 text-xs">
+                    <TableCell colSpan={11} className="py-1.5 text-xs">
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <span className="font-semibold flex items-center gap-2 flex-wrap">
                           {g.label}
@@ -679,12 +759,20 @@ export default function TagExplorer() {
                             {g.rows.length} pair tag{g.rows.length === 1 ? "" : "s"}
                           </span>
                           {/* Phase 12.5 — mode badge */}
-                          <span className={cn(
-                            "text-[10px] font-medium px-1.5 py-0.5 rounded",
-                            inManualOverride
-                              ? "bg-amber-100 text-amber-900 border border-amber-300"
-                              : "bg-slate-100 text-slate-700"
-                          )}>
+                          <span
+                            className="text-[10px] font-medium px-1.5 py-0.5 rounded"
+                            style={inManualOverride
+                              ? {
+                                  backgroundColor: "var(--status-warn-soft)",
+                                  color: "var(--status-warn-on-soft)",
+                                  border: "0.5px solid var(--status-warn-on-soft)",
+                                }
+                              : {
+                                  backgroundColor: "var(--status-neutral-soft)",
+                                  color: "var(--status-neutral-on-soft)",
+                                }
+                            }
+                          >
                             {inManualOverride ? "⚠ MANUAL OVERRIDE" : "AUTO (device-led)"}
                           </span>
                         </span>
@@ -727,12 +815,19 @@ export default function TagExplorer() {
                               });
                             }}
                             disabled={togglePairOverride.isPending}
-                            className={cn(
-                              "inline-flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-medium disabled:opacity-50 transition-colors",
-                              inManualOverride
-                                ? "border-input bg-background hover:bg-secondary"
-                                : "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
-                            )}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium disabled:opacity-50 transition-colors"
+                            style={inManualOverride
+                              ? {
+                                  border: "0.5px solid var(--separator)",
+                                  backgroundColor: "var(--bg-elevated)",
+                                  color: "var(--text-primary)",
+                                }
+                              : {
+                                  border: "0.5px solid var(--status-warn-on-soft)",
+                                  backgroundColor: "var(--status-warn-soft)",
+                                  color: "var(--status-warn-on-soft)",
+                                }
+                            }
                             title={inManualOverride
                               ? "Return to auto — worker will reconcile to device-reported value"
                               : "Take manual control — worker reconciliation suspended for this pair"}
@@ -769,7 +864,7 @@ export default function TagExplorer() {
 
                 const physicalSection = groups.flatMap((g) => [
                   <TableRow key={`hdr-${g.id}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={10} className="py-1.5 text-xs font-semibold">
+                    <TableCell colSpan={11} className="py-1.5 text-xs font-semibold">
                       {g.name}
                       <span className="ml-2 font-normal text-muted-foreground tabular-nums">
                         {g.rows.length} tag{g.rows.length === 1 ? "" : "s"}

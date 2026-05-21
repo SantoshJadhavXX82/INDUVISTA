@@ -39,6 +39,11 @@ import {
 import { cn } from "@/lib/utils";
 import { HelpTip } from "@/components/ui/help-tip";
 import { help } from "@/lib/help-text";
+import { PageHeader } from "@/components/ui/page-header";
+import { MetricStrip, type MetricItem } from "@/components/ui/metric-strip";
+import { SectionCard } from "@/components/ui/section-card";
+import { StatusPill } from "@/components/ui/status-pill";
+import { QualityHeatmapCard } from "@/components/diagnostics/quality-heatmap";
 
 const REFRESH_MS = 5_000;
 
@@ -97,27 +102,82 @@ export default function Diagnostics() {
     refetchInterval: REFRESH_MS * 3,
   });
 
-  return (
-    <div className="space-y-6 max-w-7xl mx-auto">
-      <div className="flex items-baseline justify-between">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Diagnostics</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            System health at a glance. Auto-refreshes every 5 seconds.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <RefreshCw className={cn("h-3 w-3", (summary.isFetching || workers.isFetching) && "animate-spin")} />
-          <span>live</span>
-        </div>
-      </div>
+  // Build the system overview MetricStrip from the summary data.
+  // Phase 18 — replaces the three large WorkersCard / BufferCard /
+  // ConfigIssuesCard with a uniform 4-card iOS strip. The detailed
+  // breakdowns (per-worker table, buffer details, issue tables below)
+  // still show full information; the strip is just the at-a-glance row.
+  const summaryMetrics: MetricItem[] = (() => {
+    const s = summary.data;
+    const b = buffer.data;
+    const workersTotal = (s?.workers_healthy ?? 0) + (s?.workers_unhealthy ?? 0);
+    const totalIssues = (s?.overlap_count ?? 0)
+                      + (s?.block_fit_issue_count ?? 0)
+                      + (s?.stale_tag_count ?? 0);
+    return [
+      {
+        label: "Workers",
+        value: s ? `${s.workers_healthy}/${workersTotal}` : "—",
+        tone: s == null ? "neutral"
+          : s.workers_unhealthy === 0 ? "good"
+          : "warn",
+        hint: s == null
+          ? undefined
+          : s.workers_unhealthy === 0 ? "All healthy" : `${s.workers_unhealthy} unhealthy`,
+      },
+      {
+        label: "SF buffer",
+        value: b ? b.backlog.toLocaleString() : "—",
+        tone: !b ? "neutral"
+          : b.status === "healthy" ? "good"
+          : b.status === "buffering" ? "warn"
+          : "error",
+        hint: b?.status,
+      },
+      {
+        label: "Config issues",
+        value: s ? totalIssues.toLocaleString() : "—",
+        tone: s == null ? "neutral"
+          : totalIssues === 0 ? "good"
+          : totalIssues < 10 ? "warn"
+          : "error",
+        hint: s == null
+          ? undefined
+          : totalIssues === 0 ? "Clean"
+          : breakdownLabel(s),
+      },
+      {
+        label: "Enabled tags",
+        value: s ? s.enabled_tag_count.toLocaleString() : "—",
+        tone: "info",
+        hint: s ? `${s.enabled_device_count} devices` : undefined,
+      },
+    ];
+  })();
 
-      {/* Three summary cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <WorkersCard summary={summary.data} />
-        <BufferCard buffer={buffer.data} />
-        <ConfigIssuesCard summary={summary.data} />
-      </div>
+  return (
+    <div className="space-y-4 max-w-7xl mx-auto">
+      <PageHeader
+        title="Health"
+        subtitle="System overview · auto-refreshes every 5s"
+        actions={
+          <span
+            className="text-xs flex items-center gap-1.5"
+            style={{ color: "var(--ios-gray-1)" }}
+          >
+            <RefreshCw className={cn("h-3 w-3", (summary.isFetching || workers.isFetching) && "animate-spin")} />
+            live
+          </span>
+        }
+      />
+
+      <MetricStrip items={summaryMetrics} />
+
+      {/* Phase 19 — Quality heatmap. One-glance view of "is data healthy
+          across all tags over the recent window?". Spot recurring issues:
+          a horizontal red band = one chronically-broken tag; a vertical
+          red column = a whole-system outage at that time. */}
+      <QualityHeatmapCard />
 
       {/* Phase 12.6 — operator-limit warnings. Rendered only when non-empty
           so the page stays calm during normal operation. When something IS
@@ -917,4 +977,18 @@ function formatUptime(sec: number): string {
 function formatNumber(n: number): string {
   // Use the central formatter — same display rules everywhere.
   return formatFloat(n);
+}
+
+
+/**
+ * Build a compact breakdown string for the "Config issues" MetricStrip
+ * card hint. e.g. "5 overlap · 1 stale". Skips zero-counts so the line
+ * stays tight.
+ */
+function breakdownLabel(s: DiagnosticsSummary): string {
+  const parts: string[] = [];
+  if (s.overlap_count > 0)         parts.push(`${s.overlap_count} overlap`);
+  if (s.block_fit_issue_count > 0) parts.push(`${s.block_fit_issue_count} block-fit`);
+  if (s.stale_tag_count > 0)       parts.push(`${s.stale_tag_count} stale`);
+  return parts.join(" · ");
 }

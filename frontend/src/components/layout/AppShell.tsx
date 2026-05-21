@@ -3,7 +3,10 @@ import { Activity } from "lucide-react";
 import { type HealthResponse } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
 import Nav from "@/components/layout/Nav";
+import MobileTabBar from "@/components/layout/MobileTabBar";
 import TimeFormatSelector from "@/components/TimeFormatSelector";
+import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { useIsMobile } from "@/lib/use-media-query";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   // Light heartbeat at the app shell — keeps the role/version visible and
@@ -20,8 +23,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     retry: false,
   });
 
+  // Phase 19 — responsive: sidebar on desktop, bottom tab bar on mobile.
+  const isMobile = useIsMobile();
+
   return (
     <div className="flex h-screen" style={{ backgroundColor: "var(--bg-grouped)", color: "var(--ios-gray-1)" }}>
+      {!isMobile && (
       <aside
         className="w-60 shrink-0 flex flex-col"
         style={{
@@ -57,11 +64,11 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             <div>
               <div
                 className="text-lg font-semibold tracking-tight leading-tight"
-                style={{ color: "#000", letterSpacing: "-0.02em" }}
+                style={{ color: "var(--text-primary)", letterSpacing: "-0.02em" }}
               >InduVista</div>
               <div
                 className="text-[10px] uppercase tracking-wider mt-0.5"
-                style={{ color: "var(--ios-gray-1)" }}
+                style={{ color: "var(--text-secondary)" }}
               >
                 Industrial Reporting Tool
               </div>
@@ -70,6 +77,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         </div>
         <Nav />
       </aside>
+      )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
         <header
@@ -79,6 +87,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             borderBottom: "0.5px solid var(--separator)",
           }}
         >
+          <ThemeToggle />
           {/* Global time format - applies app-wide (chart labels, summary
               tooltips, future timestamp columns in any module). */}
           <TimeFormatSelector />
@@ -97,7 +106,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               </Badge>
               <span
                 className="text-xs tabular-nums"
-                style={{ color: "var(--ios-gray-1)" }}
+                style={{ color: "var(--text-secondary)" }}
                 title={
                   `Backend uptime: ${formatUptime(health.data.uptime_sec)}\n` +
                   `Started: ${health.data.started_at}\n` +
@@ -109,12 +118,19 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               </span>
             </>
           ) : (
-            <span className="text-xs" style={{ color: "var(--ios-gray-1)" }}>connecting…</span>
+            <span className="text-xs" style={{ color: "var(--text-secondary)" }}>connecting…</span>
           )}
         </header>
 
-        <main className="flex-1 overflow-auto p-6" style={{ color: "#000" }}>{children}</main>
+        <main
+          className="flex-1 overflow-auto"
+          style={{
+            color: "var(--text-primary)",
+            padding: isMobile ? "12px 12px 80px" : "24px",   // bottom padding leaves room for the tab bar
+          }}
+        >{children}</main>
       </div>
+      {isMobile && <MobileTabBar />}
     </div>
   );
 }

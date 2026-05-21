@@ -80,6 +80,8 @@ export function KpiCard({
         backgroundColor: "var(--bg-elevated)",
         borderRadius: "var(--radius-lg-2)",
         padding: "12px 14px",
+        border: "0.5px solid var(--card-edge)",
+        boxShadow: "var(--card-shadow)",
       }}
       onClick={onClick}
       role={onClick ? "button" : undefined}

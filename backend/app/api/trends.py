@@ -861,3 +861,118 @@ def delete_view(
         raise HTTPException(404, f"View {view_id} not found")
     db.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Phase 23.3 — Calendar heatmap
+#
+# Visualizes one tag's behavior aggregated by (day-of-week, hour-of-day).
+# 7 rows × 24 columns = 168 cells. Each cell is the average value of that
+# tag observed during that (DoW, hour) bucket over the last N weeks.
+#
+# Reveals patterns invisible in a line chart:
+#   - "Process always upsets at 06:00 on Mondays" → batch startup issue
+#   - "Pressure drops every Saturday afternoon" → weekend maintenance window
+#   - "Flow is bimodal between 07-09 and 17-19" → shift transitions
+#
+# We aggregate value_double (numeric tags). Boolean / text tags get a count
+# instead. ISO day-of-week is used: 1=Monday, 7=Sunday — matches Python's
+# isoweekday() and most operator intuition.
+# ---------------------------------------------------------------------------
+
+class CalendarCell(BaseModel):
+    dow: int    # 1=Mon, 7=Sun
+    hour: int   # 0-23
+    avg: float | None
+    min: float | None
+    max: float | None
+    count: int
+
+
+class CalendarHeatmapResponse(BaseModel):
+    tag_id: int
+    tag_name: str
+    engineering_unit: str | None
+    data_type: str
+    weeks: int
+    cells: list[CalendarCell]
+    global_min: float | None
+    global_max: float | None
+    global_avg: float | None
+    total_samples: int
+
+
+@router.get("/calendar-heatmap", response_model=CalendarHeatmapResponse)
+def calendar_heatmap(
+    db: Annotated[Session, Depends(get_session)],
+    tag_id: Annotated[int, Query(ge=1)],
+    weeks: Annotated[int, Query(ge=1, le=12)] = 4,
+):
+    """Aggregate one tag's values by (day-of-week, hour-of-day) over N weeks.
+
+    Filtered by tag_id (uses the (tag_id, time DESC) index → fast even
+    over 4-12 weeks of 1Hz data). Returns sparse cell list — bins with
+    zero samples are omitted; the frontend draws empty cells from any
+    (dow, hour) tuple missing in the response.
+    """
+    # Tag metadata first (small, cached by FK joins)
+    tag = db.execute(text("""
+        SELECT t.id, t.name, t.data_type,
+               COALESCE(eu.label, t.engineering_unit) AS engineering_unit
+        FROM tags t
+        LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
+        WHERE t.id = :tag_id
+    """), {"tag_id": tag_id}).mappings().first()
+
+    if tag is None:
+        raise HTTPException(status_code=404, detail=f"Tag {tag_id} not found")
+
+    # Aggregate. extract(isodow) gives 1-7 with Monday=1, Sunday=7. We use
+    # value_double; boolean/text tags simply return count without avg.
+    rows = db.execute(text("""
+        SELECT
+            extract(isodow from time)::int  AS dow,
+            extract(hour   from time)::int  AS hour,
+            avg(value_double)::float        AS avg_val,
+            min(value_double)::float        AS min_val,
+            max(value_double)::float        AS max_val,
+            count(*)::int                   AS sample_count
+        FROM tag_values
+        WHERE tag_id = :tag_id
+          AND time >= NOW() - make_interval(weeks => :weeks)
+          AND st >= 128
+        GROUP BY dow, hour
+        ORDER BY dow, hour
+    """), {"tag_id": tag_id, "weeks": weeks}).mappings().all()
+
+    cells = [
+        CalendarCell(
+            dow=r["dow"],
+            hour=r["hour"],
+            avg=r["avg_val"],
+            min=r["min_val"],
+            max=r["max_val"],
+            count=r["sample_count"],
+        )
+        for r in rows
+    ]
+
+    # Global stats for color-scale normalization on the client. Computing
+    # min/max/avg in Python avoids a second SQL query.
+    avgs = [c.avg for c in cells if c.avg is not None]
+    mins = [c.min for c in cells if c.min is not None]
+    maxs = [c.max for c in cells if c.max is not None]
+    total = sum(c.count for c in cells)
+
+    return CalendarHeatmapResponse(
+        tag_id=tag["id"],
+        tag_name=tag["name"],
+        engineering_unit=tag["engineering_unit"],
+        data_type=tag["data_type"],
+        weeks=weeks,
+        cells=cells,
+        global_min=min(mins) if mins else None,
+        global_max=max(maxs) if maxs else None,
+        global_avg=(sum(avgs) / len(avgs)) if avgs else None,
+        total_samples=total,
+    )

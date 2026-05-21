@@ -15,7 +15,7 @@ time range with ?since=<ISO timestamp> to keep it cheap on long-running systems.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -860,3 +860,246 @@ def list_out_of_range_tags(db: Annotated[Session, Depends(get_session)]):
             ) DESC
     """)).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 — Quality heatmap
+#
+# Time-binned quality per tag. Answers "is my data healthy across all tags
+# over the recent window?" in one glance. Lives on the Diagnostics page.
+#
+# Y-axis: each tag (sorted by device, then name)
+# X-axis: time bins (e.g., 96 × 15-minute bins for 24h)
+# Color : quality class in that bin
+#   0 = no data (no samples in bin) — gray
+#   1 = invalid (worst sample ST < 64) — red
+#   2 = uncertain (worst sample 64 ≤ ST < 128) — amber
+#   3 = good (every sample ST ≥ 128) — green
+#
+# The "worst-quality-wins" aggregation matches operator intuition: if even
+# one sample in a 15-minute window was BAD, the bin reads BAD. This makes
+# transient issues visible rather than averaged-away.
+#
+# Payload size: ~300 tags × 96 bins × 1 int = ~28K. Cheap.
+# ---------------------------------------------------------------------------
+
+class HeatmapTag(BaseModel):
+    tag_id: int
+    tag_name: str
+    device_id: int
+    device_name: str
+
+
+class HeatmapBin(BaseModel):
+    start: datetime  # ISO timestamp marking the bucket's start
+
+
+class QualityHeatmapResponse(BaseModel):
+    window_hours: int
+    bin_minutes: int
+    tags: list[HeatmapTag]
+    bins: list[HeatmapBin]
+    # cells[i][j] = quality class for tags[i] in bins[j]; length: tags × bins
+    cells: list[list[int]]
+
+
+@router.get("/quality-heatmap", response_model=QualityHeatmapResponse)
+def quality_heatmap(
+    db: Annotated[Session, Depends(get_session)],
+    window_hours: Annotated[int, Query(ge=1, le=168)] = 6,
+    bin_minutes: Annotated[int, Query(ge=1, le=240)] = 15,
+    device_id: Annotated[int | None, Query()] = None,
+):
+    """Aggregate tag-quality bytes into time bins for a heatmap view.
+
+    Performance design (Phase 19.3):
+      1. TimescaleDB continuous aggregate `tag_quality_5m_cagg` pre-bins
+         min(st) per (tag, 5-min bucket) and auto-refreshes every minute.
+         The heatmap query reads from the aggregate, so 6h/1d/3d/1w
+         windows all complete in well under a second.
+      2. The endpoint falls back to scanning raw tag_values if the cagg
+         doesn't exist yet (migration not applied) or if bin_minutes < 5.
+      3. In-process TTL cache (60s) absorbs back-to-back React Query
+         refetches without hitting the DB at all.
+      4. Default cell value GOOD (3); only bad/uncertain bins need overrides.
+      5. latest_tag_values marks trailing bins as no-data for tags that
+         stopped reporting.
+    """
+    cache_key = ("quality_heatmap", window_hours, bin_minutes, device_id)
+    cached = _heatmap_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        result = _build_quality_heatmap(db, window_hours, bin_minutes, device_id)
+    except Exception as exc:
+        # Log the full traceback to docker logs so we can diagnose.
+        import logging, traceback
+        logging.getLogger(__name__).exception(
+            "quality_heatmap failed: window=%dh bin=%dm device=%s",
+            window_hours, bin_minutes, device_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Quality heatmap query failed: {type(exc).__name__}: {exc}",
+        )
+
+    _heatmap_cache_set(cache_key, result)
+    return result
+
+
+def _build_quality_heatmap(
+    db: Session,
+    window_hours: int,
+    bin_minutes: int,
+    device_id: int | None,
+) -> "QualityHeatmapResponse":
+    """The cache-miss branch of the endpoint — extracted so the wrapper
+    above can apply try/except + caching uniformly without indentation
+    creep in the SQL-heavy body."""
+
+    # ── Tags axis ───────────────────────────────────────────────────────
+    tag_sql = """
+        SELECT t.id AS tag_id, t.name AS tag_name,
+               t.device_id, d.name AS device_name
+        FROM tags t
+        JOIN devices d ON d.id = t.device_id
+        WHERE t.enabled = true
+    """
+    tag_params: dict = {}
+    if device_id is not None:
+        tag_sql += " AND t.device_id = :device_id"
+        tag_params["device_id"] = device_id
+    tag_sql += " ORDER BY d.name, t.name"
+
+    tag_rows = db.execute(text(tag_sql), tag_params).mappings().all()
+    tags = [HeatmapTag(**r) for r in tag_rows]
+    tag_index = {t.tag_id: i for i, t in enumerate(tags)}
+
+    # ── Time-bin axis ───────────────────────────────────────────────────
+    now = datetime.now(timezone.utc)
+    bin_width = timedelta(minutes=bin_minutes)
+    bucket_secs = bin_minutes * 60
+    epoch_secs = int((now - timedelta(hours=window_hours)).timestamp())
+    snap = epoch_secs - (epoch_secs % bucket_secs)
+    aligned_start = datetime.fromtimestamp(snap, tz=timezone.utc)
+
+    bins: list[HeatmapBin] = []
+    cursor = aligned_start
+    while cursor < now:
+        bins.append(HeatmapBin(start=cursor))
+        cursor += bin_width
+    bin_index: dict[datetime, int] = {b.start: i for i, b in enumerate(bins)}
+
+    # ── Per-tag last-seen times (small, fast query) ─────────────────────
+    last_seen: dict[int, datetime | None] = {}
+    for r in db.execute(text("SELECT tag_id, time FROM latest_tag_values")).mappings():
+        last_seen[r["tag_id"]] = r["time"]
+
+    # ── Initialize cells: all GOOD by default ───────────────────────────
+    cells: list[list[int]] = [[3] * len(bins) for _ in tags]
+
+    # ── Aggregate ONLY non-good samples ─────────────────────────────────
+    # Prefer the continuous aggregate (sub-second). If migration 0044
+    # hasn't been applied yet, the to_regclass() lookup returns NULL and
+    # we fall back to scanning raw tag_values.
+    cagg_exists = db.execute(text(
+        "SELECT to_regclass('tag_quality_5m_cagg') IS NOT NULL AS exists"
+    )).scalar()
+
+    if cagg_exists and bin_minutes >= 5 and bin_minutes % 5 == 0:
+        # FAST PATH: read pre-aggregated 5-min buckets and roll up to the
+        # user-requested bin width via a second time_bucket().
+        agg_sql = """
+            SELECT
+                tag_id,
+                time_bucket(make_interval(mins => :bin_minutes), bucket) AS bucket,
+                min(min_st) AS worst_st
+            FROM tag_quality_5m_cagg
+            WHERE bucket >= :since
+              AND min_st < 128
+        """
+        if device_id is not None:
+            # The cagg doesn't carry device_id, so filter via tags subquery.
+            # This is still fast because the inner set is tiny.
+            agg_sql += " AND tag_id IN (SELECT id FROM tags WHERE device_id = :device_id)"
+        agg_sql += " GROUP BY tag_id, bucket"
+    else:
+        # FALLBACK: raw hypertable scan. Slower, but always correct.
+        # Used when:
+        #   - migration 0044 hasn't been applied yet, OR
+        #   - bin_minutes < 5 (e.g. 1-minute bins for real-time tuning)
+        agg_sql = """
+            SELECT
+                tv.tag_id,
+                time_bucket(make_interval(mins => :bin_minutes), tv.time) AS bucket,
+                min(tv.st) AS worst_st
+            FROM tag_values tv
+            WHERE tv.time >= :since
+              AND tv.st < 128
+        """
+        if device_id is not None:
+            agg_sql += " AND tv.device_id = :device_id"
+        agg_sql += " GROUP BY tv.tag_id, bucket"
+
+    agg_params: dict = {"bin_minutes": bin_minutes, "since": aligned_start}
+    if device_id is not None:
+        agg_params["device_id"] = device_id
+
+    for row in db.execute(text(agg_sql), agg_params).mappings():
+        ti = tag_index.get(row["tag_id"])
+        bi = bin_index.get(row["bucket"])
+        if ti is None or bi is None:
+            continue
+        worst = row["worst_st"]
+        cells[ti][bi] = 1 if worst < 64 else 2
+
+    # ── Mark trailing bins as no-data for stale tags ────────────────────
+    for i, t in enumerate(tags):
+        last = last_seen.get(t.tag_id)
+        if last is None:
+            cells[i] = [0] * len(bins)
+            continue
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        for j, b in enumerate(bins):
+            if last < b.start:
+                cells[i][j] = 0
+
+    return QualityHeatmapResponse(
+        window_hours=window_hours,
+        bin_minutes=bin_minutes,
+        tags=tags,
+        bins=bins,
+        cells=cells,
+    )
+
+
+# ── In-process TTL cache for heatmaps ───────────────────────────────────
+# A tiny dict + monotonic-clock TTL. The cache key includes window/bin/
+# device so different requests get separate entries. 25s TTL is slightly
+# shorter than React Query's 30s staleTime, so the client always sees a
+# warm cache for back-to-back requests but we don't serve very stale data.
+
+import time as _heatmap_time
+_HEATMAP_CACHE: dict[tuple, tuple[float, Any]] = {}
+_HEATMAP_CACHE_TTL = 60.0
+_HEATMAP_CACHE_MAX = 64
+
+
+def _heatmap_cache_get(key: tuple):
+    entry = _HEATMAP_CACHE.get(key)
+    if entry is None:
+        return None
+    expiry, value = entry
+    if _heatmap_time.monotonic() > expiry:
+        _HEATMAP_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _heatmap_cache_set(key: tuple, value: Any) -> None:
+    _HEATMAP_CACHE[key] = (_heatmap_time.monotonic() + _HEATMAP_CACHE_TTL, value)
+    if len(_HEATMAP_CACHE) > _HEATMAP_CACHE_MAX:
+        oldest = min(_HEATMAP_CACHE.items(), key=lambda kv: kv[1][0])
+        _HEATMAP_CACHE.pop(oldest[0], None)
