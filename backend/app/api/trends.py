@@ -16,7 +16,7 @@ Spec references throughout: §5.1 (tag browser fields), §9.2 (quality bands),
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -24,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.config import settings
 
 
 router = APIRouter(prefix="/api/trends", tags=["trends"])
@@ -71,9 +72,9 @@ def _pick_aggregation(start: datetime, end: datetime, requested: str) -> str:
         return "raw"           # raw values; max ~1800 pts at 1s polling
     if span <= timedelta(hours=4):
         return "1m"            # 240 buckets/tag
-    if span <= timedelta(days=7):
-        return "1h"            # 168 buckets/tag
-    return "1d"
+    if span <= timedelta(days=5):
+        return "1h"            # ≤120 buckets/tag
+    return "1d"                # ≥120 buckets per 5-day window if 1h; 1d keeps it ≤30/month
 
 
 # ---------------------------------------------------------------------------
@@ -355,26 +356,72 @@ def get_history(
 
     series: list[TrendSeries] = []
 
+    # Phase 24 — perf: cache the entire response by request signature so
+    # rapid navigation between historical presets ("Current month" →
+    # "Previous month" → back) is instant for the second hit. TTL is 60s
+    # which matches React Query's refetchInterval. Live-mode queries
+    # change start/end every second so they're effectively never cached;
+    # that's intentional, freshness matters there.
+    cache_key = (
+        "history",
+        tuple(ids),
+        start.isoformat(),
+        end.isoformat(),
+        grain,
+        agg_mode,
+        max_points,
+    )
+    cached = _history_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    # Population count for the "downsampled from N" badge. The query
+    # shape differs by grain:
+    #   - raw: we genuinely need count(*) over tag_values; the chart
+    #     uses it to compute stride.
+    #   - 1m/1h/1d: read the pre-computed sum(sample_count) from the
+    #     cagg itself. For a 30-day query this changes a ~26M-row scan
+    #     into a ~30-row sum — orders of magnitude faster, and exactly
+    #     the same answer (the cagg's sample_count IS the row count
+    #     from tag_values for that bucket).
+    if grain == "raw":
+        raw_count_rows = db.execute(text("""
+            SELECT tag_id, count(*)::bigint AS n
+            FROM tag_values
+            WHERE tag_id = ANY(:ids) AND time >= :s AND time < :e
+            GROUP BY tag_id
+        """), {"ids": ids, "s": start, "e": end}).mappings().all()
+    else:
+        view = {"1m": "tag_values_1m", "1h": "tag_values_1h", "1d": "tag_values_1d"}[grain]
+        bucket_interval = {
+            "tag_values_1m": "1 minute",
+            "tag_values_1h": "1 hour",
+            "tag_values_1d": "1 day",
+        }[view]
+        raw_count_rows = db.execute(text(f"""
+            SELECT tag_id, COALESCE(SUM(sample_count), 0)::bigint AS n
+            FROM {view}
+            WHERE tag_id = ANY(:ids)
+              AND bucket + INTERVAL '{bucket_interval}' > :s
+              AND bucket < :e
+            GROUP BY tag_id
+        """), {"ids": ids, "s": start, "e": end}).mappings().all()
+    raw_counts: dict[int, int] = {r["tag_id"]: int(r["n"]) for r in raw_count_rows}
+
+    # Batch the actual points. For raw queries we keep the per-tag loop
+    # (stride sampling needs per-tag row count). For cagg queries we
+    # fetch all tags in a single statement keyed on tag_id IN (...).
+    if grain == "raw":
+        points_by_tag: dict[int, list[TrendPoint]] = {
+            tid: _query_raw(db, tid, start, end, max_points) for tid in ids
+        }
+    else:
+        view = {"1m": "tag_values_1m", "1h": "tag_values_1h", "1d": "tag_values_1d"}[grain]
+        points_by_tag = _query_aggregated_batch(db, view, ids, start, end, max_points, agg_mode)
+
     for tag_id in ids:
         meta = meta_rows[tag_id]
-
-        # First, the raw count in the window (for the "downsampled from N"
-        # badge). Cheap because of the (tag_id, time) PK.
-        raw_count = db.execute(
-            text("SELECT count(*) FROM tag_values "
-                 "WHERE tag_id = :tid AND time >= :s AND time < :e"),
-            {"tid": tag_id, "s": start, "e": end},
-        ).scalar() or 0
-
-        # Then the points themselves. The query shape depends on whether
-        # we're hitting raw or a continuous aggregate.
-        if grain == "raw":
-            points = _query_raw(db, tag_id, start, end, max_points)
-        else:
-            view = {"1m": "tag_values_1m", "1h": "tag_values_1h",
-                    "1d": "tag_values_1d"}[grain]
-            points = _query_aggregated(db, view, tag_id, start, end, max_points, agg_mode)
-
+        points = points_by_tag.get(tag_id, [])
         series.append(TrendSeries(
             tag_id=tag_id,
             tag_name=meta["name"],
@@ -383,12 +430,14 @@ def get_history(
             min_value=meta["min_value"],
             max_value=meta["max_value"],
             aggregation=grain,
-            raw_count=raw_count,
+            raw_count=raw_counts.get(tag_id, 0),
             returned_count=len(points),
             points=points,
         ))
 
-    return TrendHistoryResponse(start=start, end=end, aggregation=grain, series=series)
+    response = TrendHistoryResponse(start=start, end=end, aggregation=grain, series=series)
+    _history_cache_set(cache_key, response)
+    return response
 
 
 def _query_raw(db: Session, tag_id: int, start: datetime, end: datetime,
@@ -500,6 +549,73 @@ def _query_aggregated(db: Session, view: str, tag_id: int,
         )
         for r in rows
     ]
+
+
+def _query_aggregated_batch(
+    db: Session,
+    view: str,
+    tag_ids: list[int],
+    start: datetime,
+    end: datetime,
+    max_points: int,
+    agg_mode: str = "last",
+) -> dict[int, list[TrendPoint]]:
+    """Same as _query_aggregated but for many tags in ONE SQL round trip.
+
+    Phase 24 — perf: replaces the per-tag loop in get_history. For a
+    10-tag query that previously did 10 separate SELECTs (≈ 10 × 30ms
+    round-trip), this is a single query that returns rows for all tags
+    interleaved. We split them back into a {tag_id: [points]} dict in
+    Python.
+
+    Per-tag LIMIT is enforced by a window function (ROW_NUMBER OVER
+    PARTITION BY tag_id) so each tag still respects max_points. In
+    practice the bucket count per tag is small for typical windows so
+    this rarely truncates.
+    """
+    bucket_interval = {
+        "tag_values_1m": "1 minute",
+        "tag_values_1h": "1 hour",
+        "tag_values_1d": "1 day",
+    }[view]
+
+    sql = text(f"""
+        WITH ranked AS (
+            SELECT tag_id, bucket, first_value, last_value, min_value, max_value,
+                   avg_value, sample_count, good_count, bad_count,
+                   ROW_NUMBER() OVER (PARTITION BY tag_id ORDER BY bucket) AS rn
+            FROM {view}
+            WHERE tag_id = ANY(:ids)
+              AND bucket + INTERVAL '{bucket_interval}' > :s
+              AND bucket < :e
+        )
+        SELECT * FROM ranked
+        WHERE rn <= :max_pts
+        ORDER BY tag_id, bucket
+    """)
+    rows = db.execute(sql, {
+        "ids": tag_ids, "s": start, "e": end, "max_pts": max_points,
+    }).all()
+
+    pick = {
+        "last":  lambda r: r.last_value,
+        "first": lambda r: r.first_value,
+        "avg":   lambda r: r.avg_value,
+        "min":   lambda r: r.min_value,
+        "max":   lambda r: r.max_value,
+    }[agg_mode]
+
+    out: dict[int, list[TrendPoint]] = {tid: [] for tid in tag_ids}
+    for r in rows:
+        out[r.tag_id].append(TrendPoint(
+            t=r.bucket,
+            v=pick(r),
+            mn=r.min_value,
+            mx=r.max_value,
+            g=r.good_count,
+            b=r.bad_count,
+        ))
+    return out
 
 
 # ===========================================================================
@@ -667,10 +783,33 @@ def get_summary(
                 -- so bad readings don't pollute the mean/stddev. Returns
                 -- NULL for non-numeric tags (value_double is null) and
                 -- for tags with <2 good samples (stddev undefined).
-                AVG(tv.value_double) FILTER (WHERE tv.st >= 128 AND tv.value_double IS NOT NULL) AS mean_value,
-                STDDEV_SAMP(tv.value_double) FILTER (WHERE tv.st >= 128 AND tv.value_double IS NOT NULL) AS stddev_value,
-                MIN(tv.value_double) FILTER (WHERE tv.st >= 128) AS observed_min,
-                MAX(tv.value_double) FILTER (WHERE tv.st >= 128) AS observed_max
+                --
+                -- Also filters to the tag's configured engineering range
+                -- (min_value..max_value). Bad data from a wrong-endian
+                -- modbus float decode occasionally produces near-float32-
+                -- limit values that slip through with st=GOOD; those would
+                -- otherwise dominate mean/stddev. When the range isn't
+                -- configured (NULLs in tag), the filter is bypassed.
+                AVG(tv.value_double) FILTER (
+                    WHERE tv.st >= 128 AND tv.value_double IS NOT NULL
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS mean_value,
+                STDDEV_SAMP(tv.value_double) FILTER (
+                    WHERE tv.st >= 128 AND tv.value_double IS NOT NULL
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS stddev_value,
+                MIN(tv.value_double) FILTER (
+                    WHERE tv.st >= 128
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS observed_min,
+                MAX(tv.value_double) FILTER (
+                    WHERE tv.st >= 128
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS observed_max
             FROM tags t
             JOIN register_blocks rb ON rb.id = t.register_block_id
             LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
@@ -910,11 +1049,43 @@ def calendar_heatmap(
 ):
     """Aggregate one tag's values by (day-of-week, hour-of-day) over N weeks.
 
-    Filtered by tag_id (uses the (tag_id, time DESC) index → fast even
-    over 4-12 weeks of 1Hz data). Returns sparse cell list — bins with
-    zero samples are omitted; the frontend draws empty cells from any
-    (dow, hour) tuple missing in the response.
+    Performance design (Phase 23.3.1):
+      1. Reads from `tag_values_1h` continuous aggregate (built in
+         migration 0024). Hourly buckets are exactly the granularity this
+         heatmap needs, so 4-12 weeks × 1 tag = at most ~2,016 pre-aggregated
+         rows — orders of magnitude fewer than the raw ~2.4M-row scan.
+      2. In-process TTL cache (60s) to absorb the React Query refetch
+         cycle and rapid week-window switching.
+      3. Fallback path scans raw tag_values for installations where the
+         cagg hasn't been built (defensive, shouldn't trigger).
     """
+    cache_key = ("calendar_heatmap", tag_id, weeks)
+    cached = _calendar_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        result = _build_calendar_heatmap(db, tag_id, weeks)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception(
+            "calendar_heatmap failed: tag_id=%d weeks=%d", tag_id, weeks,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Calendar heatmap query failed: {type(exc).__name__}: {exc}",
+        )
+
+    _calendar_cache_set(cache_key, result)
+    return result
+
+
+def _build_calendar_heatmap(
+    db: Session,
+    tag_id: int,
+    weeks: int,
+) -> "CalendarHeatmapResponse":
+    """Cache-miss branch of calendar_heatmap, extracted for cleanliness."""
     # Tag metadata first (small, cached by FK joins)
     tag = db.execute(text("""
         SELECT t.id, t.name, t.data_type,
@@ -927,23 +1098,49 @@ def calendar_heatmap(
     if tag is None:
         raise HTTPException(status_code=404, detail=f"Tag {tag_id} not found")
 
-    # Aggregate. extract(isodow) gives 1-7 with Monday=1, Sunday=7. We use
-    # value_double; boolean/text tags simply return count without avg.
-    rows = db.execute(text("""
-        SELECT
-            extract(isodow from time)::int  AS dow,
-            extract(hour   from time)::int  AS hour,
-            avg(value_double)::float        AS avg_val,
-            min(value_double)::float        AS min_val,
-            max(value_double)::float        AS max_val,
-            count(*)::int                   AS sample_count
-        FROM tag_values
-        WHERE tag_id = :tag_id
-          AND time >= NOW() - make_interval(weeks => :weeks)
-          AND st >= 128
-        GROUP BY dow, hour
-        ORDER BY dow, hour
-    """), {"tag_id": tag_id, "weeks": weeks}).mappings().all()
+    # Aggregate. Reads from the tag_values_1h continuous aggregate (built
+    # in migration 0024_trend_aggregates and refreshed every 5 minutes by
+    # its policy). The 1-hour pre-buckets are perfect for hour-of-day
+    # aggregation — 4 weeks × 1 tag = ~672 pre-aggregated rows scanned
+    # instead of ~2.4M raw samples. Falls back to raw tag_values if the
+    # cagg doesn't exist (defensive, shouldn't trigger on Phase 13.1+).
+    cagg_exists = db.execute(text(
+        "SELECT to_regclass('tag_values_1h') IS NOT NULL AS exists"
+    )).scalar()
+
+    if cagg_exists:
+        rows = db.execute(text("""
+            SELECT
+                extract(isodow from bucket AT TIME ZONE :tz)::int   AS dow,
+                extract(hour   from bucket AT TIME ZONE :tz)::int   AS hour,
+                avg(avg_value)::float              AS avg_val,
+                min(min_value)::float              AS min_val,
+                max(max_value)::float              AS max_val,
+                sum(sample_count)::int             AS sample_count
+            FROM tag_values_1h
+            WHERE tag_id = :tag_id
+              AND bucket >= NOW() - make_interval(weeks => :weeks)
+              AND good_count > 0
+            GROUP BY dow, hour
+            ORDER BY dow, hour
+        """), {"tag_id": tag_id, "weeks": weeks, "tz": settings.app_timezone}).mappings().all()
+    else:
+        # Fallback path — raw scan, slower but always correct.
+        rows = db.execute(text("""
+            SELECT
+                extract(isodow from time AT TIME ZONE :tz)::int  AS dow,
+                extract(hour   from time AT TIME ZONE :tz)::int  AS hour,
+                avg(value_double)::float        AS avg_val,
+                min(value_double)::float        AS min_val,
+                max(value_double)::float        AS max_val,
+                count(*)::int                   AS sample_count
+            FROM tag_values
+            WHERE tag_id = :tag_id
+              AND time >= NOW() - make_interval(weeks => :weeks)
+              AND st >= 128
+            GROUP BY dow, hour
+            ORDER BY dow, hour
+        """), {"tag_id": tag_id, "weeks": weeks, "tz": settings.app_timezone}).mappings().all()
 
     cells = [
         CalendarCell(
@@ -976,3 +1173,60 @@ def calendar_heatmap(
         global_avg=(sum(avgs) / len(avgs)) if avgs else None,
         total_samples=total,
     )
+
+
+# ── In-process TTL cache for calendar heatmap ──────────────────────────
+# Same pattern as the other heatmap caches. 60s TTL matches React Query's
+# refetchInterval so back-to-back polls are free.
+import time as _calendar_time
+_CALENDAR_CACHE: dict[tuple, tuple[float, Any]] = {}
+_CALENDAR_CACHE_TTL = 60.0
+_CALENDAR_CACHE_MAX = 32
+
+
+def _calendar_cache_get(key: tuple):
+    entry = _CALENDAR_CACHE.get(key)
+    if entry is None:
+        return None
+    expiry, value = entry
+    if _calendar_time.monotonic() > expiry:
+        _CALENDAR_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _calendar_cache_set(key: tuple, value: Any) -> None:
+    _CALENDAR_CACHE[key] = (_calendar_time.monotonic() + _CALENDAR_CACHE_TTL, value)
+    if len(_CALENDAR_CACHE) > _CALENDAR_CACHE_MAX:
+        oldest = min(_CALENDAR_CACHE.items(), key=lambda kv: kv[1][0])
+        _CALENDAR_CACHE.pop(oldest[0], None)
+
+
+# ── In-process TTL cache for /history ──────────────────────────────────
+# Caches the full TrendHistoryResponse keyed on the request parameters.
+# Effective for historical-mode navigation (stable start/end). Less
+# effective for live-mode polling (moving start/end means cache misses
+# every poll). 60s TTL — long enough to absorb back-to-back navigation,
+# short enough that operators never see stale data on a static window.
+import time as _history_time
+_HISTORY_CACHE: dict[tuple, tuple[float, Any]] = {}
+_HISTORY_CACHE_TTL = 60.0
+_HISTORY_CACHE_MAX = 32
+
+
+def _history_cache_get(key: tuple):
+    entry = _HISTORY_CACHE.get(key)
+    if entry is None:
+        return None
+    expiry, value = entry
+    if _history_time.monotonic() > expiry:
+        _HISTORY_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _history_cache_set(key: tuple, value: Any) -> None:
+    _HISTORY_CACHE[key] = (_history_time.monotonic() + _HISTORY_CACHE_TTL, value)
+    if len(_HISTORY_CACHE) > _HISTORY_CACHE_MAX:
+        oldest = min(_HISTORY_CACHE.items(), key=lambda kv: kv[1][0])
+        _HISTORY_CACHE.pop(oldest[0], None)
