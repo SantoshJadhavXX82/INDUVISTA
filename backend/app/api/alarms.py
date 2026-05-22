@@ -42,6 +42,7 @@ Notes
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -51,6 +52,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.config import settings
 from app.utils.audit import audit, AuditEvent
 
 
@@ -1165,11 +1167,17 @@ def _build_alarm_density(
 ) -> "AlarmDensityResponse":
     """Cache-miss branch of alarm_density_heatmap, extracted for cleanliness."""
 
+    # Local-tz aligned bins so bucket boundaries map to local midnight,
+    # not UTC midnight. See diagnostics.quality_heatmap for the same
+    # pattern with a fuller explanation.
     now = datetime.now(timezone.utc)
+    local_tz = ZoneInfo(settings.app_timezone)
+    offset_secs = int(now.astimezone(local_tz).utcoffset().total_seconds())
+
     bin_width = timedelta(minutes=bin_minutes)
     bucket_secs = bin_minutes * 60
     window_start_epoch = int((now - timedelta(hours=window_hours)).timestamp())
-    snap = window_start_epoch - (window_start_epoch % bucket_secs)
+    snap = window_start_epoch - ((window_start_epoch + offset_secs) % bucket_secs)
     aligned_start = datetime.fromtimestamp(snap, tz=timezone.utc)
 
     bins: list[AlarmDensityBin] = []
@@ -1190,7 +1198,7 @@ def _build_alarm_density(
     combined_sql = f"""
         WITH activated AS (
             SELECT rule_id,
-                   time_bucket(make_interval(mins => :bin_minutes), event_time) AS bucket,
+                   time_bucket(make_interval(mins => :bin_minutes), event_time, :tz) AS bucket,
                    COUNT(*) AS n
             FROM alarm_events
             WHERE event_type = 'activated'
@@ -1208,7 +1216,7 @@ def _build_alarm_density(
         WHERE 1=1 {sev_clause}
         ORDER BY ar.severity, t.name, ar.rule_type, a.bucket
     """
-    params: dict = {"since": aligned_start, "bin_minutes": bin_minutes}
+    params: dict = {"since": aligned_start, "bin_minutes": bin_minutes, "tz": settings.app_timezone}
     if severity:
         params["severity"] = severity
 

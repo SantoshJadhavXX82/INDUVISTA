@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -23,6 +24,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.config import settings
 
 router = APIRouter(prefix="/api/diagnostics", tags=["diagnostics"])
 
@@ -977,11 +979,20 @@ def _build_quality_heatmap(
     tag_index = {t.tag_id: i for i, t in enumerate(tags)}
 
     # ── Time-bin axis ───────────────────────────────────────────────────
+    # Bins must align to local-tz boundaries because the SQL uses
+    # time_bucket(width, ts, :tz) — buckets snap to local midnight, not
+    # UTC midnight. We compensate by offsetting epoch_secs by the local
+    # tz's UTC offset before the modulo snap. India has no DST so the
+    # offset is constant; for DST zones the offset comes from the
+    # *target* moment, which is close enough for any reasonable window.
     now = datetime.now(timezone.utc)
+    local_tz = ZoneInfo(settings.app_timezone)
+    offset_secs = int(now.astimezone(local_tz).utcoffset().total_seconds())
+
     bin_width = timedelta(minutes=bin_minutes)
     bucket_secs = bin_minutes * 60
     epoch_secs = int((now - timedelta(hours=window_hours)).timestamp())
-    snap = epoch_secs - (epoch_secs % bucket_secs)
+    snap = epoch_secs - ((epoch_secs + offset_secs) % bucket_secs)
     aligned_start = datetime.fromtimestamp(snap, tz=timezone.utc)
 
     bins: list[HeatmapBin] = []
@@ -1010,10 +1021,12 @@ def _build_quality_heatmap(
     if cagg_exists and bin_minutes >= 5 and bin_minutes % 5 == 0:
         # FAST PATH: read pre-aggregated 5-min buckets and roll up to the
         # user-requested bin width via a second time_bucket().
+        # The :tz parameter passes the app's local timezone so bucket
+        # boundaries align to local midnight, not UTC midnight.
         agg_sql = """
             SELECT
                 tag_id,
-                time_bucket(make_interval(mins => :bin_minutes), bucket) AS bucket,
+                time_bucket(make_interval(mins => :bin_minutes), bucket, :tz) AS bucket,
                 min(min_st) AS worst_st
             FROM tag_quality_5m_cagg
             WHERE bucket >= :since
@@ -1032,7 +1045,7 @@ def _build_quality_heatmap(
         agg_sql = """
             SELECT
                 tv.tag_id,
-                time_bucket(make_interval(mins => :bin_minutes), tv.time) AS bucket,
+                time_bucket(make_interval(mins => :bin_minutes), tv.time, :tz) AS bucket,
                 min(tv.st) AS worst_st
             FROM tag_values tv
             WHERE tv.time >= :since
@@ -1042,7 +1055,7 @@ def _build_quality_heatmap(
             agg_sql += " AND tv.device_id = :device_id"
         agg_sql += " GROUP BY tv.tag_id, bucket"
 
-    agg_params: dict = {"bin_minutes": bin_minutes, "since": aligned_start}
+    agg_params: dict = {"bin_minutes": bin_minutes, "since": aligned_start, "tz": settings.app_timezone}
     if device_id is not None:
         agg_params["device_id"] = device_id
 
