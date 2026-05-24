@@ -1,7 +1,0 @@
-# Stop the Vite process
-$pid_ = (Get-NetTCPConnection -LocalPort 5174 -ErrorAction SilentlyContinue).OwningProcess
-if ($pid_) { Stop-Process -Id $pid_ -Force }
-
-# Start fresh - run in a new visible terminal so you can see HMR logs
-cd D:\INDUVISTA\frontend
-npm run dev
