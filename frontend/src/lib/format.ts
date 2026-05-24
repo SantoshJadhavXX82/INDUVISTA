@@ -214,13 +214,20 @@ export function formatFloat(f: number | null | undefined): string {
  *     named-set label), that wins.
  *   • bool → "TRUE" / "FALSE".
  *   • int* / uint* → truncated integer string.
- *   • float* → routed through formatFloatMagnitude.
+ *   • float* → routed through formatFloatMagnitude (auto) OR through
+ *     formatFloatExplicit when `decimalPlaces` is supplied.
  *   • Null/undefined value → "—".
+ *
+ * @param decimalPlaces  Phase 23.9 — when provided (not null/undefined),
+ *   overrides the magnitude-based heuristic with an exact `toFixed`
+ *   render of that many digits after the point. Doesn't apply to bool
+ *   or int/uint types (their representation isn't decimal-y).
  */
 export function formatTagValue(
   d: number | null | undefined,
   text: string | null | undefined,
   dataType: string,
+  decimalPlaces?: number | null,
 ): string {
   if (text !== null && text !== undefined) return text;
   if (d === null || d === undefined) return "—";
@@ -229,5 +236,32 @@ export function formatTagValue(
     return Math.trunc(d).toString();
   }
   if (!Number.isFinite(d)) return "—";
+  if (decimalPlaces != null) {
+    return formatFloatExplicit(d, decimalPlaces);
+  }
   return formatFloatMagnitude(d);
+}
+
+
+/**
+ * Phase 23.9 — render a float with EXPLICIT decimal precision (from a
+ * tag's `decimal_places` config). Always shows the configured number
+ * of digits, with thousands separators for big values. Trailing zeros
+ * are KEPT (the user asked for a specific precision; trimming would
+ * defeat the point).
+ *
+ * For decimalPlaces > 15 we clamp to 15 since IEEE-754 double doesn't
+ * carry meaningful digits beyond that anyway.
+ */
+export function formatFloatExplicit(d: number, decimalPlaces: number): string {
+  const dp = Math.max(0, Math.min(15, decimalPlaces));
+  const s = d.toFixed(dp);
+  // Thousands separators for big magnitudes — same convention as the
+  // auto formatter.
+  if (Math.abs(d) >= 1000) {
+    const [intPart, fracPart] = s.split(".");
+    const withSeps = Number(intPart).toLocaleString("en-US");
+    return fracPart ? `${withSeps}.${fracPart}` : withSeps;
+  }
+  return s;
 }

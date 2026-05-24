@@ -198,6 +198,12 @@ export type LiveTag = {
   offset: number;
   min_value: number | null;
   max_value: number | null;
+  /**
+   * Phase 23.8 — display precision (digits after decimal point) for
+   * this tag in the UI. NULL = auto (magnitude-based heuristic).
+   * Storage precision is set by data_type; this is purely cosmetic.
+   */
+  decimal_places: number | null;
   enabled: boolean;
   // Phase 7 E1a — heartbeat metadata
   is_heartbeat: boolean;
@@ -449,6 +455,7 @@ export type TrendSeries = {
   data_type: string;
   min_value: number | null;
   max_value: number | null;
+  decimal_places: number | null;   // Phase 23.9 — display precision
   aggregation: "raw" | "1m" | "1h" | "1d";
   raw_count: number;        // total samples in window before downsampling
   returned_count: number;   // points in this response
@@ -479,6 +486,7 @@ export type TagAvailability = {
   last_sample: string | null;
   // Phase 13.11c — value statistics over good samples
   engineering_unit: string | null;
+  decimal_places: number | null;   // Phase 23.9 — display precision (NULL = auto)
   mean_value: number | null;
   stddev_value: number | null;
   observed_min: number | null;
@@ -530,6 +538,7 @@ export type RawTableRow = {
   v: number | null;
   vt: string | null;
   engineering_unit: string | null;
+  decimal_places: number | null;          // Phase 23.9 — display precision (NULL = auto)
   st: number | null;
   st_class: string | null;                // good / uncertain / bad
   device_name: string;

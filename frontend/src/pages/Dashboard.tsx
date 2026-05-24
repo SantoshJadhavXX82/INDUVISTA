@@ -657,7 +657,7 @@ function TagCard({
                     {resolved.text}
                   </span>
                   <span className="text-[10px] text-muted-foreground tabular-nums">
-                    ({formatValue(tag.value_double, tag.value_text, tag.data_type)})
+                    ({formatValue(tag.value_double, tag.value_text, tag.data_type, tag.decimal_places)})
                   </span>
                 </>
               );
@@ -665,7 +665,7 @@ function TagCard({
             return (
               <>
                 <span className="text-xl font-bold tabular-nums">
-                  {formatValue(tag.value_double, tag.value_text, tag.data_type)}
+                  {formatValue(tag.value_double, tag.value_text, tag.data_type, tag.decimal_places)}
                 </span>
                 {tag.engineering_unit && (
                   <span className="text-xs text-muted-foreground">{tag.engineering_unit}</span>
@@ -768,12 +768,12 @@ function TagsTable({
                             {resolved.text}
                           </span>
                           <span className="text-[10px] text-muted-foreground">
-                            ({formatValue(tag.value_double, tag.value_text, tag.data_type)})
+                            ({formatValue(tag.value_double, tag.value_text, tag.data_type, tag.decimal_places)})
                           </span>
                         </span>
                       );
                     }
-                    return formatValue(tag.value_double, tag.value_text, tag.data_type);
+                    return formatValue(tag.value_double, tag.value_text, tag.data_type, tag.decimal_places);
                   })()}
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground">
@@ -813,9 +813,15 @@ function StatusBadge({ st }: { st: number | null }) {
   return <Badge variant="destructive" className="text-[10px]">invalid</Badge>;
 }
 
-function formatValue(d: number | null, t: string | null, dataType: string): string {
+function formatValue(
+  d: number | null,
+  t: string | null,
+  dataType: string,
+  decimalPlaces?: number | null,
+): string {
   // Thin wrapper over the shared formatter; keeps the call sites tidy.
-  return formatTagValue(d, t, dataType);
+  // Phase 23.9 — passes through optional decimal_places from the tag.
+  return formatTagValue(d, t, dataType, decimalPlaces);
 }
 
 function formatAge(ageSec: number | null): string {

@@ -18,3 +18,9 @@ psutil==6.1.0
 # required by FastAPI for parsing multipart uploads (file fields).
 openpyxl==3.1.5
 python-multipart==0.0.20
+
+# Phase OPC-web.2 — asyncua client for the opc_supervisor worker.
+# 1.1.8 verified working on Python 3.11/3.12; broken on 3.14 (PEP 749
+# annotation deferral collides with asyncua's dataclass introspection).
+# Backend image is Python 3.12 so we're fine.
+asyncua>=1.1,<2

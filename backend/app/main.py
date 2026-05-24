@@ -150,12 +150,24 @@ from app.api.preview import router as preview_router
 from app.utils.audit import ensure_audit_schema
 app.include_router(_alarms_export.router)
 app.include_router(calc_schemas.router)
+from app.api import opc_sources as _opc_sources
+app.include_router(_opc_sources.router)
 app.include_router(calc_output_tags.router)
 app.include_router(calc_current_values.router)
 app.include_router(audit_log.router)
 app.include_router(computed_devices.router)
 app.include_router(computed_tags.router)
 app.include_router(preview_router)
+
+# Phase OPC.1 — external-client ingest endpoint + admin API key management.
+# /api/ingest    : authenticated batch sample push (OPC pushers, etc.)
+# /api/admin/api-keys : admin CRUD over the api_keys table
+# The admin endpoints are currently unauthenticated and rely on private-
+# network deployment until Phase 21 (Auth+RBAC) wraps them properly.
+from app.api import ingest as _ingest
+from app.api import api_keys as _api_keys
+app.include_router(_ingest.router)
+app.include_router(_api_keys.router)
 
 @app.on_event("startup")
 def _audit_schema_startup() -> None:

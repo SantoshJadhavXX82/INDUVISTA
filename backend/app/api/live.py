@@ -63,6 +63,7 @@ class LiveTag(BaseModel):
     offset: float
     min_value: float | None
     max_value: float | None
+    decimal_places: int | None   # Phase 23.8 — display precision (NULL = auto)
     enabled: bool
     # Phase 7 E1a — heartbeat metadata. UI uses these to render the ♥ chip
     # and show stale freezes in red.
@@ -109,6 +110,7 @@ _LIVE_SELECT = """
         t."offset"        AS "offset",
         t.min_value,
         t.max_value,
+        t.decimal_places,
         t.enabled,
         t.is_heartbeat,
         t.heartbeat_max_stale_sec,

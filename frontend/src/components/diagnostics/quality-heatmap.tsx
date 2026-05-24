@@ -46,7 +46,7 @@ type ViewMode = "device" | "tag";
 const QUALITY_LABELS = ["No data", "Invalid", "Uncertain", "Good"];
 const LABEL_WIDTH = 240;
 const SCROLLBAR_PAD = 14;
-const TIME_AXIS_HEIGHT = 26;
+const TIME_AXIS_HEIGHT = 38;  // bumped from 26: room for date row under hour ticks
 const CELL_GAP = 1.5;
 const CELL_RADIUS = 3;
 
@@ -129,17 +129,24 @@ export function QualityHeatmap({
     return () => obs.disconnect();
   }, []);
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
+  // Phase 23.7 (revised) — CALLBACK REF pattern. See alarm-density-heatmap
+  // for full rationale: early returns for loading/error mean the
+  // ref-bearing div doesn't exist on first mount, so useRef+useLayoutEffect
+  // with [] deps fails to set up measurement. Callback ref re-fires every
+  // time the element attaches, so measurement is always wired to the
+  // live DOM node.
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!container) return;
+    setContainerWidth(container.getBoundingClientRect().width);
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? 800;
       setContainerWidth(w);
     });
-    ro.observe(containerRef.current);
+    ro.observe(container);
     return () => ro.disconnect();
-  }, []);
+  }, [container]);
 
   const rows = useMemo(() => {
     if (!data) return { labels: [] as string[], sublabels: [] as string[], cells: [] as number[][], onClick: [] as (() => void)[] };
@@ -383,7 +390,7 @@ export function QualityHeatmap({
     : "radial-gradient(ellipse at top, rgba(0,0,0,0.02) 0%, rgba(0,0,0,0) 60%)";
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={setContainer} className="relative">
       {/* Toolbar */}
       <div className="flex items-center gap-3 mb-3 flex-wrap">
         <div
@@ -446,6 +453,14 @@ export function QualityHeatmap({
           : `${rows.labels.length} of ${data.tags.length} tags shown`}
         {" · "}
         {data.bins.length} bins × {data.bin_minutes}m · last {data.window_hours}h
+        {data.bins.length > 0 && (
+          <>
+            {" · "}
+            <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>
+              {formatDateRangeFromBins(data.bins, data.bin_minutes)}
+            </span>
+          </>
+        )}
       </div>
 
       {/* Grid container with subtle radial backdrop */}
@@ -554,13 +569,25 @@ export function QualityHeatmap({
                 transform: "translateX(-50%)",
               }}
             >
+              {/* Tick line — taller / darker at day boundaries so operators
+                  can spot the day changes at a glance. */}
               <div style={{
-                borderLeft: "0.5px solid var(--separator)",
-                height: 5,
+                borderLeft: tick.isDayBoundary
+                  ? "1px solid var(--text-secondary)"
+                  : "0.5px solid var(--separator)",
+                height: tick.isDayBoundary ? 8 : 5,
                 marginLeft: "50%",
                 marginBottom: 3,
               }} />
-              {tick.label}
+              <div>{tick.label}</div>
+              {tick.dateLabel && (
+                <div
+                  className="text-[10px] font-semibold mt-0.5"
+                  style={{ color: "var(--text-primary)" }}
+                >
+                  {tick.dateLabel}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -638,22 +665,54 @@ function LegendSwatch({ ramp, label }: { ramp: RampStop; label: string }) {
 }
 
 
+/**
+ * Time-axis tick layout.
+ *
+ * For long windows (1d / 3d / 1w) the X-axis cycles through the same hours
+ * multiple times. Without date context the operator sees "06:00" three
+ * times and can't tell which day a problem cell falls on. This emits a
+ * two-tier label: the time on top (always), and a date label on the
+ * second line whenever this tick crosses into a different calendar day
+ * than the previous tick. The first tick always gets a date label so
+ * the X-axis has a calendar anchor.
+ */
+type TimeTick = { x: number; label: string; dateLabel?: string; isDayBoundary?: boolean };
+
 function makeTimeTicks(
   bins: HeatmapBin[],
   cellWidth: number,
-): { x: number; label: string }[] {
+): TimeTick[] {
   if (bins.length === 0) return [];
   const tickPx = 100;
   const binsPerTick = Math.max(1, Math.round(tickPx / cellWidth));
-  const ticks: { x: number; label: string }[] = [];
+  const ticks: TimeTick[] = [];
+  let prevDateKey: string | null = null;
+
   for (let i = 0; i < bins.length; i += binsPerTick) {
     const d = new Date(bins[i].start);
     const hh = d.getHours().toString().padStart(2, "0");
     const mm = d.getMinutes().toString().padStart(2, "0");
+
+    // Use a numeric date key (Y-M-D) to compare days unambiguously across DST.
+    const dateKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const isDayBoundary = dateKey !== prevDateKey;
+    // Year shown inline only on the first tick of January (catches
+    // year-boundary crossings in long windows). For same-year windows
+    // year comes from the subtitle, so it's not repeated on every label.
+    const isYearBoundary = isDayBoundary && d.getMonth() === 0 && d.getDate() === 1;
+    const dateLabel = isDayBoundary
+      ? (isYearBoundary
+          ? `${d.getDate()} ${d.toLocaleString("en-US", { month: "short" })} ${d.getFullYear()}`
+          : d.toLocaleString("en-US", { day: "numeric", month: "short" }))
+      : undefined;
+
     ticks.push({
       x: i * cellWidth + cellWidth / 2,
       label: `${hh}:${mm}`,
+      dateLabel,
+      isDayBoundary,
     });
+    prevDateKey = dateKey;
   }
   return ticks;
 }
@@ -667,6 +726,46 @@ function formatBinRange(isoStart: string, binMinutes: number): string {
   const sameDay = new Date().toDateString() === start.toDateString();
   if (sameDay) return `${fmt(start)} – ${fmt(end)}`;
   return `${start.toLocaleDateString()} ${fmt(start)} – ${fmt(end)}`;
+}
+
+
+/**
+ * Operator-readable date range over the whole bin window, e.g.
+ * "17 May 14:00 → 24 May 2026 22:00" (year on end label when both
+ * endpoints share a year; on both ends when a year boundary is
+ * crossed). Tolerant to either chronological direction in the bin
+ * list — uses min/max start times.
+ */
+function formatDateRangeFromBins(bins: HeatmapBin[], binMinutes: number): string {
+  if (bins.length === 0) return "";
+  let minMs = Infinity;
+  let maxMs = -Infinity;
+  for (const b of bins) {
+    const ms = new Date(b.start).getTime();
+    if (ms < minMs) minMs = ms;
+    if (ms > maxMs) maxMs = ms;
+  }
+  const start = new Date(minMs);
+  const end = new Date(maxMs + binMinutes * 60_000);
+  const fmtNoYear = (d: Date) => {
+    const day = d.getDate();
+    const mon = d.toLocaleString("en-US", { month: "short" });
+    const hh = d.getHours().toString().padStart(2, "0");
+    const mm = d.getMinutes().toString().padStart(2, "0");
+    return `${day} ${mon} ${hh}:${mm}`;
+  };
+  const fmtWithYear = (d: Date) => {
+    const day = d.getDate();
+    const mon = d.toLocaleString("en-US", { month: "short" });
+    const yr = d.getFullYear();
+    const hh = d.getHours().toString().padStart(2, "0");
+    const mm = d.getMinutes().toString().padStart(2, "0");
+    return `${day} ${mon} ${yr} ${hh}:${mm}`;
+  };
+  if (start.getFullYear() === end.getFullYear()) {
+    return `${fmtNoYear(start)} → ${fmtWithYear(end)}`;
+  }
+  return `${fmtWithYear(start)} → ${fmtWithYear(end)}`;
 }
 
 

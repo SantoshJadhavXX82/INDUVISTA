@@ -59,6 +59,11 @@ class TagCreate(BaseModel):
     offset: float = 0.0
     min_value: float | None = None
     max_value: float | None = None
+    # Phase 23.8 — display precision (digits after decimal point) in
+    # the UI. NULL = auto (magnitude-based heuristic). 0..15 valid.
+    # Storage precision is controlled by data_type — this is purely
+    # for rendering.
+    decimal_places: int | None = Field(None, ge=0, le=15)
     is_heartbeat: bool = False
     heartbeat_max_stale_sec: int | None = Field(None, gt=0)
     # Phase 8.3 — optional reference to a named_set for value→label translation.
@@ -93,6 +98,7 @@ class TagUpdate(BaseModel):
     offset: float | None = None
     min_value: float | None = None
     max_value: float | None = None
+    decimal_places: int | None = Field(None, ge=0, le=15)
     enabled: bool | None = None
     is_heartbeat: bool | None = None
     heartbeat_max_stale_sec: int | None = Field(None, gt=0)
@@ -130,6 +136,7 @@ class TagResponse(BaseModel):
     offset: float
     min_value: float | None
     max_value: float | None
+    decimal_places: int | None   # Phase 23.8 — see TagBase docstring
     enabled: bool
     is_heartbeat: bool
     heartbeat_max_stale_sec: int | None
@@ -162,7 +169,7 @@ _TAG_SELECT = """
            eu.label AS unit_label,
            eu.quantity_kind AS unit_quantity_kind,
            t.scale, t."offset",
-           t.min_value, t.max_value, t.enabled,
+           t.min_value, t.max_value, t.decimal_places, t.enabled,
            t.is_heartbeat, t.heartbeat_max_stale_sec,
            t.named_set_id, ns.name AS named_set_name,
            t.writable
@@ -422,7 +429,7 @@ def create_tag(body: TagCreate, db: Annotated[Session, Depends(get_session)]):
                     data_type, byte_order, function_code,
                     address, register_count,
                     engineering_unit_id, engineering_unit, scale, "offset",
-                    min_value, max_value,
+                    min_value, max_value, decimal_places,
                     is_heartbeat, heartbeat_max_stale_sec,
                     named_set_id, writable
                 )
@@ -431,7 +438,7 @@ def create_tag(body: TagCreate, db: Annotated[Session, Depends(get_session)]):
                     :data_type, :byte_order, :function_code,
                     :address, :register_count,
                     :engineering_unit_id, :engineering_unit, :scale, :offset,
-                    :min_value, :max_value,
+                    :min_value, :max_value, :decimal_places,
                     :is_heartbeat, :heartbeat_max_stale_sec,
                     :named_set_id, :writable
                 )
@@ -643,13 +650,13 @@ def bulk_create_tags(
                                 data_type, byte_order, function_code,
                                 address, register_count,
                                 engineering_unit_id, engineering_unit, scale, "offset",
-                                min_value, max_value, named_set_id
+                                min_value, max_value, decimal_places, named_set_id
                             ) VALUES (
                                 :device_id, :register_block_id, :name, :description,
                                 :data_type, :byte_order, :function_code,
                                 :address, :register_count,
                                 :engineering_unit_id, :engineering_unit, :scale, :offset,
-                                :min_value, :max_value, :named_set_id
+                                :min_value, :max_value, :decimal_places, :named_set_id
                             )
                             RETURNING id
                         """),
@@ -683,6 +690,7 @@ def bulk_create_tags(
                                 "offset" = :offset,
                                 min_value = :min_value,
                                 max_value = :max_value,
+                                decimal_places = :decimal_places,
                                 named_set_id = :named_set_id
                             WHERE id = :id
                         """),

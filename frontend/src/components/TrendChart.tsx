@@ -615,7 +615,7 @@ function buildChart(
         scale: scaleAssignment[idx],
         ...(useStep ? { paths: stepBuilder! } : {}),
         value: (_u: uPlot, v: number | null) =>
-          v == null ? "—" : formatValue(v),
+          v == null ? "—" : formatValue(v, s.decimal_places),
       } satisfies uPlot.Series;
     }),
   ];
@@ -675,7 +675,7 @@ function buildChart(
               stroke: QUALITY_BAD_COLOR,
             },
             value: (_u, v: number | null) =>
-              v == null ? "—" : formatValue(v),
+              v == null ? "—" : formatValue(v, s.decimal_places),
           },
           data: badData,
         });
@@ -697,7 +697,7 @@ function buildChart(
               stroke: QUALITY_UNCERTAIN_COLOR,
             },
             value: (_u, v: number | null) =>
-              v == null ? "—" : formatValue(v),
+              v == null ? "—" : formatValue(v, s.decimal_places),
           },
           data: uncertainData,
         });
@@ -904,16 +904,48 @@ function buildScalesAndAxes(
     x: { time: true },
   };
   const axes: NonNullable<uPlot.Options["axes"]> = [
+    // ── Primary X-axis: TIME labels only (HH:MM / HH:MM:SS) ─────────
     {
       stroke: "#5b6573",
       grid: { stroke: "#eef0f3", width: 1 },
       ticks: { show: true, stroke: "#5b6573" },
-      // Spec 8.5 + user pref - per-tick time format. uPlot's default
-      // formatter is 24h-only; we override to support 12h with AM/PM.
-      // The tick increment (foundIncr, in seconds) decides whether to
-      // show a date prefix (>= 1 day) and seconds (< 1 minute).
-      values: (_self, splits, _axisIdx, _foundSpace, foundIncr) =>
-        splits.map((ts) => formatXAxisTick(ts, is24h, foundIncr)),
+      // Phase 23.7 split — time on this axis, DATE on a second axis
+      // stacked below (see next entry). Operators complained that the
+      // old combined "23 May 06:00" labels were too wide and cluttered
+      // when uPlot picked 6-hour ticks (1-day buckets / current-week
+      // view). Two short labels stacked read more cleanly.
+      values: (_self, splits) =>
+        splits.map((ts) => formatXAxisTime(ts, is24h)),
+    },
+    // ── Secondary X-axis: DATE labels at day boundaries only ────────
+    // uPlot stacks bottom-side axes in declaration order, so this
+    // renders directly below the time labels. Non-boundary ticks emit
+    // an empty string so they don't clutter the row.
+    {
+      scale: "x",
+      side: 2,                              // bottom
+      stroke: "#374151",                    // slightly darker — emphasizes date
+      grid: { show: false },                // no second grid line set
+      ticks: { show: false },               // no second tick marks
+      gap: 2,
+      size: 18,                             // height reserved for date row
+      values: (_self, splits) => {
+        let prevDateKey: string | null = null;
+        return splits.map((ts) => {
+          const d = new Date(ts * 1000);
+          const dateKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+          const isDayBoundary = dateKey !== prevDateKey;
+          prevDateKey = dateKey;
+          if (!isDayBoundary) return "";   // empty — keeps slot but no label
+          // "23 May" — short and unambiguous. Year only shown on Jan 1
+          // (catches year boundaries; the chart title shows the
+          // overall window so day-precision year is implied otherwise).
+          return formatXAxisDate(d);
+        });
+      },
+      // The same value can also be queried by uPlot for tooltips/etc.
+      // Returning a stable string from `values` is sufficient; no
+      // `stroke` styling needed beyond color above.
     },
   ];
 
@@ -1002,7 +1034,26 @@ function safeStepBuilder(): PathBuilder | null {
   }
 }
 
-function formatValue(v: number): string {
+/**
+ * Format a numeric value for trend display (tooltip, live legend,
+ * y-axis labels).
+ *
+ * Phase 23.9 — accepts an optional decimalPlaces from the series'
+ * per-tag config. When set, uses toFixed with that precision (and
+ * thousands separators for big magnitudes). When null/undefined,
+ * falls back to the auto magnitude-based heuristic.
+ */
+function formatValue(v: number, decimalPlaces?: number | null): string {
+  if (decimalPlaces != null) {
+    const dp = Math.max(0, Math.min(15, decimalPlaces));
+    const s = v.toFixed(dp);
+    if (Math.abs(v) >= 1000) {
+      const [intPart, fracPart] = s.split(".");
+      const withSeps = Number(intPart).toLocaleString("en-US");
+      return fracPart ? `${withSeps}.${fracPart}` : withSeps;
+    }
+    return s;
+  }
   const abs = Math.abs(v);
   if (abs >= 10000) return v.toFixed(0);
   if (abs >= 100) return v.toFixed(1);
@@ -1054,13 +1105,29 @@ function passesQualityFilter(
  *
  * Rules:
  *   - Show seconds when ticks are sub-minute (high zoom)
- *   - Prepend MM/DD when ticks are >= 1 day apart (multi-day view)
+ *   - Prepend "DD MMM" when this tick crosses a day boundary OR when the
+ *     auto-chosen tick increment is >= 1 day (heuristic fallback for
+ *     edge cases where the day-boundary flag may not be available).
+ *
+ * @deprecated Phase 23.7 — the X-axis is now split into two stacked
+ *   axes (time + date), so this combined formatter is no longer the
+ *   primary code path. Kept for backward compatibility with any other
+ *   callers (e.g. live legend hooks) but new code should use
+ *   `formatXAxisTime` and `formatXAxisDate` separately.
  */
-function formatXAxisTick(ts: number, is24h: boolean, incrSec: number): string {
+function formatXAxisTick(
+  ts: number,
+  is24h: boolean,
+  incrSec: number,
+  isDayBoundary: boolean = false,
+): string {
   const d = new Date(ts * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
   const showSeconds = incrSec < 60;
-  const showDate = incrSec >= 86_400;
+  // Show date inline when this tick is the first tick of a new calendar
+  // day, OR when ticks are spaced more than a day apart (multi-day view
+  // where every tick is a different day so we want dates on every one).
+  const showDate = isDayBoundary || incrSec >= 86_400;
 
   let timeStr: string;
   if (is24h) {
@@ -1076,9 +1143,50 @@ function formatXAxisTick(ts: number, is24h: boolean, incrSec: number): string {
   }
 
   if (showDate) {
-    return `${pad(d.getMonth() + 1)}/${pad(d.getDate())} ${timeStr}`;
+    // Format "23 May" rather than "05/23" — easier to scan and unambiguous
+    // across regional date formats.
+    const monthName = d.toLocaleString("en-US", { month: "short" });
+    return `${d.getDate()} ${monthName} ${timeStr}`;
   }
   return timeStr;
+}
+
+/**
+ * Time-only X-axis tick formatter (Phase 23.7).
+ *
+ * Used by the PRIMARY X-axis. Companion to `formatXAxisDate` which
+ * renders the date on a stacked secondary axis below this one. The
+ * split removes the visual congestion of combined "DD MMM HH:MM"
+ * labels on tight tick spacings (e.g. current-week view with 6-hour
+ * ticks).
+ */
+function formatXAxisTime(ts: number, is24h: boolean): string {
+  const d = new Date(ts * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  if (is24h) {
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  const h24 = d.getHours();
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  const period = h24 >= 12 ? "PM" : "AM";
+  return `${h12}:${pad(d.getMinutes())} ${period}`;
+}
+
+/**
+ * Date-only X-axis tick formatter (Phase 23.7).
+ *
+ * Used by the SECONDARY X-axis stacked below the time axis. Caller
+ * should already have filtered to day-boundary ticks; this just
+ * produces the short display string. Format: "23 May" (or
+ * "1 Jan 2027" on a year boundary so the year change is visible).
+ */
+function formatXAxisDate(d: Date): string {
+  const monthName = d.toLocaleString("en-US", { month: "short" });
+  const showYear = d.getMonth() === 0 && d.getDate() === 1;  // Jan 1
+  if (showYear) {
+    return `${d.getDate()} ${monthName} ${d.getFullYear()}`;
+  }
+  return `${d.getDate()} ${monthName}`;
 }
 
 /**

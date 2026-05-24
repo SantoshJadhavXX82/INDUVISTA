@@ -113,6 +113,35 @@ services:
       - ./storage:/data
     command: ["python", "-m", "app.workers.modbus_supervisor"]
 
+  opc_worker:
+      build: ./backend
+      container_name: svj_opc_worker
+      restart: unless-stopped
+      profiles: ["workers"]
+      env_file:
+        - .env
+      environment:
+        # Store-and-forward buffer for OPC samples. Sits next to the
+        # modbus worker's sf_buffer.db in the same ./storage host path
+        # — different filename so the two workers don't contend.
+        SF_OPC_BUFFER_PATH: /data/sf_opc.db
+        LOG_LEVEL: INFO
+      depends_on:
+        postgres:
+          condition: service_healthy
+        migrate:
+          condition: service_completed_successfully
+      # Worker needs a moment to drain in-flight OPC samples through the
+      # flusher and gracefully delete subscriptions before exiting.
+      stop_grace_period: 15s
+      volumes:
+        - ./backend/app:/app/app
+        # Shared with modbus_worker — host-path mount means the SF buffer
+        # survives container rebuilds. The two workers write different
+        # filenames so no contention on SQLite.
+        - ./storage:/data
+      command: ["python", "-m", "app.workers.opc_supervisor"]
+
   # NOTE: A separate replay_worker service was originally planned. Phase 2
   # folded the replay loop into modbus_supervisor so we have one process,
   # one SQLite writer, and no multi-writer dance on the local buffer. If
