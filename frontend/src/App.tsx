@@ -18,6 +18,8 @@ import EngineeringUnits from "@/pages/EngineeringUnits";
 import Groups from "@/pages/Groups";
 import NamedSets from "@/pages/NamedSets";
 import DutyStandbyValues from "@/pages/global/DutyStandbyValues";
+// Phase 27d MVP — General Settings (timezone picker)
+import Settings from "@/pages/Settings";
 import ModbusLayout from "@/pages/modbus/ModbusLayout";
 // Phase 13.2 — Trend module
 import Trend from "@/pages/Trend";
@@ -72,6 +74,8 @@ export default function App() {
           <Route path="groups" element={<Groups />} />
           <Route path="named-sets" element={<NamedSets />} />
           <Route path="duty-standby-values" element={<DutyStandbyValues />} />
+          {/* Phase 27d MVP — General Settings (timezone picker) */}
+          <Route path="settings" element={<Settings />} />
         </Route>
 
         {/* Back-compat — old /config/* paths for Global moved out */}

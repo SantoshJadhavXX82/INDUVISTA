@@ -21,12 +21,38 @@ Schema mapping (post-Migration 0043):
   CalcDef.output_tag_id, output_device_id  ->  derived from LEFT JOIN
 
 All other behavior is identical to Phase 17.0a.
+
+Phase 18.0 — Output sanity check (this revision).
+
+  Mirrors modbus_supervisor's Phase 12.6/12.7 range guard for computed
+  tags. Before writing the result to the historian, the evaluator now
+  checks two failure modes that previously slipped through with
+  st=GOOD and corrupted the continuous aggregates:
+
+    1. Non-finite outputs (NaN, +/-Inf) — math went sideways (log of
+       negative, sqrt of negative, divide-by-zero in some blocks).
+       Marked BAD; value nulled.
+    2. Out-of-range outputs — block math succeeded but the value
+       exceeds the output tag's configured engineering range. Most
+       common offenders: EXP / POW / MUL with large inputs.
+       Marked RANGE_WARN; value nulled to keep the cagg's avg/min/max
+       aggregates clean while the timestamp + downgraded quality flag
+       preserve the audit trail.
+
+  The output tag's min/max is selected via CASE on output_tag_id so
+  external-mode calcs use the destination tag's range, not the calc's
+  own anchor row's (the anchor in external mode is just metadata).
+
+  Edge-triggered logging (ENTERED / EXITED range-warning) uses
+  SchedulerState.range_state so per-cycle steady-state noise is
+  suppressed — operators see one log line on entry, one on exit.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import signal
 import time
@@ -52,7 +78,14 @@ log = logging.getLogger("calc_evaluator")
 RELOAD_SEC = float(os.getenv("CALC_RELOAD_SEC", "30.0"))
 MAX_SLEEP_SEC = 0.1
 MAX_INPUT_AGE_SEC = float(os.getenv("CALC_MAX_INPUT_AGE_SEC", "300.0"))
+
+# Quality tiers (must match modbus.status):
+#   GOOD       >= 128 : usable reading
+#   UNCERTAIN  64-127 : tier where range_warn lives; chart shows amber
+#   BAD         0-63  : unreadable / invalid; chart shows red
 GOOD_QUALITY = 128
+ST_RANGE_WARN = 64       # Phase 18.0: out-of-range outputs
+ST_BAD = 0               # Phase 18.0: non-finite outputs (NaN, +/-Inf)
 
 # Phase 17 — startup/shutdown predictability.
 #
@@ -118,6 +151,12 @@ class CalcDef:
     Phase 17.0b: output_tag_id is the externally-targeted tag (None for
     internal mode). output_device_id is its device, resolved via a
     LEFT JOIN at load time.
+
+    Phase 18.0: effective_min_value / effective_max_value hold the
+    engineering range of the EFFECTIVE OUTPUT tag (the row we'd actually
+    write to). Sourced via CASE-on-output_tag_id at load time so
+    external-mode calcs use the destination tag's range, not the
+    calc's metadata-only anchor row's range.
     """
     id: int                              # = computed_tags.id
     tag_id: int                          # = computed_tags.id (= tags.id) — internal anchor
@@ -129,6 +168,9 @@ class CalcDef:
     # Phase 17.0b
     output_tag_id: int | None = None     # external output target, or None
     output_device_id: int | None = None  # external tag's device_id, or None
+    # Phase 18.0
+    effective_min_value: float | None = None
+    effective_max_value: float | None = None
 
     def effective_output_tag(self) -> int:
         """The tag id this calc actually writes to. External if set, else internal."""
@@ -145,8 +187,14 @@ class CalcDef:
 
 @dataclass
 class SchedulerState:
-    """In-memory scheduling state. Lives across DB reloads."""
+    """In-memory scheduling state. Lives across DB reloads.
+
+    Phase 18.0: range_state tracks the previous cycle's range-warning
+    status per calc id, enabling edge-triggered logging on entry/exit
+    of out-of-range conditions.
+    """
     next_run: dict[int, float] = field(default_factory=dict)
+    range_state: dict[int, int] = field(default_factory=dict)
 
     def initialize_new(self, defs: list[CalcDef], now_mono: float) -> None:
         current_ids = {d.id for d in defs}
@@ -157,6 +205,8 @@ class SchedulerState:
         for stale_id in list(self.next_run.keys()):
             if stale_id not in current_ids:
                 del self.next_run[stale_id]
+                # Phase 18.0: keep range_state in lockstep with next_run.
+                self.range_state.pop(stale_id, None)
 
     def due(self, defs: list[CalcDef], now_mono: float) -> list[CalcDef]:
         return [d for d in defs if self.next_run.get(d.id, 0) <= now_mono]
@@ -186,14 +236,29 @@ class SchedulerState:
 
 def load_definitions(db) -> list[CalcDef]:
     """Load active computed tags joined to their parent tag rows AND
-    (optionally) to the external output tag's device for routing."""
+    (optionally) to the external output tag's device for routing.
+
+    Phase 18.0: also resolves the EFFECTIVE OUTPUT tag's min_value and
+    max_value. Internal-mode calcs (output_tag_id IS NULL) use the
+    anchor tag's range; external-mode calcs use the destination tag's
+    range (CASE on output_tag_id). The anchor row in external mode is
+    metadata-only and shouldn't dictate output bounds.
+    """
     rows = db.execute(text("""
         SELECT ct.id,
                ct.block_type, ct.block_config, ct.enabled,
                ct.execution_rate_ms,
                t.device_id,
                ct.output_tag_id,
-               ot.device_id AS output_device_id
+               ot.device_id AS output_device_id,
+               CASE
+                   WHEN ct.output_tag_id IS NOT NULL THEN ot.min_value
+                   ELSE t.min_value
+               END AS effective_min_value,
+               CASE
+                   WHEN ct.output_tag_id IS NOT NULL THEN ot.max_value
+                   ELSE t.max_value
+               END AS effective_max_value
         FROM computed_tags ct
         JOIN tags t ON t.id = ct.id
         LEFT JOIN tags ot ON ot.id = ct.output_tag_id
@@ -202,12 +267,15 @@ def load_definitions(db) -> list[CalcDef]:
 
     out: list[CalcDef] = []
     n_external = 0
+    n_with_range = 0
     for r in rows:
         cfg = r["block_config"]
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         if r["output_tag_id"] is not None:
             n_external += 1
+        if r["effective_min_value"] is not None or r["effective_max_value"] is not None:
+            n_with_range += 1
         out.append(CalcDef(
             id=r["id"],
             tag_id=r["id"],
@@ -218,10 +286,21 @@ def load_definitions(db) -> list[CalcDef]:
             execution_rate_ms=r["execution_rate_ms"],
             output_tag_id=r["output_tag_id"],
             output_device_id=r["output_device_id"],
+            effective_min_value=(
+                float(r["effective_min_value"])
+                if r["effective_min_value"] is not None else None
+            ),
+            effective_max_value=(
+                float(r["effective_max_value"])
+                if r["effective_max_value"] is not None else None
+            ),
         ))
 
-    if n_external > 0:
-        log.debug("loaded %d defs (%d external-output)", len(out), n_external)
+    if n_external > 0 or n_with_range > 0:
+        log.debug(
+            "loaded %d defs (%d external-output, %d with engineering range)",
+            len(out), n_external, n_with_range,
+        )
     return out
 
 
@@ -460,6 +539,97 @@ def _evaluate_with_deadline(
 
 
 # ---------------------------------------------------------------------------
+# Phase 18.0 — Output sanity check
+# ---------------------------------------------------------------------------
+
+def _sanity_check_output(
+    result: BlockResult,
+    defn: CalcDef,
+    scheduler: SchedulerState,
+) -> tuple[BlockResult, str | None]:
+    """Guard the block's output against two failure modes before write.
+
+    Returns (possibly-modified result, possibly-generated err_msg).
+    The caller appends err_msg to its diagnostic message if set.
+
+    Failure modes:
+      1. Non-finite (NaN, +/-Inf) — math went wrong regardless of any
+         configured range. Quality -> ST_BAD, value -> None. The bad
+         output cannot be downgraded to "uncertain" because the value
+         is fundamentally invalid (the block produced nonsense).
+
+      2. Out-of-engineering-range — block math succeeded but result
+         exceeds the output tag's configured min_value / max_value.
+         Quality -> ST_RANGE_WARN (uncertain tier), value -> None.
+         Value is nulled so cagg avg/min/max aggregations stay clean;
+         the row still exists at this timestamp with the downgraded
+         quality flag so operators see the event in quality panels.
+
+    No-op cases:
+      - result is None or result.value is None (block already declined to
+        produce a value).
+      - result.quality < GOOD_QUALITY (block already flagged the output
+        as suspect; we don't escalate further).
+      - No min/max configured AND value is finite (nothing to check).
+
+    Edge-triggered logging via scheduler.range_state: one INFO line on
+    entry into RANGE_WARN, one on exit. Steady-state out-of-range stays
+    silent to avoid spamming the worker log.
+    """
+    if result is None or result.value is None:
+        return result, None
+    if result.quality < GOOD_QUALITY:
+        return result, None
+
+    val = result.value
+
+    # 1. Non-finite check (always wrong)
+    if math.isnan(val) or math.isinf(val):
+        scheduler.range_state[defn.id] = ST_BAD
+        log.warning(
+            "computed_tag id=%d (%s) produced non-finite value: %r; marked BAD",
+            defn.id, defn.block_type, val,
+        )
+        return BlockResult(value=None, quality=ST_BAD), (
+            f"Block output is non-finite ({val!r})"
+        )
+
+    # 2. Engineering-range check
+    lo = defn.effective_min_value
+    hi = defn.effective_max_value
+    out_of_range = False
+    reason: str | None = None
+    if lo is not None and val < lo:
+        out_of_range = True
+        reason = f"below min_value {lo:g}"
+    elif hi is not None and val > hi:
+        out_of_range = True
+        reason = f"above max_value {hi:g}"
+
+    if out_of_range:
+        prev_st = scheduler.range_state.get(defn.id, GOOD_QUALITY)
+        if prev_st >= GOOD_QUALITY:
+            log.info(
+                "computed_tag id=%d (%s) ENTERED range-warning: value=%g %s",
+                defn.id, defn.block_type, val, reason,
+            )
+        scheduler.range_state[defn.id] = ST_RANGE_WARN
+        return BlockResult(value=None, quality=ST_RANGE_WARN), (
+            f"Output {val:.6g} {reason}"
+        )
+
+    # Recovered from a previous range-warn state
+    prev_st = scheduler.range_state.get(defn.id)
+    if prev_st == ST_RANGE_WARN:
+        log.info(
+            "computed_tag id=%d (%s) EXITED range-warning: value=%g",
+            defn.id, defn.block_type, val,
+        )
+    scheduler.range_state[defn.id] = GOOD_QUALITY
+    return result, None
+
+
+# ---------------------------------------------------------------------------
 # Main scheduling loop
 # ---------------------------------------------------------------------------
 
@@ -519,6 +689,7 @@ def _run_one(db, scheduler: SchedulerState, d: CalcDef) -> None:
     status = 'ok'
     err_msg: str | None = None
     result: BlockResult | None = None
+    samples: list[InputSample] | None = None
 
     is_stateful = getattr(block_cls, 'STATEFUL', False)
 
@@ -571,6 +742,18 @@ def _run_one(db, scheduler: SchedulerState, d: CalcDef) -> None:
         if status == 'ok' and duration_ms > budget_ms:
             status = 'overrun'
 
+        # Phase 18.0 — Output sanity check.
+        # Run BEFORE diagnose_bad_quality so the diagnostic message
+        # below sees the corrected state. Catches NaN/Inf and
+        # out-of-engineering-range outputs that previously slipped
+        # through with st=GOOD and corrupted the cagg.
+        if status in ('ok', 'overrun') and result is not None:
+            result, range_msg = _sanity_check_output(result, d, scheduler)
+            if range_msg and not err_msg:
+                # Don't overwrite a deadline / exception message;
+                # those classify a more severe failure mode.
+                err_msg = range_msg
+
         # Phase 17 — even when evaluation succeeds (status='ok'), the
         # output can be unusable for either of TWO reasons:
         #   1. result.quality < GOOD     — upstream BAD propagated
@@ -585,7 +768,12 @@ def _run_one(db, scheduler: SchedulerState, d: CalcDef) -> None:
         )
         if (output_unusable
                 and status in ('ok', 'overrun')
-                and samples is not None):
+                and samples is not None
+                and not err_msg):
+            # Phase 18.0: don't run diagnose if we already produced a
+            # range / non-finite message above. Those are more
+            # specific than diagnose_bad_quality would produce for
+            # the same situation.
             diag = diagnose_bad_quality(
                 output_quality=result.quality,
                 samples=samples,
@@ -631,7 +819,7 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
     log.info(
-        "calc_evaluator starting (Phase 17.0b / Migration 0043): "
+        "calc_evaluator starting (Phase 18.0 / output sanity check): "
         "reload=%.1fs max_input_age=%.1fs warmup=%.1fs blocks_registered=%s",
         RELOAD_SEC, MAX_INPUT_AGE_SEC, WARMUP_SEC,
         sorted(BLOCK_REGISTRY.keys()),

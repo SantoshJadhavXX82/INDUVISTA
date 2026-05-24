@@ -303,7 +303,7 @@ export default function RawDataTable({
                         <td className="px-2 py-1 tabular-nums whitespace-nowrap text-muted-foreground">{r.t.slice(0, 19)}Z</td>
                         <td className="px-2 py-1 whitespace-nowrap">{r.tag_name}</td>
                         <td className="px-2 py-1 tabular-nums text-right">
-                          {r.v != null ? formatValue(r.v) : (r.vt ?? "—")}
+                          {r.v != null ? formatValue(r.v, r.decimal_places) : (r.vt ?? "—")}
                         </td>
                         <td className="px-2 py-1 whitespace-nowrap text-muted-foreground">{r.engineering_unit ?? "—"}</td>
                         <td className="px-2 py-1 tabular-nums text-right text-muted-foreground">{r.st ?? "—"}</td>
@@ -418,7 +418,11 @@ function QualityCell({ q }: { q: string | null }) {
   return <span className="text-muted-foreground">—</span>;
 }
 
-function formatValue(v: number): string {
+function formatValue(v: number, decimalPlaces?: number | null): string {
+  if (decimalPlaces != null) {
+    const dp = Math.max(0, Math.min(15, decimalPlaces));
+    return v.toFixed(dp);
+  }
   const abs = Math.abs(v);
   let str: string;
   if (abs >= 100)    str = v.toFixed(2);

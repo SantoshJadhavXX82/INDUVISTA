@@ -43,7 +43,7 @@ type DensityResponse = {
 
 const LABEL_WIDTH = 260;
 const SCROLLBAR_PAD = 14;
-const TIME_AXIS_HEIGHT = 26;
+const TIME_AXIS_HEIGHT = 38;  // bumped from 26: room for date row under hour ticks
 const ROW_HEIGHT = 22;
 const CELL_GAP = 1.5;
 const CELL_RADIUS = 3;
@@ -142,17 +142,32 @@ export function AlarmDensityHeatmap({
     return () => obs.disconnect();
   }, []);
 
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const [containerWidth, setContainerWidth] = useState(800);
+  // Phase 23.7 (revised) — CALLBACK REF pattern instead of useRef so
+  // measurement re-runs when the ref-bearing div actually mounts. The
+  // original `useRef + useLayoutEffect([])` was broken because this
+  // component has early returns for loading/error states BEFORE the
+  // main JSX. When the component first rendered during loading, the
+  // ref was null. useLayoutEffect ran once, saw null, returned. When
+  // data arrived and the main div mounted with the ref, the effect
+  // never re-ran. Result: containerWidth stayed at 0, canvas clamped
+  // to its 50px minimum — the "congested" look users were seeing.
+  //
+  // With a callback ref, `setContainer` is called by React whenever
+  // an element is attached or detached. The useEffect with [container]
+  // deps re-runs every time the element identity changes, so the
+  // ResizeObserver is always set up against the live DOM node.
+  const [container, setContainer] = useState<HTMLDivElement | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
   useEffect(() => {
-    if (!containerRef.current) return;
+    if (!container) return;
+    setContainerWidth(container.getBoundingClientRect().width);
     const ro = new ResizeObserver((entries) => {
       const w = entries[0]?.contentRect.width ?? 800;
       setContainerWidth(w);
     });
-    ro.observe(containerRef.current);
+    ro.observe(container);
     return () => ro.disconnect();
-  }, []);
+  }, [container]);
 
   // Canvas fills available horizontal space (everything to the right of
   // the label column). Cells are computed as floating-point widths and
@@ -322,13 +337,21 @@ export function AlarmDensityHeatmap({
     : "radial-gradient(ellipse at top, rgba(0,0,0,0.02) 0%, rgba(0,0,0,0) 60%)";
 
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={setContainer} className="relative">
       {/* Top info bar */}
       <div className="flex items-center gap-3 mb-3 flex-wrap">
         <div className="text-[11px] tabular-nums" style={{ color: "var(--text-secondary)" }}>
           {data.rules.length} rule{data.rules.length === 1 ? "" : "s"} fired ·
           {" "}{data.bins.length} bins × {data.bin_minutes}m · last {data.window_hours}h ·
           {" "}peak {data.max_count}/bin
+          {data.bins.length > 0 && (
+            <>
+              {" · "}
+              <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>
+                {formatDateRangeFromBins(data.bins, data.bin_minutes)}
+              </span>
+            </>
+          )}
         </div>
 
         {/* Continuous scale legend */}
@@ -444,13 +467,28 @@ export function AlarmDensityHeatmap({
               transform: "translateX(-50%)",
             }}
           >
+            {/* Tick line — taller and slightly more prominent at day
+                boundaries so operators can spot them at a glance. */}
             <div style={{
-              borderLeft: "0.5px solid var(--separator)",
-              height: 5,
+              borderLeft: tick.isDayBoundary
+                ? "1px solid var(--text-secondary)"
+                : "0.5px solid var(--separator)",
+              height: tick.isDayBoundary ? 8 : 5,
               marginLeft: "50%",
               marginBottom: 3,
             }} />
-            {tick.label}
+            {/* Hour:minute label (always shown) */}
+            <div>{tick.label}</div>
+            {/* Date label, only at day boundaries — bolder than the time
+                so the calendar context stands out. */}
+            {tick.dateLabel && (
+              <div
+                className="text-[10px] font-semibold mt-0.5"
+                style={{ color: "var(--text-primary)" }}
+              >
+                {tick.dateLabel}
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -520,22 +558,58 @@ function severityColor(sev: string): string {
 }
 
 
+/**
+ * Time-axis tick layout.
+ *
+ * For long windows (1d / 3d / 1w) the X-axis cycles through the same hours
+ * multiple times, which is unreadable without date context — operators
+ * see "06:00" three times and can't tell which day they're looking at.
+ *
+ * This function emits a two-tier label: the time on top (always), and a
+ * date label on the second line whenever this tick is on a different
+ * calendar day than the tick before it. The very first tick always gets
+ * a date label so there's an anchor.
+ */
+type TimeTick = { x: number; label: string; dateLabel?: string; isDayBoundary?: boolean };
+
 function makeTimeTicks(
   bins: DensityBin[],
   cellWidth: number,
-): { x: number; label: string }[] {
+): TimeTick[] {
   if (bins.length === 0) return [];
   const tickPx = 110;
   const binsPerTick = Math.max(1, Math.round(tickPx / cellWidth));
-  const ticks: { x: number; label: string }[] = [];
+  const ticks: TimeTick[] = [];
+  let prevDateKey: string | null = null;
+
   for (let i = 0; i < bins.length; i += binsPerTick) {
     const d = new Date(bins[i].start);
     const hh = d.getHours().toString().padStart(2, "0");
     const mm = d.getMinutes().toString().padStart(2, "0");
+
+    // YYYY-MM-DD style key for comparing days unambiguously across DST.
+    const dateKey = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    const isDayBoundary = dateKey !== prevDateKey;
+    // Year only on Jan 1 (or whichever first tick of January falls in
+    // the window). For typical 1-week views this means year shows on
+    // the subtitle only; for windows crossing into a new year, the
+    // year transition is visible inline on the axis.
+    const isYearBoundary = isDayBoundary && d.getMonth() === 0 && d.getDate() === 1;
+    const dateLabel = isDayBoundary
+      ? (isYearBoundary
+          ? `${d.getDate()} ${d.toLocaleString("en-US", { month: "short" })} ${d.getFullYear()}`
+          : d.toLocaleString("en-US", { day: "numeric", month: "short" }))
+      : undefined;
+
     ticks.push({
       x: i * cellWidth + cellWidth / 2,
       label: `${hh}:${mm}`,
+      dateLabel,
+      // The very FIRST tick is always a "boundary" for highlighting purposes
+      // (it anchors the calendar context), even though there's no prior tick.
+      isDayBoundary: isDayBoundary,
     });
+    prevDateKey = dateKey;
   }
   return ticks;
 }
@@ -549,6 +623,48 @@ function formatBinRange(isoStart: string, binMinutes: number): string {
   const sameDay = new Date().toDateString() === start.toDateString();
   if (sameDay) return `${fmt(start)} – ${fmt(end)}`;
   return `${start.toLocaleDateString()} ${fmt(start)} – ${fmt(end)}`;
+}
+
+
+/**
+ * Format the metadata-bar date range from the bin list. Handles either
+ * chronological ordering (oldest-first or newest-first) by taking the
+ * min and max start times. The output is operator-readable, e.g.
+ * "17 May 14:00 → 24 May 2026 22:00" (year appears once if both ends
+ * are in the same year, on both ends if a year boundary is crossed).
+ */
+function formatDateRangeFromBins(bins: DensityBin[], binMinutes: number): string {
+  if (bins.length === 0) return "";
+  let minMs = Infinity;
+  let maxMs = -Infinity;
+  for (const b of bins) {
+    const ms = new Date(b.start).getTime();
+    if (ms < minMs) minMs = ms;
+    if (ms > maxMs) maxMs = ms;
+  }
+  const start = new Date(minMs);
+  const end = new Date(maxMs + binMinutes * 60_000);
+  const fmtNoYear = (d: Date) => {
+    const day = d.getDate();
+    const mon = d.toLocaleString("en-US", { month: "short" });
+    const hh = d.getHours().toString().padStart(2, "0");
+    const mm = d.getMinutes().toString().padStart(2, "0");
+    return `${day} ${mon} ${hh}:${mm}`;
+  };
+  const fmtWithYear = (d: Date) => {
+    const day = d.getDate();
+    const mon = d.toLocaleString("en-US", { month: "short" });
+    const yr = d.getFullYear();
+    const hh = d.getHours().toString().padStart(2, "0");
+    const mm = d.getMinutes().toString().padStart(2, "0");
+    return `${day} ${mon} ${yr} ${hh}:${mm}`;
+  };
+  // Same-year window — year only on end label as an anchor.
+  if (start.getFullYear() === end.getFullYear()) {
+    return `${fmtNoYear(start)} → ${fmtWithYear(end)}`;
+  }
+  // Year boundary crossed — show year on both ends.
+  return `${fmtWithYear(start)} → ${fmtWithYear(end)}`;
 }
 
 

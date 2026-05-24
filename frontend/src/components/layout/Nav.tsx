@@ -21,6 +21,9 @@
  *     text), no left-border accents.
  *   - Section labels in muted uppercase tracking.
  *   - Active count badge for alarms in iOS red.
+ *
+ * Phase 27d MVP — added "General" entry under Global/Setup for the new
+ * plant-wide settings page (timezone now, more to come).
  */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
@@ -32,6 +35,7 @@ import {
   ChevronDown, ChevronRight,
   ScanLine, Radio, Zap, FileClock,
   Ruler, Palette, ListChecks, Tag, Hash, ArrowLeftRight, Network, ListTree,
+  Settings,
   type LucideIcon,
 } from "lucide-react";
 
@@ -126,6 +130,11 @@ function useEntries(alarmCount: number): Section[] {
           // groups, etc.) used to define and classify tags. Networks and
           // Register blocks moved up to top-level Configure entries because
           // they're per-deployment infrastructure, not global vocabulary.
+          //
+          // Phase 27d MVP added "General" at the end — plant-wide settings
+          // (timezone now, plant name / units / shift definition later).
+          // Sits after Duty/standby because it's plant-wide config rather
+          // than reference-data masters like the others.
           kind: "group", id: "global-setup", label: "Global/Setup", icon: SlidersHorizontal,
           matchPrefix: "/global", children: [
             { kind: "leaf", to: "/global/engineering-units",   label: "Units",         icon: Ruler,          matchPrefix: "/global/engineering-units" },
@@ -134,6 +143,7 @@ function useEntries(alarmCount: number): Section[] {
             { kind: "leaf", to: "/global/groups",              label: "Groups",        icon: Tag,            matchPrefix: "/global/groups" },
             { kind: "leaf", to: "/global/named-sets",          label: "Enumerations",  icon: Hash,           matchPrefix: "/global/named-sets" },
             { kind: "leaf", to: "/global/duty-standby-values", label: "Duty/standby",  icon: ArrowLeftRight, matchPrefix: "/global/duty-standby-values" },
+            { kind: "leaf", to: "/global/settings",            label: "General",       icon: Settings,       matchPrefix: "/global/settings" },
           ],
         },
       ],

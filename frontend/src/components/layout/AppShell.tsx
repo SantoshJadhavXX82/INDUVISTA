@@ -4,7 +4,6 @@ import { type HealthResponse } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
 import Nav from "@/components/layout/Nav";
 import MobileTabBar from "@/components/layout/MobileTabBar";
-import TimeFormatSelector from "@/components/TimeFormatSelector";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useIsMobile } from "@/lib/use-media-query";
 
@@ -88,9 +87,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           }}
         >
           <ThemeToggle />
-          {/* Global time format - applies app-wide (chart labels, summary
-              tooltips, future timestamp columns in any module). */}
-          <TimeFormatSelector />
           {health.isError ? (
             <Badge variant="destructive">backend unreachable</Badge>
           ) : health.data ? (

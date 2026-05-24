@@ -662,12 +662,12 @@ export default function TagExplorer() {
                                 {resolved.text}
                               </span>
                               <span className="text-[10px] text-muted-foreground tabular-nums">
-                                ({formatValue(t.value_double, t.value_text, t.data_type)})
+                                ({formatValue(t.value_double, t.value_text, t.data_type, t.decimal_places)})
                               </span>
                             </span>
                           );
                         }
-                        return formatValue(t.value_double, t.value_text, t.data_type);
+                        return formatValue(t.value_double, t.value_text, t.data_type, t.decimal_places);
                       })()}
                     </TableCell>
                     <TableCell className="py-1">
@@ -957,12 +957,16 @@ export default function TagExplorer() {
               // is missing or blank, the tag inherits from its block's
               // access setting: RW block → writable=true, RO block → false.
               "writable",
+              // Phase 23.8 — display precision. Empty/missing = auto.
+              // Also accepts "eu_lo" / "eu_hi" aliases for min_value /
+              // max_value (the import row processor checks both).
+              "decimal_places",
             ]}
             requiredColumns={["name", "device_name", "data_type", "function_code", "address"]}
             templateCsv={
-              "name,device_name,block_name,data_type,function_code,address,register_count,byte_order,engineering_unit,scale,offset,min_value,max_value,description,groups,named_set,is_heartbeat,heartbeat_max_stale_sec,writable\n" +
-              "MyPressure,FLOWCOMP_001,FC001_HR_0_29,float32,3,0,2,ABCD,bar,1,0,,,Sample tag,Area-A;PT-101,,false,,false\n" +
-              "MotorState,FLOWCOMP_001,,uint16,3,200,1,ABCD,,1,0,,,Run/stop state,Motor-01,MOTOR_STATE,false,,true\n"
+              "name,device_name,block_name,data_type,function_code,address,register_count,byte_order,engineering_unit,scale,offset,min_value,max_value,description,groups,named_set,is_heartbeat,heartbeat_max_stale_sec,writable,decimal_places\n" +
+              "MyPressure,FLOWCOMP_001,FC001_HR_0_29,float32,3,0,2,ABCD,bar,1,0,,,Sample tag,Area-A;PT-101,,false,,false,2\n" +
+              "MotorState,FLOWCOMP_001,,uint16,3,200,1,ABCD,,1,0,,,Run/stop state,Motor-01,MOTOR_STATE,false,,true,0\n"
             }
             templateFilename="tags-template.csv"
             onImport={async (rows) => {
@@ -1107,8 +1111,13 @@ export default function TagExplorer() {
                   engineering_unit: unitMatchId ? null : (unitText || null),
                   scale: row.scale ? parseFloat(row.scale) : 1.0,
                   offset: row.offset ? parseFloat(row.offset) : 0.0,
-                  min_value: row.min_value ? parseFloat(row.min_value) : null,
-                  max_value: row.max_value ? parseFloat(row.max_value) : null,
+                  min_value: row.min_value ? parseFloat(row.min_value) : (row.eu_lo ? parseFloat(row.eu_lo) : null),
+                  max_value: row.max_value ? parseFloat(row.max_value) : (row.eu_hi ? parseFloat(row.eu_hi) : null),
+                  // Phase 23.8 — display precision. Accept either column name.
+                  // Empty string or missing column means NULL (auto).
+                  decimal_places: row.decimal_places && row.decimal_places.trim() !== ""
+                    ? parseInt(row.decimal_places, 10)
+                    : null,
                   named_set_id: namedSetId,
                   is_heartbeat: isHeartbeat,
                   heartbeat_max_stale_sec: hbStaleSec,
@@ -1329,6 +1338,9 @@ type EditableFields = {
   offset: string;
   min_value: string;
   max_value: string;
+  // Phase 23.8 — display precision. Empty string "" = "auto" (the
+  // default; backend stores NULL).
+  decimal_places: string;
   enabled: boolean;
   is_heartbeat: boolean;
   heartbeat_max_stale_sec: string;
@@ -1422,6 +1434,9 @@ function TagEditPanel({
       body.min_value = form.min_value === "" ? null : parseFloat(form.min_value);
     if (form.max_value !== original.max_value)
       body.max_value = form.max_value === "" ? null : parseFloat(form.max_value);
+    // Phase 23.8 — decimal_places. Empty string -> NULL (auto).
+    if (form.decimal_places !== original.decimal_places)
+      body.decimal_places = form.decimal_places === "" ? null : parseInt(form.decimal_places, 10);
     if (form.enabled !== original.enabled)
       body.enabled = form.enabled;
     if (!isComputed) {
@@ -1610,7 +1625,7 @@ function TagEditPanel({
 
           <div className="space-y-1.5">
             <Label htmlFor="min_value">
-              Min value <HelpTip entry={help.tag.min_value} />
+              EU_Lo (Engineering Range Low) <HelpTip entry={help.tag.min_value} />
             </Label>
             <Input
               id="min_value"
@@ -1623,7 +1638,7 @@ function TagEditPanel({
 
           <div className="space-y-1.5">
             <Label htmlFor="max_value">
-              Max value <HelpTip entry={help.tag.max_value} />
+              EU_Hi (Engineering Range High) <HelpTip entry={help.tag.max_value} />
             </Label>
             <Input
               id="max_value"
@@ -1632,6 +1647,37 @@ function TagEditPanel({
               value={form.max_value}
               onChange={(e) => setForm({ ...form, max_value: e.target.value })}
             />
+          </div>
+
+          {/* Phase 23.8 — display precision dropdown. NULL/"" = auto. */}
+          <div className="space-y-1.5">
+            <Label htmlFor="decimal_places">
+              Decimal places (display) <HelpTip entry={help.tag.decimal_places} />
+            </Label>
+            <select
+              id="decimal_places"
+              value={form.decimal_places}
+              onChange={(e) => setForm({ ...form, decimal_places: e.target.value })}
+              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <option value="">Auto (default)</option>
+              <option value="0">0 — integer display</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
+              <option value="7">7 — float32 max precision</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+              <option value="10">10</option>
+              <option value="11">11</option>
+              <option value="12">12</option>
+              <option value="13">13</option>
+              <option value="14">14</option>
+              <option value="15">15 — float64 max precision</option>
+            </select>
           </div>
         </div>
 
@@ -1834,6 +1880,7 @@ function seedForm(tag: LiveTag): EditableFields {
     offset: String(tag.offset),
     min_value: tag.min_value === null ? "" : String(tag.min_value),
     max_value: tag.max_value === null ? "" : String(tag.max_value),
+    decimal_places: tag.decimal_places == null ? "" : String(tag.decimal_places),
     enabled: tag.enabled,
     is_heartbeat: tag.is_heartbeat,
     heartbeat_max_stale_sec:
@@ -1991,6 +2038,7 @@ function NewTagPanel({
     offset: "0",
     min_value: "",
     max_value: "",
+    decimal_places: "",
     is_heartbeat: false,
     heartbeat_max_stale_sec: "",
     group_ids: [],
@@ -2071,6 +2119,8 @@ function NewTagPanel({
         offset: parseFloat(form.offset),
         min_value: form.min_value === "" ? null : parseFloat(form.min_value),
         max_value: form.max_value === "" ? null : parseFloat(form.max_value),
+        // Phase 23.8 — display precision. Empty = NULL (auto).
+        decimal_places: form.decimal_places === "" ? null : parseInt(form.decimal_places, 10),
         is_heartbeat: form.is_heartbeat,
         heartbeat_max_stale_sec:
           form.is_heartbeat && form.heartbeat_max_stale_sec !== ""
@@ -2391,7 +2441,7 @@ function NewTagPanel({
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="min_value">
-            Min value (optional) <HelpTip entry={help.tag.min_value} />
+            EU_Lo (optional) <HelpTip entry={help.tag.min_value} />
           </Label>
           <Input
             id="min_value"
@@ -2403,7 +2453,7 @@ function NewTagPanel({
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="max_value">
-            Max value (optional) <HelpTip entry={help.tag.max_value} />
+            EU_Hi (optional) <HelpTip entry={help.tag.max_value} />
           </Label>
           <Input
             id="max_value"
@@ -2413,6 +2463,37 @@ function NewTagPanel({
             onChange={(e) => setForm({ ...form, max_value: e.target.value })}
           />
         </div>
+      </div>
+
+      {/* Phase 23.8 — display precision dropdown. Empty = auto. */}
+      <div className="space-y-1.5">
+        <Label htmlFor="decimal_places">
+          Decimal places (display) <HelpTip entry={help.tag.decimal_places} />
+        </Label>
+        <select
+          id="decimal_places"
+          value={form.decimal_places}
+          onChange={(e) => setForm({ ...form, decimal_places: e.target.value })}
+          className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <option value="">Auto (default)</option>
+          <option value="0">0 — integer display</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7 — float32 max precision</option>
+          <option value="8">8</option>
+          <option value="9">9</option>
+          <option value="10">10</option>
+          <option value="11">11</option>
+          <option value="12">12</option>
+          <option value="13">13</option>
+          <option value="14">14</option>
+          <option value="15">15 — float64 max precision</option>
+        </select>
       </div>
 
       {/* Phase 8.2 — group memberships */}
@@ -2574,6 +2655,8 @@ function exportTags(tags: LiveTag[]): void {
     { header: "offset", value: (t) => t.offset },
     { header: "min_value", value: (t) => t.min_value },
     { header: "max_value", value: (t) => t.max_value },
+    // Phase 23.8 — display precision (NULL = auto, omitted as empty cell).
+    { header: "decimal_places", value: (t) => t.decimal_places },
     { header: "description", value: (t) => t.description },
     // Phase 8.2 — groups as semicolon-separated names. Comma would clash
     // with the CSV delimiter; semicolon is the standard escape in spreadsheets.
@@ -2594,7 +2677,13 @@ function tagFilenameStamp(): string {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
 }
 
-function formatValue(d: number | null, t: string | null, dataType: string): string {
+function formatValue(
+  d: number | null,
+  t: string | null,
+  dataType: string,
+  decimalPlaces?: number | null,
+): string {
   // Thin wrapper over the shared formatter; keeps existing call sites tidy.
-  return formatTagValue(d, t, dataType);
+  // Phase 23.9 — passes through optional per-tag display precision.
+  return formatTagValue(d, t, dataType, decimalPlaces);
 }

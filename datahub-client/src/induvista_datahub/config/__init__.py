@@ -1,0 +1,1 @@
+﻿"""Pydantic-validated TOML configuration."""

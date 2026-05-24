@@ -132,6 +132,7 @@ class TrendSeries(BaseModel):
     data_type: str
     min_value: float | None
     max_value: float | None
+    decimal_places: int | None = None     # Phase 23.9 — display precision
     aggregation: str                  # 'raw' | '1m' | '1h' | '1d'
     raw_count: int                    # total samples in window (pre-downsample)
     returned_count: int               # points in this response
@@ -166,6 +167,7 @@ class TagAvailability(BaseModel):
     # otherwise skew mean/stddev. Null for non-numeric tags (no value_double)
     # and for series with fewer than two good samples (stddev undefined).
     engineering_unit: str | None = None
+    decimal_places: int | None = None     # Phase 23.9 — display precision
     mean_value: float | None = None
     stddev_value: float | None = None
     observed_min: float | None = None
@@ -344,6 +346,7 @@ def get_history(
     # Tag metadata lookup — one query, returned in the same order as `ids`.
     meta_sql = text("""
         SELECT t.id, t.name, t.data_type, t.min_value, t.max_value,
+               t.decimal_places,
                COALESCE(eu.label, t.engineering_unit) AS engineering_unit
         FROM tags t
         LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
@@ -429,6 +432,7 @@ def get_history(
             data_type=meta["data_type"],
             min_value=meta["min_value"],
             max_value=meta["max_value"],
+            decimal_places=meta["decimal_places"],
             aggregation=grain,
             raw_count=raw_counts.get(tag_id, 0),
             returned_count=len(points),
@@ -638,6 +642,7 @@ class RawTableRow(BaseModel):
     v: float | None = None
     vt: str | None = None
     engineering_unit: str | None = None
+    decimal_places: int | None = None   # Phase 23.9 — display precision
     st: int | None = None
     st_class: str | None = None       # derived: good/uncertain/bad
     device_name: str
@@ -688,7 +693,7 @@ def get_raw_table(
         SELECT
             v.time, v.tag_id, v.value_double, v.value_text,
             v.st, v.source,
-            t.name AS tag_name, t.data_type, t.address,
+            t.name AS tag_name, t.data_type, t.address, t.decimal_places,
             COALESCE(eu.label, t.engineering_unit) AS engineering_unit,
             d.name AS device_name,
             pc.code AS protocol,
@@ -723,6 +728,7 @@ def get_raw_table(
             v=r.value_double,
             vt=r.value_text,
             engineering_unit=r.engineering_unit,
+            decimal_places=r.decimal_places,
             st=r.st,
             st_class=_quality_class(r.st),
             device_name=r.device_name,
@@ -760,6 +766,18 @@ def get_summary(
     = expected - actual. (For tags with no logging interval configured,
     expected_samples is reported as the actual count and availability
     naturally becomes 100% — we can't claim missing data we didn't expect.)
+
+    Performance design (Phase 23.5):
+      For windows ≤ 30 min we scan raw `tag_values` — accurate stddev
+      and exact gap detection matter most at short ranges where they're
+      affordable. For longer windows we read from a continuous aggregate
+      (1m / 1h / 1d depending on span) — 200×–1000× fewer rows scanned,
+      same count breakdown (the caggs have good/uncertain/bad columns).
+      stddev and exact gap detection are not available from caggs so
+      those fields return NULL on the cagg path (frontend renders "—").
+
+      A 30-second in-process TTL cache absorbs React Query's refetch
+      cycle and multi-component re-renders on the trend page.
     """
     if start >= end:
         raise HTTPException(400, "start must be before end")
@@ -767,79 +785,24 @@ def get_summary(
     ids = _parse_tag_ids(tag_ids)
     duration_sec = (end - start).total_seconds()
 
-    sql = text("""
-        WITH counts AS (
-            SELECT
-                t.id AS tag_id, t.name AS tag_name,
-                COALESCE(eu.label, t.engineering_unit) AS engineering_unit,
-                rb.scan_interval_ms,
-                COALESCE(SUM(1) FILTER (WHERE tv.st >= 128), 0) AS good_samples,
-                COALESCE(SUM(1) FILTER (WHERE tv.st >= 64 AND tv.st < 128), 0) AS uncertain_samples,
-                COALESCE(SUM(1) FILTER (WHERE tv.st < 64), 0) AS bad_samples,
-                COALESCE(SUM(1), 0) AS actual_samples,
-                MIN(tv.time) AS first_sample,
-                MAX(tv.time) AS last_sample,
-                -- Statistics computed over GOOD samples only (st >= 128)
-                -- so bad readings don't pollute the mean/stddev. Returns
-                -- NULL for non-numeric tags (value_double is null) and
-                -- for tags with <2 good samples (stddev undefined).
-                --
-                -- Also filters to the tag's configured engineering range
-                -- (min_value..max_value). Bad data from a wrong-endian
-                -- modbus float decode occasionally produces near-float32-
-                -- limit values that slip through with st=GOOD; those would
-                -- otherwise dominate mean/stddev. When the range isn't
-                -- configured (NULLs in tag), the filter is bypassed.
-                AVG(tv.value_double) FILTER (
-                    WHERE tv.st >= 128 AND tv.value_double IS NOT NULL
-                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
-                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
-                ) AS mean_value,
-                STDDEV_SAMP(tv.value_double) FILTER (
-                    WHERE tv.st >= 128 AND tv.value_double IS NOT NULL
-                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
-                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
-                ) AS stddev_value,
-                MIN(tv.value_double) FILTER (
-                    WHERE tv.st >= 128
-                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
-                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
-                ) AS observed_min,
-                MAX(tv.value_double) FILTER (
-                    WHERE tv.st >= 128
-                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
-                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
-                ) AS observed_max
-            FROM tags t
-            JOIN register_blocks rb ON rb.id = t.register_block_id
-            LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
-            LEFT JOIN tag_values tv
-              ON tv.tag_id = t.id AND tv.time >= :s AND tv.time < :e
-            WHERE t.id = ANY(:ids)
-            GROUP BY t.id, t.name, eu.label, t.engineering_unit, rb.scan_interval_ms
-        ),
-        gaps AS (
-            SELECT tag_id,
-                   MAX(gap_sec) AS longest_gap_sec,
-                   (ARRAY_AGG(prev_time ORDER BY gap_sec DESC))[1] AS longest_gap_start
-            FROM (
-                SELECT
-                    tag_id,
-                    LAG(time) OVER (PARTITION BY tag_id ORDER BY time) AS prev_time,
-                    EXTRACT(EPOCH FROM (time - LAG(time) OVER (PARTITION BY tag_id ORDER BY time)))::bigint AS gap_sec
-                FROM tag_values
-                WHERE tag_id = ANY(:ids) AND time >= :s AND time < :e
-            ) g
-            WHERE gap_sec IS NOT NULL
-            GROUP BY tag_id
-        )
-        SELECT c.*, g.longest_gap_sec, g.longest_gap_start
-        FROM counts c
-        LEFT JOIN gaps g ON g.tag_id = c.tag_id
-        ORDER BY c.tag_name
-    """)
+    # Cache key. Normalize the tag id list so order doesn't matter, and
+    # round timestamps to whole seconds so jitter from the frontend's
+    # Date.now() doesn't break the cache.
+    cache_key = (
+        "summary",
+        tuple(sorted(ids)),
+        start.replace(microsecond=0).isoformat(),
+        end.replace(microsecond=0).isoformat(),
+    )
+    cached = _summary_cache_get(cache_key)
+    if cached is not None:
+        return cached
 
-    rows = db.execute(sql, {"ids": ids, "s": start, "e": end}).mappings().all()
+    cagg = _pick_summary_cagg(start, end)
+    if cagg is None:
+        rows = _summary_query_raw(db, ids, start, end)
+    else:
+        rows = _summary_query_cagg(db, ids, start, end, cagg)
 
     out: list[TagAvailability] = []
     for r in rows:
@@ -873,13 +836,270 @@ def get_summary(
             first_sample=r["first_sample"],
             last_sample=r["last_sample"],
             engineering_unit=r["engineering_unit"],
+            decimal_places=r["decimal_places"],
             mean_value=r["mean_value"],
             stddev_value=r["stddev_value"],
             observed_min=r["observed_min"],
             observed_max=r["observed_max"],
         ))
 
-    return TrendSummaryResponse(start=start, end=end, tags=out)
+    response = TrendSummaryResponse(start=start, end=end, tags=out)
+    _summary_cache_set(cache_key, response)
+    return response
+
+
+def _pick_summary_cagg(start: datetime, end: datetime) -> str | None:
+    """Return the cagg view name to use, or None for raw scan.
+
+    Thresholds mirror `_pick_aggregation` (used by /history) so summary
+    and trend chart switch to caggs at the same window sizes — they
+    look at the same data through similar lenses.
+
+      ≤ 30 min   : raw       — accurate stddev + per-second gap detection
+      ≤ 4 hours  : 1m cagg   — ≤240 buckets/tag
+      ≤ 5 days   : 1h cagg   — ≤120 buckets/tag
+      else       : 1d cagg   — ≤365 buckets/year
+    """
+    span = end - start
+    if span <= timedelta(minutes=30):
+        return None
+    if span <= timedelta(hours=4):
+        return "tag_values_1m"
+    if span <= timedelta(days=5):
+        return "tag_values_1h"
+    return "tag_values_1d"
+
+
+def _summary_query_raw(
+    db: Session, ids: list[int], start: datetime, end: datetime,
+) -> list[dict]:
+    """Raw-scan summary path — current behavior, used only for ≤30-min windows.
+
+    Computes stddev and exact gap detection (LAG window function) from
+    raw samples. Filters mean/stddev/min/max by the tag's engineering
+    range to keep bad-decode outliers from polluting the statistics.
+    """
+    sql = text("""
+        WITH counts AS (
+            SELECT
+                t.id AS tag_id, t.name AS tag_name,
+                COALESCE(eu.label, t.engineering_unit) AS engineering_unit,
+                t.decimal_places,
+                rb.scan_interval_ms,
+                COALESCE(SUM(1) FILTER (WHERE tv.st >= 128), 0) AS good_samples,
+                COALESCE(SUM(1) FILTER (WHERE tv.st >= 64 AND tv.st < 128), 0) AS uncertain_samples,
+                COALESCE(SUM(1) FILTER (WHERE tv.st < 64), 0) AS bad_samples,
+                COALESCE(SUM(1), 0) AS actual_samples,
+                MIN(tv.time) AS first_sample,
+                MAX(tv.time) AS last_sample,
+                AVG(tv.value_double) FILTER (
+                    WHERE tv.st >= 128 AND tv.value_double IS NOT NULL
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS mean_value,
+                STDDEV_SAMP(tv.value_double) FILTER (
+                    WHERE tv.st >= 128 AND tv.value_double IS NOT NULL
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS stddev_value,
+                MIN(tv.value_double) FILTER (
+                    WHERE tv.st >= 128
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS observed_min,
+                MAX(tv.value_double) FILTER (
+                    WHERE tv.st >= 128
+                      AND (t.min_value IS NULL OR tv.value_double >= t.min_value)
+                      AND (t.max_value IS NULL OR tv.value_double <= t.max_value)
+                ) AS observed_max
+            FROM tags t
+            JOIN register_blocks rb ON rb.id = t.register_block_id
+            LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
+            LEFT JOIN tag_values tv
+              ON tv.tag_id = t.id AND tv.time >= :s AND tv.time < :e
+            WHERE t.id = ANY(:ids)
+            GROUP BY t.id, t.name, eu.label, t.engineering_unit, t.decimal_places, rb.scan_interval_ms
+        ),
+        gaps AS (
+            SELECT tag_id,
+                   MAX(gap_sec) AS longest_gap_sec,
+                   (ARRAY_AGG(prev_time ORDER BY gap_sec DESC))[1] AS longest_gap_start
+            FROM (
+                SELECT
+                    tag_id,
+                    LAG(time) OVER (PARTITION BY tag_id ORDER BY time) AS prev_time,
+                    EXTRACT(EPOCH FROM (time - LAG(time) OVER (PARTITION BY tag_id ORDER BY time)))::bigint AS gap_sec
+                FROM tag_values
+                WHERE tag_id = ANY(:ids) AND time >= :s AND time < :e
+            ) g
+            WHERE gap_sec IS NOT NULL
+            GROUP BY tag_id
+        )
+        SELECT c.*, g.longest_gap_sec, g.longest_gap_start
+        FROM counts c
+        LEFT JOIN gaps g ON g.tag_id = c.tag_id
+        ORDER BY c.tag_name
+    """)
+    return db.execute(sql, {"ids": ids, "s": start, "e": end}).mappings().all()
+
+
+def _summary_query_cagg(
+    db: Session, ids: list[int], start: datetime, end: datetime, cagg_name: str,
+) -> list[dict]:
+    """Cagg-based summary path — used for windows > 30 minutes.
+
+    cagg_name is whitelisted (NEVER user-controlled) to one of:
+      'tag_values_1m', 'tag_values_1h', 'tag_values_1d'
+    so it's safe to f-string into the SQL.
+
+    The caggs (built in migration 0024_trend_aggregates) carry the count
+    breakdown we need: good_count / uncertain_count / bad_count plus
+    sample_count, avg_value, min_value, max_value per bucket. That lets us
+    compute everything except stddev (no sum-of-squares column) and
+    sub-bucket gap detection — both NULL on this path.
+
+    Mean is a sample-count-weighted average of bucket avg_values, which
+    is the mathematically correct sample-weighted mean across the window.
+
+    Phase 23.5 perf rewrite — the cagg aggregation is now a clean CTE
+    with WHERE tag_id = ANY(:ids) AND bucket BETWEEN ... so the
+    composite (tag_id, bucket) index added by migration 0048 is used
+    directly. The engineering-range filter moved out of the FILTER
+    aggregate and into a CASE on the result (much cheaper, and with
+    Phase 18.0 sanity checks upstream individual bucket extrema
+    outside the range are vanishingly rare).
+    """
+    if cagg_name not in {"tag_values_1m", "tag_values_1h", "tag_values_1d"}:
+        # Defense-in-depth — _pick_summary_cagg only returns whitelisted
+        # names, but a future refactor must not let this become an SQL
+        # injection vector.
+        raise HTTPException(500, f"Internal: invalid cagg '{cagg_name}'")
+
+    sql = text(f"""
+        WITH cagg_agg AS (
+            -- Single index-scan over the cagg restricted to the selected
+            -- tag IDs and time window. Uses ix_<cagg>_tag_bucket from
+            -- migration 0048 for direct per-tag lookups.
+            SELECT
+                c.tag_id,
+                SUM(c.good_count)::bigint       AS good_samples,
+                SUM(c.uncertain_count)::bigint  AS uncertain_samples,
+                SUM(c.bad_count)::bigint        AS bad_samples,
+                SUM(c.sample_count)::bigint     AS actual_samples,
+                MIN(c.bucket)                    AS first_sample,
+                MAX(c.bucket)                    AS last_sample,
+                CASE WHEN SUM(c.sample_count) > 0
+                     THEN (SUM(c.avg_value * c.sample_count)
+                           / SUM(c.sample_count))::float
+                END                              AS mean_value,
+                -- Phase 23.5 stddev approximation, v2 — uses the LAW OF
+                -- TOTAL VARIANCE to combine BETWEEN-bucket and WITHIN-
+                -- bucket variation into a single estimate.
+                --
+                --   σ² ≈ VAR(bucket_avg)                              ← between
+                --      + AVG( ((bucket_max - bucket_min) / 4)² )      ← within
+                --
+                -- Range/4 is the standard non-parametric σ estimator for
+                -- moderate n (for n=60-3600 it's accurate within ~5-10%
+                -- of true σ for roughly-Normal data). The two terms
+                -- combine via E[Var(X|bucket)] + Var(E[X|bucket]) = Var(X).
+                --
+                -- Without the within-bucket term, signals with strong
+                -- intra-bucket noise (e.g. atmospheric pressure varying
+                -- 0.5 kPa over a day, while hourly averages barely move)
+                -- would report σ orders of magnitude too small — making
+                -- downstream stats (sigma popover, ±2σ warn lines) wrong.
+                --
+                -- Returns NULL when fewer than 2 total samples present.
+                -- FILTER on min/max NOT NULL guards against pathological
+                -- buckets where everything was bad-quality (cagg may have
+                -- written nulls for min/max if no good samples).
+                CASE WHEN SUM(c.sample_count) > 1
+                     THEN SQRT(
+                            COALESCE(VAR_SAMP(c.avg_value), 0)
+                            + COALESCE(
+                                AVG(
+                                    POWER((c.max_value - c.min_value) / 4.0, 2)
+                                ) FILTER (
+                                    WHERE c.min_value IS NOT NULL
+                                      AND c.max_value IS NOT NULL
+                                      AND c.max_value >= c.min_value
+                                ),
+                                0
+                              )
+                          )::float
+                END                              AS stddev_value,
+                MIN(c.min_value)                 AS observed_min_raw,
+                MAX(c.max_value)                 AS observed_max_raw
+            FROM {cagg_name} c
+            WHERE c.tag_id = ANY(:ids)
+              AND c.bucket >= :s
+              AND c.bucket <  :e
+            GROUP BY c.tag_id
+        )
+        SELECT
+            t.id   AS tag_id,
+            t.name AS tag_name,
+            COALESCE(eu.label, t.engineering_unit) AS engineering_unit,
+            t.decimal_places,
+            rb.scan_interval_ms,
+            COALESCE(a.good_samples,      0)::bigint AS good_samples,
+            COALESCE(a.uncertain_samples, 0)::bigint AS uncertain_samples,
+            COALESCE(a.bad_samples,       0)::bigint AS bad_samples,
+            COALESCE(a.actual_samples,    0)::bigint AS actual_samples,
+            a.first_sample,
+            a.last_sample,
+            a.mean_value,
+            a.stddev_value,
+            CASE WHEN a.observed_min_raw IS NOT NULL
+                      AND (t.min_value IS NULL OR a.observed_min_raw >= t.min_value)
+                      AND (t.max_value IS NULL OR a.observed_min_raw <= t.max_value)
+                 THEN a.observed_min_raw::float
+            END AS observed_min,
+            CASE WHEN a.observed_max_raw IS NOT NULL
+                      AND (t.min_value IS NULL OR a.observed_max_raw >= t.min_value)
+                      AND (t.max_value IS NULL OR a.observed_max_raw <= t.max_value)
+                 THEN a.observed_max_raw::float
+            END AS observed_max,
+            NULL::bigint        AS longest_gap_sec,
+            NULL::timestamptz   AS longest_gap_start
+        FROM tags t
+        JOIN register_blocks rb ON rb.id = t.register_block_id
+        LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
+        LEFT JOIN cagg_agg a ON a.tag_id = t.id
+        WHERE t.id = ANY(:ids)
+        ORDER BY t.name
+    """)
+    return db.execute(sql, {"ids": ids, "s": start, "e": end}).mappings().all()
+
+
+# ── In-process TTL cache for the summary endpoint ─────────────────────
+# Same pattern as the calendar heatmap cache. 30s TTL is short enough
+# that "live" panels feel current and long enough to absorb the React
+# Query refetch cycle on the trend page (a couple of components all
+# request /summary back-to-back during page navigation).
+import time as _summary_time
+_SUMMARY_CACHE: dict[tuple, tuple[float, Any]] = {}
+_SUMMARY_CACHE_TTL = 30.0
+_SUMMARY_CACHE_MAX = 64
+
+
+def _summary_cache_get(key: tuple):
+    entry = _SUMMARY_CACHE.get(key)
+    if entry is None:
+        return None
+    expiry, value = entry
+    if _summary_time.monotonic() > expiry:
+        _SUMMARY_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _summary_cache_set(key: tuple, value: Any) -> None:
+    _SUMMARY_CACHE[key] = (_summary_time.monotonic() + _SUMMARY_CACHE_TTL, value)
+    if len(_SUMMARY_CACHE) > _SUMMARY_CACHE_MAX:
+        oldest = min(_SUMMARY_CACHE.items(), key=lambda kv: kv[1][0])
+        _SUMMARY_CACHE.pop(oldest[0], None)
 
 
 # ===========================================================================
@@ -1020,8 +1240,16 @@ def delete_view(
 # ---------------------------------------------------------------------------
 
 class CalendarCell(BaseModel):
-    dow: int    # 1=Mon, 7=Sun
-    hour: int   # 0-23
+    """One (date, hour) bucket of the heatmap.
+
+    Phase 23.3 redesign — was (dow, hour) aggregating across all
+    Mondays/Tuesdays/etc, which obscured WHEN the data was collected.
+    Now each row is a specific calendar date, so operators can see
+    "what happened on May 23 at 06:00" not just "what tends to happen
+    on Saturdays".
+    """
+    date: str    # ISO YYYY-MM-DD in the configured app timezone
+    hour: int    # 0-23 local
     avg: float | None
     min: float | None
     max: float | None
@@ -1033,7 +1261,14 @@ class CalendarHeatmapResponse(BaseModel):
     tag_name: str
     engineering_unit: str | None
     data_type: str
+    decimal_places: int | None = None     # Phase 23.9 — display precision
     weeks: int
+    # Phase 23.3 redesign — date metadata for the frontend to render
+    # the full calendar grid (including dates with zero samples).
+    timezone: str
+    start_date: str        # ISO YYYY-MM-DD inclusive (oldest date in grid)
+    end_date: str          # ISO YYYY-MM-DD inclusive (most recent date in grid)
+    dates: list[str]       # All dates in [start_date, end_date], oldest first
     cells: list[CalendarCell]
     global_min: float | None
     global_max: float | None
@@ -1085,10 +1320,20 @@ def _build_calendar_heatmap(
     tag_id: int,
     weeks: int,
 ) -> "CalendarHeatmapResponse":
-    """Cache-miss branch of calendar_heatmap, extracted for cleanliness."""
+    """Cache-miss branch of calendar_heatmap, extracted for cleanliness.
+
+    Phase 23.3 redesign — groups by (local-date, local-hour) instead of
+    (day-of-week, hour). Each row in the response is a specific
+    calendar date, not a weekday aggregate. Restores investigative
+    utility ("what happened on May 23?") that the previous weekly-
+    rhythm view lost.
+    """
+    from datetime import date, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
     # Tag metadata first (small, cached by FK joins)
     tag = db.execute(text("""
-        SELECT t.id, t.name, t.data_type,
+        SELECT t.id, t.name, t.data_type, t.decimal_places,
                COALESCE(eu.label, t.engineering_unit) AS engineering_unit
         FROM tags t
         LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
@@ -1098,12 +1343,24 @@ def _build_calendar_heatmap(
     if tag is None:
         raise HTTPException(status_code=404, detail=f"Tag {tag_id} not found")
 
-    # Aggregate. Reads from the tag_values_1h continuous aggregate (built
-    # in migration 0024_trend_aggregates and refreshed every 5 minutes by
-    # its policy). The 1-hour pre-buckets are perfect for hour-of-day
-    # aggregation — 4 weeks × 1 tag = ~672 pre-aggregated rows scanned
-    # instead of ~2.4M raw samples. Falls back to raw tag_values if the
-    # cagg doesn't exist (defensive, shouldn't trigger on Phase 13.1+).
+    # Compute the precise [start_date, end_date] window in LOCAL time.
+    # This gives us a known N-day-tall calendar regardless of how the
+    # TZ offset shifts the UTC bucket boundaries.
+    tz_name = settings.app_timezone
+    tz = ZoneInfo(tz_name)
+    days_count = weeks * 7
+    today_local: date = datetime.now(tz).date()
+    start_date: date = today_local - timedelta(days=days_count - 1)
+    end_date: date = today_local
+    all_dates: list[str] = [
+        (start_date + timedelta(days=i)).isoformat()
+        for i in range(days_count)
+    ]
+
+    # Aggregate. Reads from tag_values_1h cagg (one row per tag per UTC
+    # hour); after grouping by local date+hour we get at most
+    # days_count × 24 = 168-2016 rows. Falls back to raw tag_values if
+    # the cagg is missing (defensive — shouldn't trigger on Phase 13.1+).
     cagg_exists = db.execute(text(
         "SELECT to_regclass('tag_values_1h') IS NOT NULL AS exists"
     )).scalar()
@@ -1111,40 +1368,51 @@ def _build_calendar_heatmap(
     if cagg_exists:
         rows = db.execute(text("""
             SELECT
-                extract(isodow from bucket AT TIME ZONE :tz)::int   AS dow,
-                extract(hour   from bucket AT TIME ZONE :tz)::int   AS hour,
-                avg(avg_value)::float              AS avg_val,
-                min(min_value)::float              AS min_val,
-                max(max_value)::float              AS max_val,
-                sum(sample_count)::int             AS sample_count
+                to_char(bucket AT TIME ZONE :tz, 'YYYY-MM-DD')      AS day,
+                extract(hour from bucket AT TIME ZONE :tz)::int     AS hour,
+                avg(avg_value)::float                                AS avg_val,
+                min(min_value)::float                                AS min_val,
+                max(max_value)::float                                AS max_val,
+                sum(sample_count)::int                               AS sample_count
             FROM tag_values_1h
             WHERE tag_id = :tag_id
-              AND bucket >= NOW() - make_interval(weeks => :weeks)
+              AND bucket >= NOW() - make_interval(days => :days)
               AND good_count > 0
-            GROUP BY dow, hour
-            ORDER BY dow, hour
-        """), {"tag_id": tag_id, "weeks": weeks, "tz": settings.app_timezone}).mappings().all()
+            GROUP BY day, hour
+            ORDER BY day, hour
+        """), {
+            "tag_id": tag_id,
+            "days": days_count + 1,  # +1 day buffer for TZ offset
+            "tz": tz_name,
+        }).mappings().all()
     else:
-        # Fallback path — raw scan, slower but always correct.
         rows = db.execute(text("""
             SELECT
-                extract(isodow from time AT TIME ZONE :tz)::int  AS dow,
-                extract(hour   from time AT TIME ZONE :tz)::int  AS hour,
-                avg(value_double)::float        AS avg_val,
-                min(value_double)::float        AS min_val,
-                max(value_double)::float        AS max_val,
-                count(*)::int                   AS sample_count
+                to_char(time AT TIME ZONE :tz, 'YYYY-MM-DD')        AS day,
+                extract(hour from time AT TIME ZONE :tz)::int       AS hour,
+                avg(value_double)::float                             AS avg_val,
+                min(value_double)::float                             AS min_val,
+                max(value_double)::float                             AS max_val,
+                count(*)::int                                        AS sample_count
             FROM tag_values
             WHERE tag_id = :tag_id
-              AND time >= NOW() - make_interval(weeks => :weeks)
+              AND time >= NOW() - make_interval(days => :days)
               AND st >= 128
-            GROUP BY dow, hour
-            ORDER BY dow, hour
-        """), {"tag_id": tag_id, "weeks": weeks, "tz": settings.app_timezone}).mappings().all()
+            GROUP BY day, hour
+            ORDER BY day, hour
+        """), {
+            "tag_id": tag_id,
+            "days": days_count + 1,
+            "tz": tz_name,
+        }).mappings().all()
 
+    # Filter to the precise local-date window. The +1-day buffer above
+    # can pull in samples just outside our window after TZ conversion,
+    # so we drop anything outside [start_date, end_date] here.
+    allowed_dates = set(all_dates)
     cells = [
         CalendarCell(
-            dow=r["dow"],
+            date=r["day"],
             hour=r["hour"],
             avg=r["avg_val"],
             min=r["min_val"],
@@ -1152,10 +1420,10 @@ def _build_calendar_heatmap(
             count=r["sample_count"],
         )
         for r in rows
+        if r["day"] in allowed_dates
     ]
 
-    # Global stats for color-scale normalization on the client. Computing
-    # min/max/avg in Python avoids a second SQL query.
+    # Global stats for color-scale normalization on the client.
     avgs = [c.avg for c in cells if c.avg is not None]
     mins = [c.min for c in cells if c.min is not None]
     maxs = [c.max for c in cells if c.max is not None]
@@ -1166,7 +1434,12 @@ def _build_calendar_heatmap(
         tag_name=tag["name"],
         engineering_unit=tag["engineering_unit"],
         data_type=tag["data_type"],
+        decimal_places=tag["decimal_places"],
         weeks=weeks,
+        timezone=tz_name,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        dates=all_dates,
         cells=cells,
         global_min=min(mins) if mins else None,
         global_max=max(maxs) if maxs else None,

@@ -13,6 +13,7 @@
  * vocabulary distinct avoids confusion during DeltaV-side integration work.
  *
  * Phase 18 — PageHeader + iOS segmented tabs.
+ * Phase 27d MVP — Added "General" tab for plant-wide settings (timezone, etc).
  */
 import { NavLink, Outlet } from "react-router";
 import { cn } from "@/lib/utils";
@@ -23,6 +24,8 @@ const tabs = [
   { to: "/global/groups", label: "Groups" },
   { to: "/global/named-sets", label: "Enumerations" },
   { to: "/global/duty-standby-values", label: "Duty/standby" },
+  // Phase 27d MVP — General settings (plant timezone for now; more to come).
+  { to: "/global/settings", label: "General" },
 ];
 
 export default function GlobalLayout() {
@@ -30,7 +33,7 @@ export default function GlobalLayout() {
     <div className="space-y-4 max-w-7xl mx-auto">
       <PageHeader
         title="Global / Setup"
-        subtitle="Cross-product reference data — engineering units, tag groups, enumeration state machines, duty/standby values. Used by tags across every device."
+        subtitle="Cross-product reference data and plant-wide settings — engineering units, tag groups, enumeration state machines, duty/standby values, and plant timezone."
       />
 
       <div

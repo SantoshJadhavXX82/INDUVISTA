@@ -22,7 +22,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { Pin, PinOff, X, ExternalLink } from "lucide-react";
-import { formatFloat } from "@/lib/format";
+import { formatFloat, formatFloatExplicit } from "@/lib/format";
 
 const POPOVER_WIDTH = 360;
 const POPOVER_GAP = 8;            // px between trigger and popover
@@ -39,13 +39,16 @@ interface Props {
   observedMax: number | null;
   unit: string | null;
   tagName: string;
+  /** Phase 23.9 — when set, all numeric labels in the popover use this
+   * fixed decimal precision instead of the magnitude heuristic. */
+  decimalPlaces?: number | null;
   onShowInRawTable?: (tagId: number) => void;
   children: ReactNode;
 }
 
 export default function SigmaInfoPopover({
   tagId, mean, stddev, observedMin, observedMax, unit, tagName,
-  onShowInRawTable, children,
+  decimalPlaces, onShowInRawTable, children,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -261,6 +264,7 @@ export default function SigmaInfoPopover({
           observedMax={observedMax}
           unit={unit ?? ""}
           tagName={tagName}
+          decimalPlaces={decimalPlaces}
         />
 
         {onShowInRawTable && (
@@ -310,10 +314,14 @@ interface DiagramProps {
   observedMax: number | null;
   unit: string;
   tagName: string;
+  /** Phase 23.9 — when set, all numeric labels in the diagram (μ, σ,
+   * ±k σ ticks, observed extreme tooltips) honor this precision
+   * instead of the default magnitude heuristic. */
+  decimalPlaces?: number | null;
 }
 
 function BellCurveDiagram({
-  mean, stddev, observedMin, observedMax, unit, tagName,
+  mean, stddev, observedMin, observedMax, unit, tagName, decimalPlaces,
 }: DiagramProps) {
   const W = 360, H = 220;
   const PL = 16, PR = 16, PT = 56, PB = 72;
@@ -364,6 +372,11 @@ function BellCurveDiagram({
 
   const fmt = (v: number) => {
     if (!isFinite(v)) return "—";
+    // Phase 23.9 — honor the tag's display precision when set,
+    // otherwise fall back to the magnitude-based auto formatter.
+    if (decimalPlaces != null) {
+      return formatFloatExplicit(v, decimalPlaces);
+    }
     return formatFloat(v);
   };
 

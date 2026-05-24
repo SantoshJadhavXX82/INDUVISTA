@@ -311,7 +311,7 @@ export default function TrendSummaryPanel({
                         ? `${s.mean_value} ${s.engineering_unit}`
                         : undefined}
                     >
-                      {formatStat(s.mean_value)}
+                      {formatStat(s.mean_value, s.decimal_places)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums whitespace-nowrap">
                       <SigmaInfoPopover
@@ -322,9 +322,10 @@ export default function TrendSummaryPanel({
                         observedMax={s.observed_max}
                         unit={s.engineering_unit}
                         tagName={s.tag_name}
+                        decimalPlaces={s.decimal_places}
                         onShowInRawTable={onShowInRawTable}
                       >
-                        {formatStat(s.stddev_value)}
+                        {formatStat(s.stddev_value, s.decimal_places)}
                       </SigmaInfoPopover>
                     </TableCell>
                     <TableCell
@@ -334,7 +335,7 @@ export default function TrendSummaryPanel({
                         : undefined}
                     >
                       {s.observed_min != null && s.observed_max != null
-                        ? `${formatStat(s.observed_min)} – ${formatStat(s.observed_max)}`
+                        ? `${formatStat(s.observed_min, s.decimal_places)} – ${formatStat(s.observed_max, s.decimal_places)}`
                         : "—"}
                     </TableCell>
                     {showRoc && (
@@ -428,12 +429,23 @@ function formatDuration(sec: number): string {
 
 /**
  * Compact numeric formatting for the mean / stddev / min / max cells.
- * Tight precision so columns don't blow out: decimals tier on magnitude,
- * trailing zeros trimmed. Null renders as an em dash to match the visual
- * convention used elsewhere in the panel.
+ *
+ * Phase 23.9 — accepts an optional `decimalPlaces` override. When the
+ * tag has decimal_places configured, ALL stats for that row honor it.
+ * When NULL/undefined, falls back to the original magnitude-tier
+ * heuristic so existing behavior is unchanged for tags without config.
+ *
+ * Null/NaN renders as an em dash to match panel-wide convention.
  */
-function formatStat(v: number | null): string {
+function formatStat(v: number | null, decimalPlaces?: number | null): string {
   if (v == null || isNaN(v)) return "—";
+  // Explicit override path — toFixed with the configured precision, no
+  // trailing-zero trim (user asked for this precision, keep it).
+  if (decimalPlaces != null) {
+    const dp = Math.max(0, Math.min(15, decimalPlaces));
+    return v.toFixed(dp);
+  }
+  // Auto path — original behavior.
   const abs = Math.abs(v);
   let str: string;
   if (abs >= 1000)     str = v.toFixed(1);

@@ -121,19 +121,27 @@ export const help = {
 
     min_value: {
       description:
-        "Lower clamp for validation. Values below this are stored but flagged SUSPECT in the status byte (ST).",
+        "EU_Lo — engineering range low. Lower clamp for validation. Values below this are stored but flagged SUSPECT in the status byte (ST).",
       example: "0 for a temperature that should never go negative; 4 for a 4-20mA loop reading in mA",
       impact:
-        "Out-of-range samples show amber in the dashboard, count as suspect in reports, and surface in Data Gaps. Doesn't reject the value — just flags it.",
+        "Out-of-range samples show amber in the dashboard, count as suspect in reports, and surface in Data Gaps. Doesn't reject the value — just flags it. Also filters statistics (mean / stddev / observed range) so a single bad sample doesn't skew the bell curve.",
     } satisfies HelpEntry,
 
     max_value: {
       description:
-        "Upper clamp for validation. Values above this are stored but flagged SUSPECT.",
+        "EU_Hi — engineering range high. Upper clamp for validation. Values above this are stored but flagged SUSPECT.",
       example:
         "100 for a percentage, 150 for a typical bar pressure, 20 for a 4-20mA loop in mA",
       impact:
-        "Same as min_value — out-of-range samples surface as suspect quality in dashboards, reports, and Data Gaps.",
+        "Same as EU_Lo — out-of-range samples surface as suspect quality in dashboards, reports, and Data Gaps.",
+    } satisfies HelpEntry,
+
+    decimal_places: {
+      description:
+        "How many digits to show after the decimal point when this tag's value is displayed in the UI. Independent of data_type — storage precision is set by float32/float64; this is purely cosmetic.",
+      example: "2 for a pressure in bar (e.g. 1.25), 0 for a count or boolean flag, 4 for a flow rate in m³/s",
+      impact:
+        "Auto (default) uses a magnitude-based heuristic: ~3 significant figures scaled to the value. Setting an explicit number overrides that — useful when the auto choice clips meaningful digits or shows trailing zeros. Float32 supports ~7 meaningful digits, float64 up to ~15; values beyond that just display trailing noise.",
     } satisfies HelpEntry,
 
     enabled: {

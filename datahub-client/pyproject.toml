@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "induvista-datahub"
+version = "0.1.0"
+description = "Edge collector for INDUVISTA — polls OPC servers and pushes to the /api/ingest endpoint."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+    { name = "INDUVISTA", email = "support@induvista.local" },
+]
+
+# Runtime dependencies. Versions are loose lower bounds — pinned exact
+# versions live in requirements.txt for reproducible installs. Keeping
+# them open here means downstream consumers can pip-resolve fresh.
+dependencies = [
+    "PySide6>=6.6,<7",          # LGPL Qt binding for the UI
+    "pydantic>=2.5,<3",         # config schema validation
+    "httpx>=0.27,<1",           # async HTTP client for /api/ingest
+    "tenacity>=8.2,<10",        # retry decorator with exponential backoff
+    "asyncua>=1.1,<2",          # OPC UA client (pure Python)
+    # pywin32 is Windows-only and only needed for the DA bridge.
+    # The 32-bit bridge subprocess is launched by the main 64-bit app
+    # via PyInstaller in OPC.6; for dev-run on a 64-bit Python, DA is
+    # gracefully unavailable.
+    "pywin32>=306; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4,<9",
+    "pytest-asyncio>=0.23,<1",
+    "ruff>=0.4,<1",
+]
+
+# Entry point so the user can also launch via `induvista-datahub` after
+# `pip install -e .` (in addition to `python -m induvista_datahub`).
+[project.scripts]
+induvista-datahub = "induvista_datahub.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
