@@ -55,3 +55,18 @@ test-results-ui/
 
 # Patch-script backups
 *.bak_*
+*.bak
+
+# Phase scratch / backup snapshots (never commit — recoverable from history)
+_backup/
+_hotfix/
+_smoke*/
+_phase*/
+
+# One-off dev scripts kept out of the repo root
+/*.ps1
+fix-writable-stale.sql
+restart_UI_5174.txt
+
+# Lifecycle evidence logs
+scripts/lifecycle/evidence_full*.txt

@@ -1,9 +1,0 @@
-# Add to backend/app/main.py — alongside the other router registrations.
-
-# At the top with the other imports:
-from app.api import trends
-
-# Wherever other routers are included (look for `app.include_router(...)`),
-# add this line. The router already declares its own prefix `/api/trends`
-# and tag `trends`, so no need to pass them again.
-app.include_router(trends.router)
