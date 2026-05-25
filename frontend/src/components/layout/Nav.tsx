@@ -35,6 +35,8 @@ import {
   ChevronDown, ChevronRight,
   ScanLine, Radio, Zap, FileClock,
   Ruler, Palette, ListChecks, Tag, Hash, ArrowLeftRight, Network, ListTree,
+  // Phase OPC-web.3 — OPC UA sources nav icon
+  Wifi,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -115,6 +117,10 @@ function useEntries(alarmCount: number): Section[] {
         { kind: "leaf", to: "/config/devices",  label: "Devices",          icon: Cpu,        matchPrefix: "/config/devices" },
         { kind: "leaf", to: "/config/blocks",   label: "Register blocks",  icon: ListTree,   matchPrefix: "/config/blocks" },
         { kind: "leaf", to: "/global/calc-blocks", label: "Calc tags",     icon: Sigma, matchPrefix: "/global/calc-blocks" },
+        // Phase OPC-web.3 — OPC UA sources management. Sits in Configure
+        // because it's a per-deployment data-source setup (like Networks
+        // and Devices), not global reference data.
+        { kind: "leaf", to: "/config/opc-sources", label: "OPC UA",        icon: Wifi,  matchPrefix: "/config/opc-sources" },
         {
           kind: "group", id: "modbus", label: "Modbus", icon: Wrench,
           matchPrefix: "/modbus", children: [

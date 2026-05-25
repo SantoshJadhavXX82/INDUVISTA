@@ -119,6 +119,11 @@ class OpcSourceResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     mapping_count: int = 0
+    # Phase OPC-web.3 — most recent tag_value.time across any tag
+    # bound to this source's synthetic device. Lets the frontend show
+    # "● Live / ● Stale / ● Idle" state without a separate roundtrip.
+    # NULL means no samples have ever landed for this source.
+    last_sample_at: datetime | None = None
 
 
 class OpcMappingCreate(BaseModel):
@@ -158,16 +163,19 @@ def _synthetic_resource_name(opc_source_name: str) -> str:
 
 
 def _load_source_response(db: Session, source_id: int) -> OpcSourceResponse:
-    """Read one opc_source row + mapping count + return as the response
-    shape. Raises 404 if not found. Centralizes the JOIN so every
-    endpoint returns the same shape."""
+    """Read one opc_source row + mapping count + last_sample_at, return
+    as the response shape. Raises 404 if not found. Centralizes the
+    JOIN so every endpoint returns the same shape."""
     row = db.execute(text("""
         SELECT s.id, s.name, s.description, s.endpoint, s.security_policy,
                s.username, s.publishing_interval_ms, s.reconnect_min_sec,
                s.reconnect_max_sec, s.is_enabled, s.channel_id, s.device_id,
                s.created_at, s.updated_at,
                COALESCE((SELECT COUNT(*) FROM opc_tag_mappings m
-                         WHERE m.opc_source_id = s.id), 0) AS mapping_count
+                         WHERE m.opc_source_id = s.id), 0) AS mapping_count,
+               (SELECT MAX(tv.time) FROM tag_values tv
+                JOIN tags t ON tv.tag_id = t.id
+                WHERE t.device_id = s.device_id) AS last_sample_at
         FROM opc_sources s WHERE s.id = :id
     """), {"id": source_id}).mappings().first()
     if row is None:
@@ -290,7 +298,10 @@ def list_opc_sources(
                s.reconnect_max_sec, s.is_enabled, s.channel_id, s.device_id,
                s.created_at, s.updated_at,
                COALESCE((SELECT COUNT(*) FROM opc_tag_mappings m
-                         WHERE m.opc_source_id = s.id), 0) AS mapping_count
+                         WHERE m.opc_source_id = s.id), 0) AS mapping_count,
+               (SELECT MAX(tv.time) FROM tag_values tv
+                JOIN tags t ON tv.tag_id = t.id
+                WHERE t.device_id = s.device_id) AS last_sample_at
         FROM opc_sources s
         ORDER BY s.name
     """)).mappings().all()

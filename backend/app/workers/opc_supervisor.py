@@ -472,6 +472,14 @@ async def main() -> None:
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+    # asyncua's INFO level dumps every PublishCallback's full payload
+    # which is overwhelming — one log line per ~3 KB of struct dump.
+    # Defaulting it to WARNING leaves our own __main__ logger informative
+    # without drowning out the actual events. Override via env if you're
+    # debugging an asyncua-internal issue.
+    logging.getLogger("asyncua").setLevel(
+        os.environ.get("ASYNCUA_LOG_LEVEL", "WARNING")
+    )
 
     # SF buffer path — separate from modbus's so the two workers don't
     # contend on the same SQLite file. Defaults to /data/sf_opc.db.

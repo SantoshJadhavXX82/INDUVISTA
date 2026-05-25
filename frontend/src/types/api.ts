@@ -558,3 +558,71 @@ export type RawTableResponse = {
   limit: number;
   truncated: boolean;
 };
+
+
+// ─── OPC UA — Phase OPC-web.3 ───────────────────────────────────────
+
+/** A configured OPC UA endpoint that the backend subscribes to. */
+export type OpcSourceResponse = {
+  id: number;
+  name: string;
+  description: string | null;
+  endpoint: string;
+  security_policy:
+    | "None" | "Basic128Rsa15" | "Basic256" | "Basic256Sha256"
+    | "Aes128_Sha256_RsaOaep" | "Aes256_Sha256_RsaPss";
+  username: string;
+  // password never returned by GET — security boundary
+  publishing_interval_ms: number;
+  reconnect_min_sec: number;
+  reconnect_max_sec: number;
+  is_enabled: boolean;
+  channel_id: number;
+  device_id: number;
+  created_at: string;
+  updated_at: string;
+  mapping_count: number;
+  /** Most recent tag_value.time for any tag bound to this source's
+   *  synthetic device. NULL = no samples ever landed. The UI derives
+   *  Live / Stale / Idle from how recent this is. */
+  last_sample_at: string | null;
+};
+
+export type OpcSourceCreate = {
+  name: string;
+  description?: string | null;
+  endpoint: string;
+  security_policy: OpcSourceResponse["security_policy"];
+  username?: string;
+  password?: string;
+  publishing_interval_ms?: number;
+  reconnect_min_sec?: number;
+  reconnect_max_sec?: number;
+  is_enabled?: boolean;
+};
+
+export type OpcSourceUpdate = Partial<OpcSourceCreate>;
+
+/** A NodeId → tag_id mapping on one OPC source. */
+export type OpcMappingResponse = {
+  id: number;
+  opc_source_id: number;
+  node_id: string;
+  tag_id: number;
+  tag_name: string;
+  data_type: string;
+  created_at: string;
+};
+
+export type OpcMappingCreate = {
+  node_id: string;
+  tag_name: string;
+  tag_description?: string | null;
+  data_type: string;
+  engineering_unit?: string | null;
+  decimal_places?: number | null;
+  scale?: number;
+  offset?: number;
+  min_value?: number | null;
+  max_value?: number | null;
+};
