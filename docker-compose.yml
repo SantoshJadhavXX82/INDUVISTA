@@ -126,6 +126,9 @@ services:
         # — different filename so the two workers don't contend.
         SF_OPC_BUFFER_PATH: /data/sf_opc.db
         LOG_LEVEL: INFO
+        # NEW — silence asyncua's verbose per-message logs.
+        # Our own __main__ logger stays at INFO; asyncua at WARNING.
+        ASYNCUA_LOG_LEVEL: WARNING
       depends_on:
         postgres:
           condition: service_healthy

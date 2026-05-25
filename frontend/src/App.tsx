@@ -31,6 +31,8 @@ import AlarmRuleTypesAdmin from "@/pages/AlarmRuleTypesAdmin";
 import CalcDefinitionsAdmin from "@/pages/CalcDefinitionsAdmin";
 // Phase 16.0g - Audit log viewer
 import AuditLog from "@/pages/AuditLog";
+// Phase OPC-web.3 — backend-managed OPC UA sources page
+import OpcSources from "@/pages/OpcSources";
 
 export default function App() {
   return (
@@ -52,6 +54,9 @@ export default function App() {
         <Route path="/global/calc-blocks" element={<CalcDefinitionsAdmin />} />
         {/* Phase 16.0g — Audit log viewer */}
         <Route path="/audit-log" element={<AuditLog />} />
+
+        {/* Phase OPC-web.3 — OPC UA sources management */}
+        <Route path="/config/opc-sources" element={<OpcSources />} />
 
         {/* Phase 8.5 — Modbus TCP/IP tools grouped under /modbus */}
         <Route path="/modbus" element={<ModbusLayout />}>
