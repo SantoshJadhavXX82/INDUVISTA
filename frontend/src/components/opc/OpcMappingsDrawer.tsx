@@ -19,13 +19,14 @@
  */
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { X, Plus, Trash2, AlertTriangle, Loader2, Copy, Check } from "lucide-react";
+import { X, Plus, Trash2, AlertTriangle, Loader2, Copy, Check, FolderTree } from "lucide-react";
 
 import { api } from "@/lib/api";
 import type {
   OpcMappingCreate, OpcMappingResponse, OpcSourceResponse,
 } from "@/types/api";
 import { OPC_SOURCES_QUERY_KEY } from "./CreateOpcSourceModal";
+import { OpcBrowseImportModal } from "./OpcBrowseImportModal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 const DATA_TYPES = [
@@ -61,6 +62,7 @@ export function OpcMappingsDrawer({ open, onClose, source }: Props) {
 
   const [pendingDelete, setPendingDelete] = useState<OpcMappingResponse | null>(null);
   const [copiedNodeId, setCopiedNodeId] = useState<number | null>(null);
+  const [browseOpen, setBrowseOpen] = useState(false);
 
   // Esc to close.
   useEffect(() => {
@@ -168,15 +170,28 @@ export function OpcMappingsDrawer({ open, onClose, source }: Props) {
               {source.endpoint}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-6 w-6 inline-flex items-center justify-center rounded
-                       text-muted-foreground hover:bg-secondary"
-            aria-label="Close"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setBrowseOpen(true)}
+              data-testid="opc-browse-open-btn"
+              className="text-xs px-2 py-1 rounded border border-border
+                         hover:bg-secondary inline-flex items-center gap-1.5"
+              title="Browse the OPC address space and bulk-import variables as tags"
+            >
+              <FolderTree className="h-3 w-3" />
+              Browse &amp; Import
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="h-6 w-6 inline-flex items-center justify-center rounded
+                         text-muted-foreground hover:bg-secondary"
+              aria-label="Close"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Content (scrolls) */}
@@ -374,8 +389,12 @@ export function OpcMappingsDrawer({ open, onClose, source }: Props) {
 
         {/* Footer */}
         <div className="px-4 py-3 border-t border-border bg-secondary/10 text-[10px] text-muted-foreground">
-          Mapping changes are picked up on next worker restart:
-          <code className="font-mono ml-1">docker compose restart opc_worker</code>
+          {/* Phase OPC-web.2.1 — the worker now picks up mapping changes
+              automatically within ~30s (its config_reloader poll interval).
+              No manual restart needed; this message used to read
+              "docker compose restart opc_worker". */}
+          Mapping changes are picked up automatically by the OPC worker
+          within ~30 seconds.
         </div>
       </aside>
 
@@ -398,6 +417,18 @@ export function OpcMappingsDrawer({ open, onClose, source }: Props) {
         busy={deleteMutation.isPending}
         onConfirm={() => pendingDelete && deleteMutation.mutate(pendingDelete)}
         onCancel={() => setPendingDelete(null)}
+      />
+
+      {/* Browse + bulk-import modal */}
+      <OpcBrowseImportModal
+        open={browseOpen}
+        source={source}
+        onClose={() => setBrowseOpen(false)}
+        onImported={() => {
+          // Refresh this drawer's mappings list — the bulk import
+          // adds rows that should appear immediately.
+          mappingsQuery.refetch();
+        }}
       />
     </>
   );

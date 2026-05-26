@@ -1,17 +1,39 @@
 # InduVista
 
-Industrial data acquisition and reporting tool by SVJ.
+Industrial data acquisition and reporting platform by SVJ.
 
-InduVista polls Modbus TCP devices, validates each reading, and stores it in a TimescaleDB historian. When the historian is briefly unavailable, writes spill into a store-and-forward buffer and a replay worker drains them back as soon as the database returns — no data loss, original timestamps preserved.
+InduVista acquires data from industrial devices over **Modbus TCP** and **OPC UA**, validates and quality-stamps every reading, and stores it in a **TimescaleDB** historian. When the database is briefly unavailable, writes spill into a local store-and-forward buffer and drain back automatically once it returns — no data loss, original timestamps preserved. On top of the historian sits a calculation engine, an alarm engine, and a React operations UI for trends, dashboards, diagnostics, and configuration.
 
-## Stack (Phase 0–2)
+## Highlights
 
-- FastAPI backend
-- PostgreSQL with the TimescaleDB extension
-- Modbus TCP polling worker
-- Store-and-forward replay worker
-- Modbus TCP simulator (development only)
-- Docker Compose for orchestration
+- **Multi-protocol acquisition** — Modbus TCP polling worker and OPC UA subscription worker, plus a generic authenticated `/api/ingest` endpoint for plant-side agents.
+- **Lossless historian** — TimescaleDB hypertables with continuous aggregates and compression; store-and-forward buffering with automatic replay.
+- **Quality model** — every sample carries a quality tier (Modbus `st` decoding, stale detection, range checks).
+- **Calc engine** — 62 computed-block types across five tiers (arithmetic, selection, conditional logic, stateful, aggregation) producing computed tags.
+- **Alarm engine** — configurable severities and rule types, rate-of-change / frozen / spike rules, acknowledge & shelve, density heatmap.
+- **Trends & analytics** — historical and real-time charts, aggregation modes, rate-of-change, sigma bands, saved views, data-gap analysis.
+- **Operations UI** — live dashboard, tag explorer, diagnostics, audit log, Modbus protocol tools (frame inspector, register browser, write console), with dark mode and mobile navigation.
+- **OPC UA admin (latest build)** — manage OPC UA sources and tag mappings from the web UI, browse a server's address space, and import nodes directly into tags.
+
+## Stack
+
+**Backend** — FastAPI · Python 3.11 · SQLAlchemy + Alembic · TimescaleDB/PostgreSQL · pymodbus · asyncua
+**Frontend** — React 19 · Vite 6 · TypeScript · Tailwind CSS 4 · TanStack Query · uPlot
+**Plant agent** — DataHub client (PySide6 desktop app, parked) — OPC UA/DA reader with store-and-forward push to `/api/ingest`
+**Orchestration** — Docker Compose
+
+## Services
+
+| Service | Profile | Role |
+|---|---|---|
+| `postgres` | default | TimescaleDB historian |
+| `migrate` | default | Runs `alembic upgrade head`, then exits |
+| `backend` | default | FastAPI app + REST API |
+| `modbus_worker` | `workers` | Modbus TCP polling supervisor |
+| `opc_worker` | `workers` | OPC UA subscription supervisor |
+| `alarm_evaluator` | (always) | Evaluates alarm rules each cycle |
+| `calc_evaluator` | (always) | Runs the computed-block engine |
+| `modbus_simulator` | `sim` | Modbus TCP simulator (development only) |
 
 ## Quick start
 
@@ -21,7 +43,7 @@ Bring up the foundation (Postgres + migrations + backend):
 docker compose up
 ```
 
-Add the simulator and workers when you're ready for Phase 1:
+Add the acquisition workers and a simulator for local development:
 
 ```
 docker compose --profile sim --profile workers up
@@ -29,19 +51,45 @@ docker compose --profile sim --profile workers up
 
 Then:
 
+- Web UI: http://localhost:5173 (dev) — `cd frontend && npm install && npm run dev`
 - API docs: http://localhost:8000/docs
 - Health check: http://localhost:8000/health
+
+Configuration is read from `.env` (see `.env.example` for the variables).
 
 ## Project layout
 
 ```
-backend/        FastAPI app, workers, Alembic migrations
-db/init/        First-boot SQL (TimescaleDB extension)
-simulators/     Modbus TCP test simulator
+backend/                 FastAPI app, workers, Alembic migrations, tests
+  app/api/               REST routers (tags, trends, alarms, calc, opc_sources, ingest, api_keys, ...)
+  app/workers/           modbus_supervisor, opc_supervisor, alarm_evaluator, calc_evaluator, calc_blocks/
+  app/utils/             api_key_auth, timezone helpers
+  alembic/versions/      database migrations
+frontend/                React + Vite operations UI
+  src/pages/             Dashboard, Trend, Alarms, Diagnostics, TagExplorer, OpcSources, config/, global/
+  src/components/        UI library, opc/, calc/, trend/, alarms/, diagnostics/, layout/
+datahub-client/          Parked plant-side agent (PySide6) — OPC UA/DA → /api/ingest
+simulators/              Modbus TCP test simulator
+db/init/                 First-boot SQL (TimescaleDB extension)
+scripts/                 Seed and smoke-test utilities
+docs/                    Architecture and reference notes
 ```
+
+## UI map
+
+- **Operate** — Live Dashboard · Trend · Alarms · Audit Log · Diagnostics · Data Gaps
+- **Explore (Modbus)** — Frame Inspector · Register Browser · Write Console · Write Audit
+- **Configure** — Channels · Devices · Register Blocks · OPC Sources
+- **Setup / Global** — Engineering Units · Alarm Severities · Alarm Types · Calc Blocks · Groups · Enumerations · Duty/Standby Values · Settings
+
+## Acquisition paths
+
+1. **Modbus TCP** — `modbus_worker` polls configured devices/registers, decodes values and `st` quality, writes to the historian.
+2. **OPC UA (direct)** — `opc_worker` opens an asyncua client per configured OPC source, subscribes to mapped nodes, buffers samples, and flushes to the historian.
+3. **Plant agent ingest** — a DataHub client (or any agent) authenticates with an API key and POSTs samples to `/api/ingest`; the backend range-checks and bulk-inserts them with `source = 'ingest'`.
 
 ## Roadmap
 
-- **Phase 0–2 (current scope):** foundation, Modbus acquisition, store-and-forward fallback
-- **Phase 3+:** configuration UI, grouped polling, diagnostics, reporting engine, scheduler
-- **Future:** OPC UA, MQTT, REST and SQL connectors
+- **Done:** Modbus acquisition + store-and-forward, configuration UI, calc engine, alarms, trends/diagnostics/audit, reference data, dark mode + mobile, OPC UA ingestion and web admin (sources, mappings, address-space browse & import).
+- **In progress:** OPC web hardening, integration test coverage.
+- **Deferred:** OPC DA bridge (32-bit subprocess), DataHub push pipeline productionization, MQTT and REST/SQL connectors, reporting engine and scheduler.

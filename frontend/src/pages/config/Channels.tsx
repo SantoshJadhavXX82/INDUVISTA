@@ -152,6 +152,13 @@ function ChannelForm({
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
 
+  // Only Modbus channels have a configurable transport. OPC UA channels
+  // always use tcp (the worker uses opc.tcp://). Computed channels use
+  // the synthetic "internal" transport. Both are owned by their
+  // higher-level page (OPC UA Sources, Computed Tags) — this drawer
+  // should not let operators change transport on those.
+  const isModbus = form.protocol_connector === "modbus";
+
   const save = useMutation({
     mutationFn: async () => {
       if (isNew) {
@@ -238,16 +245,25 @@ function ChannelForm({
         <div className="space-y-1.5">
           <Label htmlFor="transport">
             Transport <HelpTip entry={help.channel.transport} />
+            {!isNew && !isModbus && (
+              <span className="normal-case text-muted-foreground"> (managed by {form.protocol_connector})</span>
+            )}
           </Label>
           <select
             id="transport"
+            disabled={!isNew && !isModbus}
             value={form.transport}
             onChange={(e) => setForm({ ...form, transport: e.target.value })}
-            className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+            className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm disabled:opacity-50"
           >
             <option value="tcp">tcp</option>
-            <option value="rtu">rtu</option>
-            <option value="serial">serial</option>
+            {/* Phase 17.0a: 'internal' transport exists in the DB for the
+                COMPUTED channel; surface it as a disabled option so the
+                form can display it for those channels without letting
+                operators select it on Modbus channels. */}
+            {form.transport === "internal" && (
+              <option value="internal">internal</option>
+            )}
           </select>
         </div>
       </div>

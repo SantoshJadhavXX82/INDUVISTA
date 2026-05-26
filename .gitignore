@@ -70,3 +70,6 @@ restart_UI_5174.txt
 
 # Lifecycle evidence logs
 scripts/lifecycle/evidence_full*.txt
+
+# OPC web working snapshots (scratch duplicates)
+opc_web_*/
