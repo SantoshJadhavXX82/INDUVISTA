@@ -114,7 +114,17 @@ def list_protocol_connectors(db: Annotated[Session, Depends(get_session)]):
 
 @router.get("/channels", response_model=list[ChannelResponse])
 def list_channels(db: Annotated[Session, Depends(get_session)]):
-    rows = db.execute(text(_CHANNEL_SELECT + " ORDER BY c.id")).mappings().all()
+    # Phase OPC-web.2.2.b: hide orphan channels (all devices soft-deleted).
+    # Channels with no devices at all stay visible. Admin lookups by ID
+    # (GET/PATCH/DELETE /channels/{id}) bypass this filter intentionally.
+    rows = db.execute(text(f"""
+        SELECT * FROM ({_CHANNEL_SELECT}) ch
+        WHERE (
+            NOT EXISTS (SELECT 1 FROM devices d WHERE d.channel_id = ch.id)
+            OR EXISTS (SELECT 1 FROM devices d WHERE d.channel_id = ch.id AND d.deleted_at IS NULL)
+        )
+        ORDER BY ch.id
+    """)).mappings().all()
     return [dict(r) for r in rows]
 
 

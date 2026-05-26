@@ -49,7 +49,7 @@ import { TagQualityBadge } from "@/components/tags/tag-quality-badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusPill } from "@/components/ui/status-pill";
 
-type Device = { id: number; name: string };
+type Device = { id: number; name: string; protocol: string | null };
 type RegisterBlock = {
   id: number;
   device_id: number;
@@ -160,6 +160,20 @@ export default function TagExplorer() {
     queryFn: () => api.get<Device[]>("/devices"),
     staleTime: 60_000,
   });
+
+  // Phase 24 — device protocol lookup. The /devices query already runs
+  // for the device picker; we build a Map<deviceId, protocol> for use
+  // by isModbusTag() in the row renderers and pass it down to
+  // TagEditPanel for the drawer. Built with useMemo so the map is
+  // referentially stable across re-renders.
+  const deviceProtocolMap = useMemo(() => {
+    const m = new Map<number, string | null>();
+    for (const d of devices.data ?? []) {
+      m.set(d.id, d.protocol ?? null);
+    }
+    return m;
+  }, [devices.data]);
+
 
   const blocks = useQuery({
     queryKey: ["register-blocks"],
@@ -543,8 +557,12 @@ export default function TagExplorer() {
                           <span className="ml-1" style={{ color: "var(--text-secondary)" }}>(duty)</span>
                         )}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{pt.function_code}</TableCell>
-                      <TableCell className="text-right tabular-nums text-xs">{pt.address}</TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">
+                        {isModbusTag(pt.primary_device_id, deviceProtocolMap) ? pt.function_code : <span className="text-muted-foreground/60">—</span>}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums text-xs">
+                        {isModbusTag(pt.primary_device_id, deviceProtocolMap) ? pt.address : <span className="text-muted-foreground/60">—</span>}
+                      </TableCell>
                       <TableCell className="text-xs">{pt.data_type}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {pt.engineering_unit ?? "—"}
@@ -639,8 +657,12 @@ export default function TagExplorer() {
                       </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">{t.device_name}</TableCell>
-                    <TableCell className="text-right tabular-nums text-xs">{t.function_code}</TableCell>
-                    <TableCell className="text-right tabular-nums text-xs">{t.address}</TableCell>
+                    <TableCell className="text-right tabular-nums text-xs">
+                      {isModbusTag(t.device_id, deviceProtocolMap) ? t.function_code : <span className="text-muted-foreground/60">—</span>}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-xs">
+                      {isModbusTag(t.device_id, deviceProtocolMap) ? t.address : <span className="text-muted-foreground/60">—</span>}
+                    </TableCell>
                     <TableCell className="text-xs">{t.data_type}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {t.engineering_unit ?? "—"}
@@ -898,6 +920,7 @@ export default function TagExplorer() {
             key={selectedTag.tag_id}
             tag={selectedTag}
             isComputed={computedTags.data?.has(selectedTag.tag_id) ?? false}
+            deviceProtocolMap={deviceProtocolMap}
             onSaved={() => {
               queryClient.invalidateQueries({ queryKey: ["live"] });
             }}
@@ -1358,11 +1381,13 @@ function TagEditPanel({
   isComputed,
   onSaved,
   onDeleted,
+  deviceProtocolMap,
 }: {
   tag: LiveTag;
   isComputed: boolean;
   onSaved: () => void;
   onDeleted: () => void;
+  deviceProtocolMap: Map<number, string | null>;
 }) {
   // Local form state, seeded from the tag whenever the tag prop changes.
   const [form, setForm] = useState<EditableFields>(() => seedForm(tag));
@@ -1488,24 +1513,24 @@ function TagEditPanel({
           <DT label="Tag ID">{tag.tag_id}</DT>
           <DT label="Data type">{tag.data_type}</DT>
           <DT label="Byte order">
-            {isComputed
-              ? <span className="text-muted-foreground/60">—</span>
-              : byteOrderLabelFor(tag.data_type, tag.byte_order)}
+            {isModbusTag(tag.device_id, deviceProtocolMap)
+              ? byteOrderLabelFor(tag.data_type, tag.byte_order)
+              : <span className="text-muted-foreground/60">—</span>}
           </DT>
           <DT label="Function code">
-            {isComputed
-              ? <span className="text-muted-foreground/60">—</span>
-              : tag.function_code}
+            {isModbusTag(tag.device_id, deviceProtocolMap)
+              ? tag.function_code
+              : <span className="text-muted-foreground/60">—</span>}
           </DT>
           <DT label="Address">
-            {isComputed
-              ? <span className="text-muted-foreground/60">—</span>
-              : tag.address}
+            {isModbusTag(tag.device_id, deviceProtocolMap)
+              ? tag.address
+              : <span className="text-muted-foreground/60">—</span>}
           </DT>
           <DT label="Register count">
-            {isComputed
-              ? <span className="text-muted-foreground/60">—</span>
-              : tag.register_count}
+            {isModbusTag(tag.device_id, deviceProtocolMap)
+              ? tag.register_count
+              : <span className="text-muted-foreground/60">—</span>}
           </DT>
           <DT label="Groups">{tag.groups.join(", ") || "—"}</DT>
         </dl>
@@ -1962,6 +1987,26 @@ function byteOrderOptionsFor(dataType: string): ByteOrderOption[] {
     { value: "CDAB", label: "CDAB", hint: "word swap" },
     { value: "BADC", label: "BADC", hint: "byte swap" },
   ];
+}
+
+/**
+ * Whether a tag belongs to a Modbus device, given its device_id and
+ * the deviceProtocolMap (built from the /devices query).
+ *
+ * Positive list of Modbus protocols. Anything else (OPC UA, Computed,
+ * future protocols) gets the dash placeholder for FC/Addr/RegCount/
+ * ByteOrder fields. The underlying DB columns still hold numeric
+ * defaults (FC=3, addr=0, etc.) to satisfy legacy NOT NULL constraints
+ * on the Modbus-era schema; we just don't surface them where they have
+ * no meaning.
+ *
+ * Note: this is separate from `isComputed`, which has its own semantics
+ * (disables Scale/Offset inputs, hides heartbeat config). Both can be
+ * true-ish at once — a Computed tag is also not a Modbus tag.
+ */
+function isModbusTag(deviceId: number, devicesMap: Map<number, string | null>): boolean {
+  const proto = devicesMap.get(deviceId);
+  return proto === "modbus_tcp" || proto === "modbus_rtu";
 }
 
 /** Render the byte_order DB code as the display label for a given data_type. */
@@ -2646,10 +2691,10 @@ function exportTags(tags: LiveTag[]): void {
     { header: "device_name", value: (t) => t.device_name },
     { header: "block_name", value: (t) => t.register_block_name },
     { header: "data_type", value: (t) => t.data_type },
-    { header: "function_code", value: (t) => t.function_code },
-    { header: "address", value: (t) => t.address },
-    { header: "register_count", value: (t) => t.register_count },
-    { header: "byte_order", value: (t) => t.byte_order },
+    { header: "function_code",  value: (t) => isModbusTag(t.device_id, deviceProtocolMap) ? t.function_code  : "" },
+    { header: "address",        value: (t) => isModbusTag(t.device_id, deviceProtocolMap) ? t.address        : "" },
+    { header: "register_count", value: (t) => isModbusTag(t.device_id, deviceProtocolMap) ? t.register_count : "" },
+    { header: "byte_order",     value: (t) => isModbusTag(t.device_id, deviceProtocolMap) ? t.byte_order     : "" },
     { header: "engineering_unit", value: (t) => t.engineering_unit },
     { header: "scale", value: (t) => t.scale },
     { header: "offset", value: (t) => t.offset },

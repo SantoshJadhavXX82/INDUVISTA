@@ -371,9 +371,11 @@ def load_sources_from_db() -> list[dict]:
         result: list[dict] = []
         for s in rows:
             mappings = conn.execute(text("""
-                SELECT node_id, tag_id
-                FROM opc_tag_mappings
-                WHERE opc_source_id = :id
+                SELECT m.node_id, m.tag_id
+                FROM opc_tag_mappings m
+                JOIN tags t ON t.id = m.tag_id
+                WHERE m.opc_source_id = :id
+                  AND t.deleted_at IS NULL
             """), {"id": s["id"]}).mappings().all()
 
             tag_by_node = {m["node_id"]: m["tag_id"] for m in mappings}
@@ -467,9 +469,11 @@ def load_one_source_from_db(source_id: int) -> dict | None:
             return None
 
         mappings = conn.execute(text("""
-            SELECT node_id, tag_id
-            FROM opc_tag_mappings
-            WHERE opc_source_id = :id
+            SELECT m.node_id, m.tag_id
+            FROM opc_tag_mappings m
+            JOIN tags t ON t.id = m.tag_id
+            WHERE m.opc_source_id = :id
+              AND t.deleted_at IS NULL
         """), {"id": source_id}).mappings().all()
         tag_by_node = {m["node_id"]: m["tag_id"] for m in mappings}
         if not tag_by_node:

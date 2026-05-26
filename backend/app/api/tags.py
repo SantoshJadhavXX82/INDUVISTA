@@ -349,7 +349,9 @@ def list_tags(
     name: Annotated[str | None, Query(description="Partial match, case-insensitive")] = None,
     limit: Annotated[int, Query(ge=1, le=1000)] = 500,
 ):
-    where: list[str] = []
+    # Stage 6 (Phase OPC-web.2.2.b): pre-seed soft-delete filter into
+    # the `where` list. Admin paths bypass this; LIST always filters.
+    where: list[str] = ["t.deleted_at IS NULL"]
     params: dict = {}
     if device_id is not None:
         where.append("t.device_id = :device_id")
