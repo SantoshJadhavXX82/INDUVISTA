@@ -153,6 +153,84 @@ class OpcMappingResponse(BaseModel):
     created_at: datetime
 
 
+# Phase OPC-web.2.2 — browse + bulk import schemas.
+
+class OpcBrowseNode(BaseModel):
+    """One entry returned by the browse endpoint. Represents either a
+    folder (Object node — clickable to expand) or a leaf variable
+    (tickable for import).
+
+    `is_mapped`: true when this NodeId is already present in
+    opc_tag_mappings for the source. The UI greys out the checkbox.
+
+    `is_system`: heuristic flag — true when the browse_name starts
+    with `_` (Kepware-injected folders like _System, _Statistics) or
+    when the NodeId is the UA-standard Server node (i=2253). The UI
+    collapses these by default behind a 'show system folders' toggle.
+
+    `data_type` / `induvista_data_type` are only populated for
+    Variable nodes. `data_type` is the raw UA type name (e.g.
+    'Double', 'UInt32'); `induvista_data_type` is the mapped
+    INDUVISTA type ('float64', 'uint32') so the UI can pre-fill the
+    bulk import form."""
+
+    node_id: str = Field(..., description="OPC NodeId string form, e.g. 'ns=2;s=CONDENSATE1.FLC1.MTR1.KPW_CUR_DAILY_GSVOL'")
+    browse_name: str
+    display_name: str
+    node_class: Literal["Object", "Variable", "Method", "View", "DataType", "ReferenceType", "ObjectType", "VariableType", "Unspecified"]
+    is_system: bool = False
+    is_mapped: bool = False
+    # Variable-only fields:
+    data_type: str | None = None
+    induvista_data_type: str | None = None
+
+
+class OpcBrowseResponse(BaseModel):
+    """Result of browsing one node. Returns its children plus the
+    node's own NodeId for client-side cache keying."""
+    parent_node_id: str
+    children: list[OpcBrowseNode]
+
+
+class OpcBulkMappingItem(BaseModel):
+    """One row in the bulk-import request body."""
+    node_id: str = Field(..., min_length=1, max_length=512)
+    tag_name: str = Field(..., min_length=1, max_length=200)
+    data_type: str = Field(..., description="INDUVISTA data type: float64/int32/etc.")
+    tag_description: str | None = None
+    engineering_unit: str | None = Field(None, max_length=64)
+    decimal_places: int | None = Field(None, ge=0, le=15)
+
+
+class OpcBulkMappingResult(BaseModel):
+    """Per-row outcome from the bulk endpoint. `success=false` means
+    the row was rejected (duplicate, validation error, etc.) — the
+    rest of the batch was still attempted."""
+    node_id: str
+    tag_name: str
+    success: bool
+    mapping_id: int | None = None
+    error: str | None = None
+
+
+class OpcBulkMappingResponse(BaseModel):
+    """Bulk endpoint return shape. Always 200 even on partial failure;
+    the per-row results tell the UI what succeeded."""
+    total: int
+    succeeded: int
+    failed: int
+    results: list[OpcBulkMappingResult]
+
+
+class OpcBulkMappingRequest(BaseModel):
+    """Wrapper around the items list. Matches the existing
+    /register-blocks/bulk request shape (`{ blocks: [...] }`) so all
+    bulk endpoints have the same body convention. Leaves room to add
+    request-level options later (dry_run, commit_mode, etc.) without
+    breaking the contract."""
+    items: list[OpcBulkMappingItem] = Field(..., min_length=1, max_length=500)
+
+
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
@@ -165,7 +243,16 @@ def _synthetic_resource_name(opc_source_name: str) -> str:
 def _load_source_response(db: Session, source_id: int) -> OpcSourceResponse:
     """Read one opc_source row + mapping count + last_sample_at, return
     as the response shape. Raises 404 if not found. Centralizes the
-    JOIN so every endpoint returns the same shape."""
+    JOIN so every endpoint returns the same shape.
+
+    Phase OPC-web.2.1 hotfix: last_sample_at originally read from the
+    tag_values hypertable via tags.device_id. That JOIN scanned the
+    entire hypertable per source, took minutes, hung the pool, and
+    eventually exhausted it under the page's 5s polling cadence
+    (12 hung connections observed in pg_stat_activity at the failure
+    point). Switched to latest_tag_values (small table, one row per
+    tag) joined directly via opc_tag_mappings — sub-millisecond, no
+    hypertable scan, no synthetic-device indirection."""
     row = db.execute(text("""
         SELECT s.id, s.name, s.description, s.endpoint, s.security_policy,
                s.username, s.publishing_interval_ms, s.reconnect_min_sec,
@@ -173,9 +260,10 @@ def _load_source_response(db: Session, source_id: int) -> OpcSourceResponse:
                s.created_at, s.updated_at,
                COALESCE((SELECT COUNT(*) FROM opc_tag_mappings m
                          WHERE m.opc_source_id = s.id), 0) AS mapping_count,
-               (SELECT MAX(tv.time) FROM tag_values tv
-                JOIN tags t ON tv.tag_id = t.id
-                WHERE t.device_id = s.device_id) AS last_sample_at
+               (SELECT MAX(ltv.time)
+                FROM latest_tag_values ltv
+                JOIN opc_tag_mappings m ON ltv.tag_id = m.tag_id
+                WHERE m.opc_source_id = s.id) AS last_sample_at
         FROM opc_sources s WHERE s.id = :id
     """), {"id": source_id}).mappings().first()
     if row is None:
@@ -292,6 +380,9 @@ def create_opc_source(
 def list_opc_sources(
     db: Annotated[Session, Depends(get_session)],
 ):
+    # Phase OPC-web.2.1 hotfix: see _load_source_response docstring above
+    # for why last_sample_at reads from latest_tag_values rather than
+    # the tag_values hypertable.
     rows = db.execute(text("""
         SELECT s.id, s.name, s.description, s.endpoint, s.security_policy,
                s.username, s.publishing_interval_ms, s.reconnect_min_sec,
@@ -299,9 +390,10 @@ def list_opc_sources(
                s.created_at, s.updated_at,
                COALESCE((SELECT COUNT(*) FROM opc_tag_mappings m
                          WHERE m.opc_source_id = s.id), 0) AS mapping_count,
-               (SELECT MAX(tv.time) FROM tag_values tv
-                JOIN tags t ON tv.tag_id = t.id
-                WHERE t.device_id = s.device_id) AS last_sample_at
+               (SELECT MAX(ltv.time)
+                FROM latest_tag_values ltv
+                JOIN opc_tag_mappings m ON ltv.tag_id = m.tag_id
+                WHERE m.opc_source_id = s.id) AS last_sample_at
         FROM opc_sources s
         ORDER BY s.name
     """)).mappings().all()
@@ -354,9 +446,20 @@ def delete_opc_source(
     source_id: int,
     db: Annotated[Session, Depends(get_session)],
 ):
-    """Delete the source. Cascades drop the synthetic device, channel,
-    mapped tags, and their tag_values rows. To keep data, PATCH
-    is_enabled=false instead."""
+    """Delete the source plus its synthetic channel, synthetic device,
+    all opc_tag_mappings, all mapped tags, and all sample history for
+    those tags. To stop sampling without losing history, PATCH
+    is_enabled=false instead.
+
+    Phase OPC-web.2.1.b hotfix: the original handler did a single
+    DELETE FROM channels WHERE id = :id and relied on CASCADE. But
+    the devices.channel_id foreign key was never given ON DELETE
+    CASCADE in any migration, so Postgres rejected the parent
+    delete with a ForeignKeyViolation. Until we ship a migration
+    that adds the cascade, the handler walks the dependency graph
+    explicitly: mappings → tag_values (via the tag IDs) → tags →
+    opc_sources row → device → channel.
+    """
     src = db.execute(
         text("SELECT channel_id, device_id FROM opc_sources WHERE id = :id"),
         {"id": source_id},
@@ -364,12 +467,66 @@ def delete_opc_source(
     if src is None:
         raise HTTPException(404, f"OPC source id={source_id} not found")
 
-    # Delete the channel — CASCADE drops device, mappings, tags, etc.
-    # We delete the channel rather than the opc_source because the
-    # synthetic channel has no purpose without the source, and we
-    # want everything gone in one shot.
-    db.execute(text("DELETE FROM channels WHERE id = :id"),
-               {"id": src["channel_id"]})
+    channel_id = src["channel_id"]
+    device_id = src["device_id"]
+
+    # Snapshot the tag IDs owned by this source's synthetic device.
+    # We grab them via the device_id rather than the mappings table so
+    # that any tag created against this device — even one whose mapping
+    # was deleted earlier — is included. tag_values rows for these tags
+    # are dropped by the tags table's ON DELETE CASCADE.
+    tag_ids = [
+        r["id"]
+        for r in db.execute(
+            text("SELECT id FROM tags WHERE device_id = :did"),
+            {"did": device_id},
+        ).mappings().all()
+    ]
+
+    # 1. opc_tag_mappings — references opc_sources(id) AND tags(id).
+    #    Drop these first so the tag deletes below don't trip the
+    #    mappings_tag_id_fkey.
+    db.execute(
+        text("DELETE FROM opc_tag_mappings WHERE opc_source_id = :sid"),
+        {"sid": source_id},
+    )
+
+    # 2. tags — drops tag_values rows via cascade. latest_tag_values
+    #    has ON DELETE CASCADE on tag_id (migration 0050), and
+    #    tag_values is a hypertable with the same cascade. If a tag
+    #    is referenced by something else (alarm rule, computed
+    #    definition input, etc.), the FK there decides whether to
+    #    block or cascade — we propagate any error to the caller.
+    if tag_ids:
+        db.execute(
+            text("DELETE FROM tags WHERE id = ANY(:ids)"),
+            {"ids": tag_ids},
+        )
+
+    # 3. opc_sources row itself. Note: opc_sources.device_id and
+    #    opc_sources.channel_id are ON DELETE CASCADE pointing AT the
+    #    parent, meaning deleting the device or channel would cascade
+    #    to delete this row — but we want explicit control over order
+    #    so we delete the source row first and then the device/channel
+    #    in known-safe order below. If the row was already gone via
+    #    some other cascade path, the DELETE is a no-op.
+    db.execute(
+        text("DELETE FROM opc_sources WHERE id = :sid"),
+        {"sid": source_id},
+    )
+
+    # 4. device — now free of tag references and opc_sources reference.
+    db.execute(
+        text("DELETE FROM devices WHERE id = :did"),
+        {"did": device_id},
+    )
+
+    # 5. channel — now free of device references.
+    db.execute(
+        text("DELETE FROM channels WHERE id = :cid"),
+        {"cid": channel_id},
+    )
+
     db.commit()
 
 
@@ -450,6 +607,16 @@ def create_mapping(
         VALUES (:s, :n, :t, now())
         RETURNING id
     """), {"s": source_id, "n": body.node_id, "t": tag_id}).scalar()
+
+    # Phase OPC-web.2.1 — bump the source's updated_at so the worker's
+    # config_reloader fingerprint changes and the source's subscription
+    # is restarted to pick up the new node. The fingerprint ALSO tracks
+    # mapping_count + last_mapping_change as a backstop, but bumping
+    # updated_at keeps the contract "any config change touches the row".
+    db.execute(
+        text("UPDATE opc_sources SET updated_at = now() WHERE id = :id"),
+        {"id": source_id},
+    )
     db.commit()
 
     row = db.execute(text("""
@@ -516,4 +683,441 @@ def delete_mapping(
     # on opc_tag_mappings.tag_id.
     db.execute(text("DELETE FROM tags WHERE id = :id"),
                {"id": row["tag_id"]})
+
+    # Phase OPC-web.2.1 — bump the source's updated_at so the worker's
+    # config_reloader fingerprint changes and the source's subscription
+    # is restarted with the now-shorter node list.
+    db.execute(
+        text("UPDATE opc_sources SET updated_at = now() WHERE id = :id"),
+        {"id": source_id},
+    )
     db.commit()
+
+
+# ── Phase OPC-web.2.2: browse + bulk import ──────────────────────────
+
+
+# UA scalar types (asyncua's ua.VariantType enum) → INDUVISTA data_type
+# strings. Anything not in this map falls through to None → the UI lets
+# the operator pick manually (rare path for exotic types).
+_UA_TO_INDUVISTA_DTYPE: dict[str, str] = {
+    # Numeric
+    "Boolean":  "bool",
+    "Byte":     "uint16",     # 8-bit unsigned → smallest INDUVISTA int
+    "SByte":    "int16",      # 8-bit signed
+    "Int16":    "int16",
+    "UInt16":   "uint16",
+    "Int32":    "int32",
+    "UInt32":   "uint32",
+    "Int64":    "int64",
+    "UInt64":   "uint64",
+    "Float":    "float32",
+    "Double":   "float64",
+    # Text
+    "String":           "string",
+    "DateTime":         "string",  # No native DateTime in INDUVISTA tags
+    "ByteString":       "string",
+    "LocalizedText":    "string",
+    "QualifiedName":    "string",
+    "XmlElement":       "string",
+    "NodeId":           "string",
+    "ExpandedNodeId":   "string",
+    "StatusCode":       "uint32",
+    "Guid":             "string",
+}
+
+
+def _ua_dtype_to_induvista(ua_name: str) -> str | None:
+    """Map an asyncua VariantType enum name to an INDUVISTA data_type.
+    Returns None for types we don't auto-map (caller can let the
+    operator choose manually)."""
+    return _UA_TO_INDUVISTA_DTYPE.get(ua_name)
+
+
+def _is_system_folder(browse_name: str, nodeid_str: str) -> bool:
+    """Heuristic for hiding Kepware/UA system folders by default.
+
+    Triggers:
+      - browse_name starts with '_' (Kepware convention for system
+        folders: _System, _Statistics, _CommunicationSerialization,
+        _AdvancedTags, _DataLogger, _IoT_Gateway, etc.)
+      - NodeId is the UA-standard Server folder (i=2253), which sits
+        in Objects alongside the Kepware project but is OPC UA spec
+        infrastructure (server diagnostics, capabilities, etc.).
+    """
+    if nodeid_str == "i=2253":
+        return True
+    return browse_name.startswith("_")
+
+
+@router.get(
+    "/{source_id}/browse",
+    response_model=OpcBrowseResponse,
+)
+async def browse_opc_node(
+    source_id: int,
+    db: Annotated[Session, Depends(get_session)],
+    node_id: str = "ObjectsFolder",
+):
+    """Browse one node on an OPC source's server. Returns the node's
+    children with metadata (NodeClass, data type for Variables,
+    is_system flag, is_mapped flag).
+
+    `node_id` defaults to 'ObjectsFolder' which is asyncua's name for
+    the UA-standard Objects folder root (`i=85`). Subsequent calls
+    pass an explicit node_id like 'ns=2;s=CONDENSATE1' to drill down.
+
+    Spawns a short-lived asyncua client per request. This is
+    deliberately separate from the worker's long-lived subscription
+    client — Kepware and most servers handle concurrent sessions
+    fine, and the alternative (RPC to the worker) is much more
+    architectural churn for negligible benefit. The request returns
+    in <500ms typical, ~1s for nodes with many children due to
+    per-Variable data_type reads.
+
+    NOTE: this handler is `async def` deliberately. An earlier draft
+    used a sync handler with `asyncio.run(_do_browse())`, which created
+    and destroyed an event loop per request. That worked for isolated
+    curl tests but produced BadNodeIdUnknown errors when the React UI
+    issued 3-4 browse calls in rapid succession — asyncua's background
+    tasks (KeepAlive watchdog, channel publish) didn't unwind cleanly
+    during the brief loop-teardown window, leaving Kepware with
+    half-closed sessions that misrouted subsequent NodeId reads.
+    Running on FastAPI's main loop avoids the churn.
+    """
+    from asyncua import Client, ua
+    import asyncio as _asyncio
+
+    # Look up the source's endpoint + security to build the client.
+    # We run the SQL via asyncio.to_thread because get_session() yields
+    # a synchronous SQLAlchemy Session. Without to_thread, db.execute()
+    # blocks the FastAPI event loop, which means under concurrent load
+    # the loop can stall and asyncio.timeout below never gets to fire.
+    # Symptoms: browse requests hang forever, frontend stuck on
+    # "Loading...", connection pool exhausted from queued requests.
+    def _fetch_source():
+        return db.execute(text("""
+            SELECT id, name, endpoint, security_policy, username, password
+            FROM opc_sources WHERE id = :id
+        """), {"id": source_id}).mappings().first()
+
+    src = await _asyncio.to_thread(_fetch_source)
+    if src is None:
+        raise HTTPException(404, f"OPC source id={source_id} not found")
+
+    # Pre-fetch the set of already-mapped NodeIds for this source so we
+    # can flag children that have an existing mapping. Also off-loop.
+    def _fetch_mapped():
+        return set(
+            r["node_id"]
+            for r in db.execute(text("""
+                SELECT node_id FROM opc_tag_mappings WHERE opc_source_id = :s
+            """), {"s": source_id}).mappings().all()
+        )
+
+    already_mapped: set[str] = await _asyncio.to_thread(_fetch_mapped)
+
+    # CRITICAL: wrap the entire connect+browse phase in a single timeout.
+    # Without this, asyncua's connect() can hang indefinitely on a
+    # misbehaving OPC server (Kepware busy, network blip, certificate
+    # mismatch). A hung handler holds its DB connection forever, and
+    # if multiple browse requests pile up the entire connection pool
+    # gets depleted - so even cheap /api/opc-sources list calls time
+    # out. 8 seconds is generous for legitimate OPC traffic and short
+    # enough that pool depletion can't cascade.
+    BROWSE_TIMEOUT_SEC = 8.0
+    client = None
+    try:
+        async with _asyncio.timeout(BROWSE_TIMEOUT_SEC):
+            client = Client(src["endpoint"], timeout=5)
+            if src["security_policy"] and src["security_policy"] != "None":
+                # Match the worker's security setup. The worker's TODO Phase
+                # 21 (encrypt at rest) applies here too - for now we read the
+                # plaintext password from the row.
+                await client.set_security_string(
+                    f"{src['security_policy']},SignAndEncrypt,"
+                    f"/data/certs/client_cert.der,/data/certs/client_key.pem"
+                )
+            if src["username"]:
+                client.set_user(src["username"])
+                client.set_password(src["password"] or "")
+
+            await client.connect()
+
+            # Translate 'ObjectsFolder' shorthand -> real Objects node
+            if node_id == "ObjectsFolder":
+                target = client.get_objects_node()
+            else:
+                target = client.get_node(node_id)
+
+            children = await target.get_children()
+
+            out: list[OpcBrowseNode] = []
+            for c in children:
+                try:
+                    bn = await c.read_browse_name()
+                    nc = await c.read_node_class()
+                    try:
+                        dn_obj = await c.read_display_name()
+                        dn = dn_obj.Text or bn.Name
+                    except Exception:
+                        dn = bn.Name
+
+                    nodeid_str = c.nodeid.to_string()
+                    is_sys = _is_system_folder(bn.Name, nodeid_str)
+                    is_mapped = nodeid_str in already_mapped
+
+                    # Variable nodes: also read the DataType so the UI
+                    # can pre-fill the bulk-import form.
+                    raw_dtype: str | None = None
+                    ind_dtype: str | None = None
+                    if nc == ua.NodeClass.Variable:
+                        try:
+                            vt = await c.read_data_type_as_variant_type()
+                            raw_dtype = vt.name
+                            ind_dtype = _ua_dtype_to_induvista(raw_dtype)
+                        except Exception:
+                            pass
+
+                    out.append(OpcBrowseNode(
+                        node_id=nodeid_str,
+                        browse_name=bn.Name,
+                        display_name=dn,
+                        node_class=nc.name,
+                        is_system=is_sys,
+                        is_mapped=is_mapped,
+                        data_type=raw_dtype,
+                        induvista_data_type=ind_dtype,
+                    ))
+                except Exception as e:
+                    # One bad child shouldn't kill the whole browse.
+                    # is_mapped is still computed from node_id (the only
+                    # field that's reliably valid in the error path).
+                    err_node_id = c.nodeid.to_string() if c.nodeid else "(unknown)"
+                    out.append(OpcBrowseNode(
+                        node_id=err_node_id,
+                        browse_name=f"(browse error: {type(e).__name__})",
+                        display_name=f"(browse error: {type(e).__name__})",
+                        node_class="Unspecified",
+                        is_system=True,
+                        is_mapped=err_node_id in already_mapped,
+                    ))
+
+            # Sort: non-system folders first, then variables, then
+            # system folders. Within each group, alphabetical by
+            # browse_name.
+            def _sort_key(n: OpcBrowseNode):
+                return (
+                    1 if n.is_system else 0,
+                    0 if n.node_class == "Object" else 1,
+                    n.browse_name.casefold(),
+                )
+            out.sort(key=_sort_key)
+            return OpcBrowseResponse(parent_node_id=node_id, children=out)
+
+    except TimeoutError:
+        # asyncio.timeout fired. Most likely Kepware is overloaded or
+        # the OPC connection got stuck mid-handshake. Don't 500 -
+        # this is upstream stress, return 502 with a clear message.
+        raise HTTPException(
+            504,
+            f"OPC browse timed out (>{BROWSE_TIMEOUT_SEC}s) for source "
+            f"{src['name']!r}. The OPC server may be overloaded or "
+            f"unreachable; try again in a moment.",
+        )
+    except HTTPException:
+        # Re-raise our own HTTPExceptions cleanly (e.g. from invalid
+        # input). Don't wrap them in another 502.
+        raise
+    except Exception as e:
+        raise HTTPException(
+            502,
+            f"OPC browse failed for source {src['name']!r}: "
+            f"{type(e).__name__}: {e}",
+        )
+    finally:
+        # Always disconnect, even on timeout. This frees Kepware's
+        # session slot for the next request.
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        # Brief cooldown to let Kepware finish releasing the session
+        # before the next browse call opens a new one. asyncua's
+        # disconnect() sends CloseSession but doesn't wait for ack.
+        # 100ms is enough for normal pacing; the BROWSE_TIMEOUT_SEC
+        # wrapper above handles the case where this isn't enough.
+        await _asyncio.sleep(0.1)
+
+
+@router.post(
+    "/{source_id}/mappings/bulk",
+    response_model=OpcBulkMappingResponse,
+)
+def bulk_create_mappings(
+    source_id: int,
+    body: OpcBulkMappingRequest,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Create many mappings in one request. Best-effort: each row is
+    committed in its own savepoint so a single failure (duplicate
+    NodeId, invalid data_type, tag name conflict) doesn't roll back
+    the others. Returns a per-row result.
+
+    The endpoint bumps opc_sources.updated_at once at the end if at
+    least one row succeeded — the worker's reloader picks up the
+    full new mapping set on its next poll (~30s).
+
+    Request shape: { "items": [ {node_id, tag_name, data_type, ...}, ... ] }
+    matching the existing /register-blocks/bulk convention.
+    """
+    items = body.items
+
+    src = db.execute(text("""
+        SELECT device_id, name FROM opc_sources WHERE id = :id
+    """), {"id": source_id}).mappings().first()
+    if src is None:
+        raise HTTPException(404, f"OPC source id={source_id} not found")
+
+    # min_length=1 on the Pydantic model already rejects empty arrays
+    # at validation time, so this guard is defensive only.
+    if not items:
+        return OpcBulkMappingResponse(total=0, succeeded=0, failed=0, results=[])
+
+    # max_length=500 on the Pydantic model rejects oversized batches at
+    # validation. The 413 below is unreachable from the API but stays
+    # as documentation of the soft cap.
+
+    if len(items) > 500:
+        # Soft cap. The endpoint can handle thousands but bulk requests
+        # that large usually indicate a misclick or runaway script —
+        # better to fail fast and have the operator confirm than to
+        # silently create 5000 tags.
+        raise HTTPException(
+            413,
+            f"Bulk request too large ({len(items)} items, max 500). "
+            f"Split into smaller batches.",
+        )
+
+    # Pre-fetch existing mappings + tag names once for fast dup detection.
+    existing_node_ids: set[str] = set(
+        r["node_id"]
+        for r in db.execute(text("""
+            SELECT node_id FROM opc_tag_mappings WHERE opc_source_id = :s
+        """), {"s": source_id}).mappings().all()
+    )
+    # tag names are unique across the WHOLE tags table (global UNIQUE
+    # constraint). Pre-fetch only the relevant slice — names that
+    # match any of our incoming candidates — so we can flag clashes
+    # cleanly. Empty IN () is invalid SQL, hence the guard.
+    requested_names = [it.tag_name for it in items]
+    existing_tag_names: set[str] = set()
+    if requested_names:
+        existing_tag_names = set(
+            r["name"]
+            for r in db.execute(
+                text("SELECT name FROM tags WHERE name = ANY(:names)"),
+                {"names": requested_names},
+            ).mappings().all()
+        )
+
+    results: list[OpcBulkMappingResult] = []
+    succeeded = 0
+    failed = 0
+
+    for item in items:
+        # ── Per-row validation (cheap, before SAVEPOINT) ────────────
+        if item.node_id in existing_node_ids:
+            results.append(OpcBulkMappingResult(
+                node_id=item.node_id, tag_name=item.tag_name,
+                success=False,
+                error=f"node_id already mapped on this source",
+            ))
+            failed += 1
+            continue
+        if item.tag_name in existing_tag_names:
+            results.append(OpcBulkMappingResult(
+                node_id=item.node_id, tag_name=item.tag_name,
+                success=False,
+                error=f"tag name {item.tag_name!r} already exists",
+            ))
+            failed += 1
+            continue
+
+        # ── SAVEPOINT-wrapped insert ────────────────────────────────
+        # Each row gets its own savepoint so a failure (FK violation,
+        # CHECK constraint, etc.) is rolled back to just that row
+        # without losing the others. We hold one open transaction
+        # for the whole request and commit at the end.
+        sp = db.begin_nested()  # SAVEPOINT
+        try:
+            tag_id = db.execute(text("""
+                INSERT INTO tags (
+                    device_id, register_block_id, name, description, data_type,
+                    byte_order, function_code, address,
+                    engineering_unit, scale, "offset", min_value, max_value,
+                    decimal_places, created_at, updated_at
+                ) VALUES (
+                    :device_id, NULL, :name, :desc, :dtype,
+                    'ABCD', 3, 0,
+                    :eu, 1.0, 0.0, NULL, NULL,
+                    :dp, now(), now()
+                )
+                RETURNING id
+            """), {
+                "device_id": src["device_id"],
+                "name": item.tag_name,
+                "desc": item.tag_description or f"OPC node {item.node_id}",
+                "dtype": item.data_type,
+                "eu": item.engineering_unit,
+                "dp": item.decimal_places,
+            }).scalar()
+
+            mapping_id = db.execute(text("""
+                INSERT INTO opc_tag_mappings
+                    (opc_source_id, node_id, tag_id, created_at)
+                VALUES (:s, :n, :t, now())
+                RETURNING id
+            """), {"s": source_id, "n": item.node_id, "t": tag_id}).scalar()
+
+            sp.commit()
+            # Track these so duplicates within the same request batch
+            # also fail cleanly (instead of going through to Postgres
+            # and getting a UNIQUE violation that's harder to explain).
+            existing_node_ids.add(item.node_id)
+            existing_tag_names.add(item.tag_name)
+
+            results.append(OpcBulkMappingResult(
+                node_id=item.node_id, tag_name=item.tag_name,
+                success=True, mapping_id=mapping_id,
+            ))
+            succeeded += 1
+
+        except Exception as e:
+            sp.rollback()
+            # Surface the DB error in a developer-readable form. CHECK
+            # constraint violations and FK errors aren't always pretty
+            # but they tell the operator what's wrong.
+            results.append(OpcBulkMappingResult(
+                node_id=item.node_id, tag_name=item.tag_name,
+                success=False,
+                error=f"{type(e).__name__}: {str(e)[:200]}",
+            ))
+            failed += 1
+
+    # Bump source updated_at IFF anything succeeded — so the reloader
+    # rebuilds the subscription. If everything failed, don't perturb.
+    if succeeded > 0:
+        db.execute(
+            text("UPDATE opc_sources SET updated_at = now() WHERE id = :id"),
+            {"id": source_id},
+        )
+
+    db.commit()
+    return OpcBulkMappingResponse(
+        total=len(items),
+        succeeded=succeeded,
+        failed=failed,
+        results=results,
+    )

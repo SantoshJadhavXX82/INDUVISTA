@@ -2,18 +2,26 @@
  * Devices sub-page — list + drawer create/edit/delete.
  *
  * A device is typically a single Modbus endpoint (host:port, unit_id)
- * within a channel. Phase 17.0a adds Computed Devices: virtual hosts
- * for computed tags, on the internal 'COMPUTED' channel. They appear
- * in the listing but their Modbus-specific cells are greyed since
- * host/port/unit_id don't apply.
+ * within a channel. Two special device kinds exist:
+ *
+ *   - Computed devices (Phase 17.0a): virtual hosts for computed tags,
+ *     on the internal 'COMPUTED' channel. host/port/unit_id are NULL.
+ *   - OPC UA synthetic devices (Phase OPC.1): one synthetic device per
+ *     OPC source, on a synthetic 'opc:<source-name>' channel. All
+ *     connection details live in opc_sources; the row exists only so
+ *     tags can have a device_id. host/port/unit_id are NULL.
+ *
+ * For both, Modbus-specific UI is hidden / disabled and the operator is
+ * directed to the higher-level page (Computed Tags, OPC UA Sources)
+ * where the device is actually managed.
  *
  * Editing host/port on Modbus devices triggers the Phase 3.5 worker
- * hot-reload within ~10 seconds. Computed devices have no polling
- * loop to reload.
+ * hot-reload within ~10 seconds. Computed and OPC devices have no
+ * Modbus poll loop to reload.
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, AlertCircle, Calculator } from "lucide-react";
+import { Plus, Trash2, AlertCircle, Calculator, Network } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
@@ -39,10 +47,10 @@ type Device = {
   description: string | null;
   channel_id: number;
   channel_name: string;
-  protocol: string;                // Phase 17.0a — added so we can detect 'computed'
-  host: string | null;             // Phase 17.0a — nullable (NULL for computed devices)
-  port: number | null;             // Phase 17.0a — nullable
-  unit_id: number | null;          // Phase 17.0a — nullable
+  protocol: string;                // 'modbus' | 'computed' | 'opc_ua'
+  host: string | null;             // NULL for computed/opc_ua devices
+  port: number | null;             // NULL for computed/opc_ua devices
+  unit_id: number | null;          // NULL for computed/opc_ua devices
   duty_role: string;
   redundant_device_id: number | null;
   duty_status_tag_id: number | null;
@@ -60,7 +68,8 @@ type Device = {
 type Channel = {
   id: number;
   name: string;
-  transport: string;               // Phase 17.0a — for detecting internal channels
+  transport: string;               // 'tcp' | 'internal'
+  protocol_connector?: string;     // 'modbus' | 'computed' | 'opc_ua' — Phase OPC-web.2.1.b
 };
 
 
@@ -68,6 +77,27 @@ type Channel = {
 function isComputedChannel(c: Channel | undefined | null): boolean {
   if (!c) return false;
   return c.transport === "internal" || c.name === "COMPUTED";
+}
+
+/** True for synthetic channels owned by an OPC UA source.
+ *  Detection: by protocol_connector when present, falling back to the
+ *  'opc:' name prefix that the backend uses when auto-creating the
+ *  synthetic channel (see backend/app/api/opc_sources.py). */
+function isOpcChannel(c: Channel | undefined | null): boolean {
+  if (!c) return false;
+  if (c.protocol_connector === "opc_ua") return true;
+  return c.name?.startsWith("opc:") === true;
+}
+
+/** True if this device is a real Modbus endpoint (host/port/unit_id apply). */
+function isModbusDevice(
+  device: Device | null,
+  selectedChannel: Channel | undefined | null,
+): boolean {
+  if (device) return device.protocol === "modbus";
+  // No device yet (create flow) — defer to the channel.
+  if (!selectedChannel) return true;
+  return !isComputedChannel(selectedChannel) && !isOpcChannel(selectedChannel);
 }
 
 
@@ -115,6 +145,11 @@ export default function Devices() {
             <TableBody>
               {devices.data?.map((d) => {
                 const isComputed = d.protocol === "computed";
+                const isOpc = d.protocol === "opc_ua";
+                const isSynthetic = isComputed || isOpc;
+                const naLabel = isComputed
+                  ? "Not applicable for computed devices"
+                  : "Not applicable for OPC UA devices";
                 return (
                   <TableRow
                     key={d.id}
@@ -129,6 +164,12 @@ export default function Devices() {
                             aria-label="Computed device"
                           />
                         )}
+                        {isOpc && (
+                          <Network
+                            className="h-3 w-3 text-muted-foreground"
+                            aria-label="OPC UA device"
+                          />
+                        )}
                         {d.name}
                       </div>
                     </TableCell>
@@ -136,38 +177,38 @@ export default function Devices() {
                     <TableCell
                       className={cn(
                         "text-xs font-mono",
-                        isComputed && "text-muted-foreground/40 italic",
+                        isSynthetic && "text-muted-foreground/40 italic",
                       )}
-                      title={isComputed ? "Not applicable for computed devices" : undefined}
+                      title={isSynthetic ? naLabel : undefined}
                     >
-                      {isComputed ? "—" : (d.host ?? "—")}
+                      {isSynthetic ? "—" : (d.host ?? "—")}
                     </TableCell>
                     <TableCell
                       className={cn(
                         "text-right tabular-nums text-xs",
-                        isComputed && "text-muted-foreground/40 italic",
+                        isSynthetic && "text-muted-foreground/40 italic",
                       )}
-                      title={isComputed ? "Not applicable for computed devices" : undefined}
+                      title={isSynthetic ? naLabel : undefined}
                     >
-                      {isComputed ? "—" : (d.port ?? "—")}
+                      {isSynthetic ? "—" : (d.port ?? "—")}
                     </TableCell>
                     <TableCell
                       className={cn(
                         "text-right tabular-nums text-xs",
-                        isComputed && "text-muted-foreground/40 italic",
+                        isSynthetic && "text-muted-foreground/40 italic",
                       )}
-                      title={isComputed ? "Not applicable for computed devices" : undefined}
+                      title={isSynthetic ? naLabel : undefined}
                     >
-                      {isComputed ? "—" : (d.unit_id ?? "—")}
+                      {isSynthetic ? "—" : (d.unit_id ?? "—")}
                     </TableCell>
                     <TableCell
                       className={cn(
                         "text-xs",
-                        isComputed && "text-muted-foreground/40 italic",
+                        isSynthetic && "text-muted-foreground/40 italic",
                       )}
-                      title={isComputed ? "Not applicable for computed devices" : undefined}
+                      title={isSynthetic ? naLabel : undefined}
                     >
-                      {isComputed ? "—" : d.duty_role}
+                      {isSynthetic ? "—" : d.duty_role}
                     </TableCell>
                     <TableCell>
                       <Badge variant={d.enabled ? "success" : "secondary"} className="text-xs">
@@ -240,12 +281,14 @@ function DeviceForm({
   const isNew = device === null;
   const queryClient = useQueryClient();
 
-  // Phase 17.0a: when CREATING, hide the internal COMPUTED channel from
-  // the dropdown — those devices have their own dedicated flow in the
-  // Computed Tags page. When EDITING existing devices, keep all channels
-  // visible (it's a read-only field anyway for existing devices).
+  // When CREATING, hide internal channels (COMPUTED) and synthetic OPC
+  // channels from the dropdown — those devices have their own dedicated
+  // flow (Computed Tags / OPC UA Sources pages). When EDITING existing
+  // devices, keep all channels visible (the field is read-only anyway).
   const channelsForCreate = useMemo(
-    () => channels.filter((c) => !isComputedChannel(c)),
+    () => channels.filter(
+      (c) => !isComputedChannel(c) && !isOpcChannel(c),
+    ),
     [channels],
   );
   const visibleChannels = isNew ? channelsForCreate : channels;
@@ -256,9 +299,9 @@ function DeviceForm({
     channel_id: device
       ? String(device.channel_id)
       : (channelsForCreate[0] ? String(channelsForCreate[0].id) : ""),
-    host: device?.host ?? "",                                   // null-safe
-    port: device?.port != null ? String(device.port) : "502",   // null-safe
-    unit_id: device?.unit_id != null ? String(device.unit_id) : "1", // null-safe
+    host: device?.host ?? "",
+    port: device?.port != null ? String(device.port) : "502",
+    unit_id: device?.unit_id != null ? String(device.unit_id) : "1",
     duty_role: device?.duty_role ?? "none",
     partner_device_id: device?.redundant_device_id ? String(device.redundant_device_id) : "",
     duty_status_tag_id: device?.duty_status_tag_id ? String(device.duty_status_tag_id) : "",
@@ -273,12 +316,17 @@ function DeviceForm({
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
 
-  // Phase 17.0a: derive isComputed from the device's stored protocol
-  // (existing computed devices) or from the selected channel during
-  // create (defensive — the create dropdown already filters them out).
+  // Categorise the device. Modbus is the default (host/port/unit_id apply,
+  // duty/standby applies, Modbus hardening applies). Computed and OPC are
+  // synthetic — Modbus-specific UI is hidden / disabled, and the operator
+  // is directed to the page that actually owns the device.
   const selectedChannel = channels.find((c) => String(c.id) === form.channel_id);
   const isComputed =
     device?.protocol === "computed" || isComputedChannel(selectedChannel);
+  const isOpc =
+    device?.protocol === "opc_ua" || isOpcChannel(selectedChannel);
+  const isModbus = isModbusDevice(device, selectedChannel);
+  const isSynthetic = !isModbus;  // computed OR opc — same UI treatment
 
   const partnerCandidates = useMemo(
     () =>
@@ -297,7 +345,7 @@ function DeviceForm({
       name: string;
       data_type: string;
     }>>(`/tags?device_id=${device?.id}`),
-    enabled: !!device && !isComputed,  // Phase 17.0a — skip for computed
+    enabled: !!device && isModbus,   // skip for any synthetic device
     staleTime: 60_000,
   });
   const dutyStatusCandidates = useMemo(
@@ -310,17 +358,17 @@ function DeviceForm({
 
   const save = useMutation({
     mutationFn: async () => {
-      const hardening = isComputed
-        ? {}  // Phase 17.0a — computed devices don't use Modbus hardening
-        : {
+      const hardening = isModbus
+        ? {
             request_timeout_ms: parseInt(form.request_timeout_ms, 10),
             retry_count: parseInt(form.retry_count, 10),
             reconnect_initial_ms: parseInt(form.reconnect_initial_ms, 10),
             reconnect_max_ms: parseInt(form.reconnect_max_ms, 10),
-          };
+          }
+        : {};  // synthetic devices don't use Modbus hardening
 
-      // Validate duty/standby pairing intent (only relevant for non-computed)
-      if (!isComputed) {
+      // Validate duty/standby pairing intent (Modbus only)
+      if (isModbus) {
         if (form.duty_role !== "none" && !form.partner_device_id) {
           throw new Error("partner device required when duty role is duty or standby");
         }
@@ -335,16 +383,16 @@ function DeviceForm({
           name: form.name,
           description: form.description || null,
           channel_id: parseInt(form.channel_id, 10),
-          host: isComputed ? null : form.host,
-          port: isComputed ? null : parseInt(form.port, 10),
-          unit_id: isComputed ? null : parseInt(form.unit_id, 10),
-          duty_role: isComputed ? "none" : "none",   // always create unpaired
+          host: isModbus ? form.host : null,
+          port: isModbus ? parseInt(form.port, 10) : null,
+          unit_id: isModbus ? parseInt(form.unit_id, 10) : null,
+          duty_role: "none",  // always create unpaired
           stale_after_sec: parseInt(form.stale_after_sec, 10),
           scan_interval_ms: parseInt(form.scan_interval_ms, 10),
           enabled: form.enabled,
           ...hardening,
         });
-        if (!isComputed && form.duty_role !== "none" && form.partner_device_id) {
+        if (isModbus && form.duty_role !== "none" && form.partner_device_id) {
           return api.post<Device>(`/devices/${created.id}/pair`, {
             partner_device_id: parseInt(form.partner_device_id, 10),
             this_role: form.duty_role,
@@ -357,7 +405,7 @@ function DeviceForm({
       const currentlyPaired = (device.duty_role === "duty" || device.duty_role === "standby");
       const willBePaired = (form.duty_role !== "none");
 
-      const pairingChanged = !isComputed && (
+      const pairingChanged = isModbus && (
         device.duty_role !== form.duty_role ||
         String(device.redundant_device_id ?? "") !== form.partner_device_id
       );
@@ -365,18 +413,17 @@ function DeviceForm({
       const patched = await api.patch<Device>(`/devices/${device.id}`, {
         name: form.name,
         description: form.description || null,
-        host: isComputed ? null : form.host,
-        port: isComputed ? null : parseInt(form.port, 10),
-        unit_id: isComputed ? null : parseInt(form.unit_id, 10),
+        host: isModbus ? form.host : null,
+        port: isModbus ? parseInt(form.port, 10) : null,
+        unit_id: isModbus ? parseInt(form.unit_id, 10) : null,
         stale_after_sec: parseInt(form.stale_after_sec, 10),
         scan_interval_ms: parseInt(form.scan_interval_ms, 10),
         enabled: form.enabled,
-        // For computed devices we never set duty_status_tag_id
-        ...(isComputed ? {} : {
+        ...(isModbus ? {
           duty_status_tag_id: form.duty_status_tag_id
             ? parseInt(form.duty_status_tag_id, 10)
             : null,
-        }),
+        } : {}),
         ...hardening,
       });
 
@@ -403,7 +450,7 @@ function DeviceForm({
     onError: (e: Error) => setError(e instanceof ApiError ? e.detail : e.message),
   });
 
-  // Duty-control mutations and queries (only relevant for non-computed)
+  // Duty-control mutations and queries (Modbus paired devices only)
   const [swapNotes, setSwapNotes] = useState("");
   const [swapSuccessAt, setSwapSuccessAt] = useState<Date | null>(null);
 
@@ -417,7 +464,7 @@ function DeviceForm({
       reason: string;
       notes: string | null;
     }>>(`/devices/${device?.id}/duty-history?limit=5`),
-    enabled: !!device && !isComputed && device.duty_role !== "none",
+    enabled: !!device && isModbus && device.duty_role !== "none",
     staleTime: 10_000,
   });
 
@@ -456,7 +503,9 @@ function DeviceForm({
       }}
       className="space-y-4"
     >
-      {/* Phase 17.0a — banner for computed devices */}
+      {/* Banner: explain the synthetic nature + point operator to the
+          page that actually owns this device. Same visual treatment as
+          the existing Computed banner, with copy that adapts per kind. */}
       {isComputed && (
         <div className="rounded-md border border-blue-200 bg-blue-50/60 p-3 text-xs text-blue-900 flex gap-2">
           <Calculator className="h-4 w-4 mt-0.5 shrink-0" />
@@ -473,15 +522,37 @@ function DeviceForm({
           </div>
         </div>
       )}
+      {isOpc && (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50/60 p-3 text-xs text-emerald-900 flex gap-2">
+          <Network className="h-4 w-4 mt-0.5 shrink-0" />
+          <div>
+            <div className="font-semibold mb-0.5">OPC UA Synthetic Device</div>
+            <div className="leading-relaxed">
+              This row exists so OPC tags can have a device_id. All connection
+              details — endpoint, security, publishing interval, credentials —
+              live on the parent OPC source and are edited there. Modbus-specific
+              fields and duty/standby pairing don't apply. To manage this source,
+              go to{" "}
+              <a href="/config/opc-sources" className="underline font-medium">
+                OPC UA Sources
+              </a>.
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
           <Label htmlFor="name">
             Name <HelpTip entry={help.device.name} />
+            {!isNew && isOpc && (
+              <span className="normal-case text-muted-foreground"> (managed by OPC source)</span>
+            )}
           </Label>
           <Input
             id="name"
             required
+            disabled={!isNew && isOpc}
             value={form.name}
             onChange={(e) => setForm({ ...form, name: e.target.value })}
           />
@@ -505,10 +576,10 @@ function DeviceForm({
           {isNew && (
             <p className="text-[11px] text-muted-foreground">
               To create a computed device, use the{" "}
-              <a href="/calc/definitions" className="underline">
-                Computed Tags
-              </a>{" "}
-              page instead.
+              <a href="/calc/definitions" className="underline">Computed Tags</a>{" "}
+              page. To create an OPC UA source, use the{" "}
+              <a href="/config/opc-sources" className="underline">OPC UA Sources</a>{" "}
+              page.
             </p>
           )}
         </div>
@@ -525,40 +596,43 @@ function DeviceForm({
         />
       </div>
 
+      {/* Modbus connection fields — only meaningful for Modbus devices.
+          For synthetic devices (computed/opc_ua) we disable them and show
+          "—" so operators can see the row exists but can't modify it. */}
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2 space-y-1.5">
           <Label htmlFor="host">
             Host <HelpTip entry={help.channel.host} />
-            {isComputed && (
-              <span className="normal-case text-muted-foreground"> (not used)</span>
+            {isSynthetic && (
+              <span className="normal-case text-muted-foreground"> (n/a — {isComputed ? "computed" : "OPC UA"})</span>
             )}
           </Label>
           <Input
             id="host"
-            required={!isComputed}
-            disabled={isComputed}
-            value={isComputed ? "" : form.host}
+            required={isModbus}
+            disabled={isSynthetic}
+            value={isSynthetic ? "" : form.host}
             onChange={(e) => setForm({ ...form, host: e.target.value })}
-            placeholder={isComputed ? "—" : "192.168.1.10 or simulator service name"}
-            className={isComputed ? "bg-muted/50 text-muted-foreground" : ""}
+            placeholder={isSynthetic ? "—" : "192.168.1.10 or simulator service name"}
+            className={isSynthetic ? "bg-muted/50 text-muted-foreground" : ""}
           />
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="port">
             Port <HelpTip entry={help.channel.port} />
-            {isComputed && (
+            {isSynthetic && (
               <span className="normal-case text-muted-foreground"> (n/a)</span>
             )}
           </Label>
           <Input
             id="port"
             type="number"
-            required={!isComputed}
-            disabled={isComputed}
-            value={isComputed ? "" : form.port}
+            required={isModbus}
+            disabled={isSynthetic}
+            value={isSynthetic ? "" : form.port}
             onChange={(e) => setForm({ ...form, port: e.target.value })}
-            placeholder={isComputed ? "—" : ""}
-            className={isComputed ? "bg-muted/50 text-muted-foreground" : ""}
+            placeholder={isSynthetic ? "—" : ""}
+            className={isSynthetic ? "bg-muted/50 text-muted-foreground" : ""}
           />
         </div>
       </div>
@@ -567,24 +641,24 @@ function DeviceForm({
         <div className="space-y-1.5">
           <Label htmlFor="unit_id">
             Unit ID <HelpTip entry={help.device.unit_id} />
-            {isComputed && (
+            {isSynthetic && (
               <span className="normal-case text-muted-foreground"> (n/a)</span>
             )}
           </Label>
           <Input
             id="unit_id"
             type="number"
-            required={!isComputed}
-            disabled={isComputed}
-            value={isComputed ? "" : form.unit_id}
+            required={isModbus}
+            disabled={isSynthetic}
+            value={isSynthetic ? "" : form.unit_id}
             onChange={(e) => setForm({ ...form, unit_id: e.target.value })}
-            placeholder={isComputed ? "—" : ""}
-            className={isComputed ? "bg-muted/50 text-muted-foreground" : ""}
+            placeholder={isSynthetic ? "—" : ""}
+            className={isSynthetic ? "bg-muted/50 text-muted-foreground" : ""}
           />
         </div>
 
-        {/* Duty/standby fields hidden entirely for computed devices */}
-        {!isComputed && (
+        {/* Duty/standby fields — Modbus only */}
+        {isModbus && (
           <>
             <div className="space-y-1.5">
               <Label htmlFor="duty_role">Duty role</Label>
@@ -679,7 +753,9 @@ function DeviceForm({
               className="h-4 w-4"
             />
             <span className="text-muted-foreground">
-              {form.enabled ? (isComputed ? "evaluated" : "polled") : "skipped"}
+              {form.enabled
+                ? (isComputed ? "evaluated" : isOpc ? "subscribed" : "polled")
+                : "skipped"}
             </span>
           </label>
         </div>
@@ -710,8 +786,8 @@ function DeviceForm({
         </div>
       </div>
 
-      {/* Modbus hardening section — hidden for computed devices */}
-      {!isComputed && (
+      {/* Modbus hardening — Modbus only */}
+      {isModbus && (
         <details className="rounded-md border bg-secondary/20 p-3 space-y-3" open={!isNew && (
           form.request_timeout_ms !== "3000" ||
           form.retry_count !== "1" ||
@@ -797,8 +873,8 @@ function DeviceForm({
         </Button>
       </div>
 
-      {/* Duty-control section — only for non-computed paired devices */}
-      {!isNew && !isComputed && device.duty_role !== "none" && (
+      {/* Duty-control — Modbus paired devices only */}
+      {!isNew && isModbus && device.duty_role !== "none" && (
         <section className="pt-4 border-t">
           <h3 className="text-sm font-semibold">Duty control</h3>
           <p className="text-xs text-muted-foreground mt-1 mb-3">
@@ -958,32 +1034,46 @@ function DeviceForm({
       {!isNew && (
         <section className="pt-4 border-t border-red-100">
           <h3 className="text-sm font-semibold text-red-700">Delete device</h3>
-          <p className="text-xs text-muted-foreground mt-1 mb-2">
-            {isComputed
-              ? <>Deletes this computed device and all its computed tags + their definitions, execution stats, and historical values. Type{" "}
-                   <code className="font-mono bg-secondary px-1 rounded">{device.name}</code> to confirm.</>
-              : <>Deletes all this device's register blocks and tags too. Type{" "}
-                   <code className="font-mono bg-secondary px-1 rounded">{device.name}</code> to confirm.</>
-            }
-          </p>
-          <div className="flex gap-2">
-            <Input
-              value={deleteConfirm}
-              onChange={(e) => setDeleteConfirm(e.target.value)}
-              placeholder={device.name}
-              className="flex-1"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              disabled={deleteConfirm !== device.name || remove.isPending}
-              onClick={() => remove.mutate()}
-              className="border-red-200 text-red-700 hover:bg-red-50"
-            >
-              <Trash2 className="h-4 w-4 mr-1.5" />
-              {remove.isPending ? "Deleting…" : "Delete"}
-            </Button>
-          </div>
+          {isOpc ? (
+            <p className="text-xs text-muted-foreground mt-1 mb-2">
+              This synthetic device is owned by an OPC UA source. To remove it,
+              delete the source from the{" "}
+              <a href="/config/opc-sources" className="underline font-medium">
+                OPC UA Sources
+              </a>{" "}
+              page — that deletes the source, this device, and all its mapped tags
+              (with their historical samples) in one transaction.
+            </p>
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground mt-1 mb-2">
+                {isComputed
+                  ? <>Deletes this computed device and all its computed tags + their definitions, execution stats, and historical values. Type{" "}
+                       <code className="font-mono bg-secondary px-1 rounded">{device.name}</code> to confirm.</>
+                  : <>Deletes all this device's register blocks and tags too. Type{" "}
+                       <code className="font-mono bg-secondary px-1 rounded">{device.name}</code> to confirm.</>
+                }
+              </p>
+              <div className="flex gap-2">
+                <Input
+                  value={deleteConfirm}
+                  onChange={(e) => setDeleteConfirm(e.target.value)}
+                  placeholder={device.name}
+                  className="flex-1"
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={deleteConfirm !== device.name || remove.isPending}
+                  onClick={() => remove.mutate()}
+                  className="border-red-200 text-red-700 hover:bg-red-50"
+                >
+                  <Trash2 className="h-4 w-4 mr-1.5" />
+                  {remove.isPending ? "Deleting…" : "Delete"}
+                </Button>
+              </div>
+            </>
+          )}
         </section>
       )}
     </form>

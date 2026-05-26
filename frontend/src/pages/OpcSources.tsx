@@ -31,7 +31,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Pencil, ListTree, Power, Trash2, RefreshCw, Network, AlertTriangle,
+  Plus, Pencil, ListTree, Trash2, RefreshCw, Network, AlertTriangle,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
@@ -128,13 +128,11 @@ export default function OpcSources() {
   const [mappingsTarget, setMappingsTarget] = useState<OpcSourceResponse | null>(null);
   const [pendingDelete, setPendingDelete] = useState<OpcSourceResponse | null>(null);
 
-  const toggleMutation = useMutation({
-    mutationFn: (src: OpcSourceResponse) =>
-      api.patch<OpcSourceResponse>(`/opc-sources/${src.id}`, {
-        is_enabled: !src.is_enabled,
-      }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: OPC_SOURCES_QUERY_KEY }),
-  });
+  // Note: enable/disable is no longer a one-click row action. To toggle a
+  // source's enabled state, click Edit and use the "Enabled (subscribed by
+  // worker)" checkbox. This prevents accidental disables of live sources -
+  // disabling stops data collection, which is destructive enough to deserve
+  // an explicit two-click confirmation flow.
 
   const deleteMutation = useMutation({
     mutationFn: (src: OpcSourceResponse) => api.delete(`/opc-sources/${src.id}`),
@@ -265,6 +263,28 @@ export default function OpcSources() {
                         <span className={cn("h-1.5 w-1.5 rounded-full", info.dotCls)} />
                         {info.label}
                       </span>
+                      {/* Intent pill: passive indicator showing whether the
+                          worker is supposed to be polling this source. The
+                          state badge above shows data-flow status; this pill
+                          shows the operator's intent. Together they make it
+                          clear when a source is "Enabled but stale" (config
+                          ok, OPC server may be down) vs "Disabled" (operator
+                          turned it off, no data expected). */}
+                      <span
+                        className={cn(
+                          "text-[10px] uppercase tracking-wide font-medium border rounded px-1.5 py-0.5",
+                          src.is_enabled
+                            ? "border-emerald-200 text-emerald-700 bg-emerald-50"
+                            : "border-border text-muted-foreground bg-secondary",
+                        )}
+                        title={
+                          src.is_enabled
+                            ? "Worker is subscribed to this source. Click Edit to disable."
+                            : "Worker is not polling this source. Click Edit to enable."
+                        }
+                      >
+                        {src.is_enabled ? "Enabled" : "Disabled"}
+                      </span>
                       <span className="text-sm font-medium">{src.name}</span>
                       <span className="text-[10px] text-muted-foreground">
                         {src.mapping_count} {src.mapping_count === 1 ? "tag" : "tags"}
@@ -293,6 +313,7 @@ export default function OpcSources() {
                     <button
                       type="button"
                       onClick={() => setMappingsTarget(src)}
+                      data-testid={`opc-source-mappings-btn-${src.id}`}
                       className="text-xs px-2 py-1 rounded border border-border
                                  hover:bg-secondary inline-flex items-center gap-1"
                       title="View / edit mappings"
@@ -305,24 +326,10 @@ export default function OpcSources() {
                       onClick={() => setEditTarget(src)}
                       className="h-7 w-7 inline-flex items-center justify-center rounded
                                  text-muted-foreground hover:bg-secondary hover:text-foreground"
-                      title="Edit source"
+                      title="Edit source (including enable/disable)"
                       aria-label="Edit source"
                     >
                       <Pencil className="h-3 w-3" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => toggleMutation.mutate(src)}
-                      disabled={toggleMutation.isPending}
-                      className={cn(
-                        "h-7 w-7 inline-flex items-center justify-center rounded",
-                        "hover:bg-secondary disabled:opacity-30",
-                        src.is_enabled ? "text-amber-700" : "text-emerald-700",
-                      )}
-                      title={src.is_enabled ? "Disable source" : "Enable source"}
-                      aria-label={src.is_enabled ? "Disable source" : "Enable source"}
-                    >
-                      <Power className="h-3 w-3" />
                     </button>
                     <button
                       type="button"
@@ -343,9 +350,8 @@ export default function OpcSources() {
       )}
 
       <p className="text-[10px] text-muted-foreground italic px-1">
-        Changes to sources or mappings require a worker restart to take effect:{" "}
-        <code className="font-mono">docker compose restart opc_worker</code>.
-        Hot-reload is on the roadmap (Phase OPC-web.2.1).
+        Changes to sources and mappings are picked up automatically by the
+        OPC worker within ~30 seconds — no restart needed.
       </p>
 
       {/* Modals + drawers */}

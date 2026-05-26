@@ -39,7 +39,11 @@
       "Bash(command -v montage)",
       "Bash(python -c \"import PIL; print\\('PIL', PIL.__version__\\)\")",
       "Bash(python -)",
-      "Bash(git grep *)"
+      "Bash(git grep *)",
+      "Bash(awk '{print $5, $9}')",
+      "Bash(awk '/^## \\(God Nodes|Surprising Connections|Suggested Questions\\)/{p=1} /^## /{if\\(p && $0 !~ /God Nodes|Surprising Connections|Suggested Questions/ && seen\\){p=0}} p{print; seen=1}' graphify-out/GRAPH_REPORT.md)",
+      "Bash(awk -F'\\\\t' '$4==\"secret\"{print \"  SECRET:\", $1, $2}')",
+      "Bash(awk -F'\\\\t' '$4==\"secret\"')"
     ]
   }
 }
