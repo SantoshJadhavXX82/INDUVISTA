@@ -53,9 +53,8 @@ graphify-out/
 
 test-results-ui/
 
-# Patch-script backups
-*.bak_*
-*.bak
+# Patch-script backups (any .bak variant: .bak, .bak2, .bak_audit, .bak5v2, ...)
+*.bak*
 
 # Phase scratch / backup snapshots (never commit — recoverable from history)
 _backup/
@@ -65,6 +64,7 @@ _phase*/
 
 # One-off dev scripts kept out of the repo root
 /*.ps1
+/apply_*.py
 fix-writable-stale.sql
 restart_UI_5174.txt
 

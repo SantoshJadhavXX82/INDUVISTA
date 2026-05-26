@@ -150,6 +150,7 @@ _LIVE_SELECT = """
     LEFT JOIN named_sets ns ON ns.id = t.named_set_id
     LEFT JOIN latest_tag_values lv ON lv.tag_id = t.id
     WHERE t.enabled = true
+      AND t.deleted_at IS NULL
 """
 
 
@@ -197,7 +198,7 @@ def list_live_groups(db: Annotated[Session, Depends(get_session)]):
         FROM groups g
         JOIN tag_group_memberships m ON m.group_id = g.id
         JOIN tags t ON t.id = m.tag_id
-        WHERE g.enabled = true AND t.enabled = true
+        WHERE g.enabled = true AND t.enabled = true AND t.deleted_at IS NULL
         ORDER BY g.name
     """)).scalars().all()
     return list(rows)

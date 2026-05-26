@@ -133,6 +133,7 @@ def load_polling_config() -> list[dict]:
                 FROM devices d
                 JOIN channels c ON c.id = d.channel_id
                 WHERE d.enabled = TRUE
+                  AND d.deleted_at IS NULL
                 ORDER BY d.id
             """)).mappings()
         ]
@@ -163,6 +164,7 @@ def load_polling_config() -> list[dict]:
                 FROM tags
                 WHERE device_id = :did
                   AND enabled = TRUE
+                  AND deleted_at IS NULL
                   AND register_block_id IS NOT NULL
                 ORDER BY register_block_id, address
             """), {"did": d["id"]}).mappings():

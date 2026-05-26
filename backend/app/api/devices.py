@@ -184,10 +184,12 @@ def list_devices(
     db: Annotated[Session, Depends(get_session)],
     channel_id: Annotated[int | None, Query(description="Filter by channel id")] = None,
 ):
-    sql = _DEVICE_SELECT
+    # Stage 6 (Phase OPC-web.2.2.b): hide soft-deleted devices from LIST.
+    # Admin paths (GET/PATCH/DELETE /devices/{id}) bypass this filter.
+    sql = _DEVICE_SELECT + " WHERE d.deleted_at IS NULL"
     params: dict = {}
     if channel_id is not None:
-        sql += " WHERE d.channel_id = :channel_id"
+        sql += " AND d.channel_id = :channel_id"
         params["channel_id"] = channel_id
     sql += " ORDER BY d.id"
     rows = db.execute(text(sql), params).mappings().all()

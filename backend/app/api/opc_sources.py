@@ -498,8 +498,12 @@ def delete_opc_source(
     #    definition input, etc.), the FK there decides whether to
     #    block or cascade — we propagate any error to the caller.
     if tag_ids:
+        # Soft-delete: UPDATE instead of DELETE. Cascade-DELETE on
+        # tag_values (33GB hypertable) was the cause of pool
+        # exhaustion in Phase OPC-web.2.2.b. See migration 0053.
         db.execute(
-            text("DELETE FROM tags WHERE id = ANY(:ids)"),
+            text("UPDATE tags SET deleted_at = NOW() "
+                 "WHERE id = ANY(:ids) AND deleted_at IS NULL"),
             {"ids": tag_ids},
         )
 
@@ -515,17 +519,29 @@ def delete_opc_source(
         {"sid": source_id},
     )
 
-    # 4. device — now free of tag references and opc_sources reference.
+    # 4. device — soft-delete. Hard DELETE here cascades to all tags
+    #    via tags.device_id FK, which in turn cascades to tag_values
+    #    (hypertable, 33GB). See migration 0054 for why this is
+    #    soft-delete now. The synthetic device is single-use; rows
+    #    pointing at it (already-soft-deleted tags) stay intact.
     db.execute(
-        text("DELETE FROM devices WHERE id = :did"),
+        text("UPDATE devices SET deleted_at = NOW() "
+             "WHERE id = :did AND deleted_at IS NULL"),
         {"did": device_id},
     )
 
-    # 5. channel — now free of device references.
-    db.execute(
-        text("DELETE FROM channels WHERE id = :cid"),
-        {"cid": channel_id},
-    )
+    # 5. channel — left as hard DELETE; the channels table has no
+    #    hypertable cascades and no other devices point at it (the
+    #    synthetic channel is 1:1 with its source). Safe to DELETE
+    #    physically. If this becomes a problem in future, add
+    #    deleted_at to channels too.
+    # 5. channel - LEFT IN PLACE (was hard-delete, now obsolete).
+    #    Stage 3 made devices a soft-delete. The synthetic device row
+    #    still references this channel via channel_id FK, so DELETE
+    #    here would raise ForeignKeyViolation. The orphan channel row
+    #    is 1 row, no operational cost. A future cleanup migration can
+    #    sweep orphans (channels with no active device) if needed.
+    _ = channel_id  # silence unused-variable lint; kept for future cleanup
 
     db.commit()
 
@@ -679,9 +695,13 @@ def delete_mapping(
             f"mapping id={mapping_id} on source id={source_id} not found",
         )
 
-    # Delete the tag. The mapping row goes with it via ON DELETE CASCADE
-    # on opc_tag_mappings.tag_id.
-    db.execute(text("DELETE FROM tags WHERE id = :id"),
+    # Phase OPC-web.2.2.b: soft-delete the tag. Since tags is no
+    # longer being DELETE'd, the opc_tag_mappings.tag_id CASCADE
+    # FK won't fire — we explicitly remove the mapping row first.
+    db.execute(text("DELETE FROM opc_tag_mappings WHERE id = :mid"),
+               {"mid": mapping_id})
+    db.execute(text("UPDATE tags SET deleted_at = NOW() "
+                    "WHERE id = :id AND deleted_at IS NULL"),
                {"id": row["tag_id"]})
 
     # Phase OPC-web.2.1 — bump the source's updated_at so the worker's
