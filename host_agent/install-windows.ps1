@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Install the InduVista host-stats agent as a Windows Scheduled Task.
 
@@ -80,8 +80,18 @@ Write-Host "Ensuring pip is available..."
 # installs without "pip" checked, this is the one-liner that fixes it.
 & $python -m ensurepip --upgrade --default-pip 2>&1 | Out-Null
 
-Write-Host "Installing dependencies (user scope -- no admin required)..."
-& $python -m pip install --user --upgrade -r $ReqsFile
+# venv-aware pip install. `pip install --user` is ILLEGAL inside a
+# virtualenv (user site-packages aren't visible there). Detect a venv via
+# sys.prefix != sys.base_prefix; install without --user when in one,
+# otherwise keep --user for a no-admin system install.
+$inVenv = (& $python -c "import sys; print(1 if sys.prefix != sys.base_prefix else 0)").Trim()
+if ($inVenv -eq "1") {
+    Write-Host "Detected a virtualenv -- installing into it (no --user)..."
+    & $python -m pip install --upgrade -r $ReqsFile
+} else {
+    Write-Host "Installing dependencies (user scope -- no admin required)..."
+    & $python -m pip install --user --upgrade -r $ReqsFile
+}
 if ($LASTEXITCODE -ne 0) {
     throw "pip install failed. Check the output above."
 }

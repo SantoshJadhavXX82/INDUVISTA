@@ -46,7 +46,10 @@ _PUBLIC_EXACT = {"/", "/health", "/docs", "/redoc", "/openapi.json"}
 _PUBLIC_PREFIXES = ("/docs", "/redoc")  # swagger assets
 
 # Login is public (it mints the token).
-_PUBLIC_POST = {"/api/auth/login"}
+# host-stats push: the host agent POSTs real metrics with no user token
+# (trusted local push, same category as /api/ingest). Exempt it so RBAC
+# doesn't 401 the agent and trap the UI in container fallback.
+_PUBLIC_POST = {"/api/auth/login", "/api/diagnostics/host-stats"}
 
 # Routes authenticated by API key (their own dependency); skip user RBAC.
 _APIKEY_PREFIXES = ("/api/ingest",)

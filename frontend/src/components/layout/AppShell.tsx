@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { Activity, ChevronDown, KeyRound, LogOut } from "lucide-react";
+import { Activity, Bell, ChevronDown, KeyRound, LogOut } from "lucide-react";
 import { useNavigate } from "react-router";
 import { type HealthResponse } from "@/types/api";
+import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import Nav from "@/components/layout/Nav";
 import MobileTabBar from "@/components/layout/MobileTabBar";
@@ -10,6 +11,7 @@ import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useIsMobile } from "@/lib/use-media-query";
 import { useAuth } from "@/lib/auth";
 import { useTimeFormat } from "@/lib/timeFormat";
+import { currentShift, isoWeek, formatUptimeShort, type ShiftsConfig } from "@/lib/shifts";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   // Light heartbeat at the app shell — keeps the node/version visible and
@@ -70,6 +72,10 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
         <Nav />
+        {/* Live clock pinned to the bottom of the sidebar (mt-auto pushes it
+            down). Control-room convention: a persistent wall-clock always in
+            the same spot, out of the way of the main content. */}
+        <SidebarClock />
       </aside>
       )}
 
@@ -81,9 +87,6 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             borderBottom: "0.5px solid var(--separator)",
           }}
         >
-          {/* Live clock — left of the diagnostics cluster, primary text weight. */}
-          <Clock />
-
           {/* Diagnostics cluster — de-emphasized (muted, smaller). Status only. */}
           <div className="hidden sm:flex items-center gap-2" style={{ color: "var(--text-secondary)" }}>
             {health.isError ? (
@@ -111,7 +114,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
                     `Migration: ${health.data.migration_version ?? "—"}`
                   }
                 >
-                  {health.data.db_latency_ms.toFixed(1)} ms
+                  db {health.data.db_latency_ms.toFixed(1)} ms
                 </span>
               </>
             ) : (
@@ -124,6 +127,9 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             className="hidden sm:block"
             style={{ width: 1, height: 20, backgroundColor: "var(--separator)" }}
           />
+
+          {/* Notification bell — live active-alarm count; click → Alarms page. */}
+          <NotificationBell />
 
           <ThemeToggle />
 
@@ -144,29 +150,128 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Live wall-clock, honoring the app's 24h/12h time-format preference. */
-function Clock() {
-  const { formatTimeShort, formatDate } = useTimeFormat();
+/**
+ * Live wall-clock + shift + uptime, pinned to the bottom of the sidebar.
+ *   20:03:12                         (large, with seconds, 24h/12h pref)
+ *   Thursday, 28-May-2026 (WK 22)    (day, date, ISO week)
+ *   Shift B (Evening) · up 14d 6h    (current shift + system uptime)
+ * Shift is computed client-side from the DB-backed config
+ * (GET /api/settings/shifts). Uptime comes from /health.
+ */
+function SidebarClock() {
+  const { is24h } = useTimeFormat();
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
     const id = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(id);
   }, []);
+
+  const shiftCfg = useQuery({
+    queryKey: ["settings-shifts"],
+    queryFn: () => api.get<ShiftsConfig>("/settings/shifts").catch(() => undefined),
+    refetchInterval: 300_000,
+    staleTime: 300_000,
+    retry: false,
+  });
+
+  const health = useQuery<HealthResponse>({
+    queryKey: ["health"],
+    queryFn: async () => {
+      const res = await fetch("/health");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.json()) as HealthResponse;
+    },
+    refetchInterval: 10_000,
+    retry: false,
+  });
+
+  const shift = currentShift(shiftCfg.data, now);
+
+  const timeStr = now.toLocaleTimeString(undefined, {
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: !is24h,
+  });
+  const weekday = now.toLocaleDateString(undefined, { weekday: "long" });
+  const dd = String(now.getDate()).padStart(2, "0");
+  const mon = now.toLocaleDateString(undefined, { month: "short" });
+  const dateStr = `${weekday}, ${dd}-${mon}-${now.getFullYear()}`;
+  const wk = isoWeek(now);
+
   return (
-    <div className="hidden md:flex flex-col items-end leading-tight mr-1">
+    <div
+      className="mt-auto px-4 py-3 flex flex-col items-center text-center leading-tight"
+      style={{ borderTop: "0.5px solid var(--separator)" }}
+    >
       <span
-        className="text-sm font-medium tabular-nums"
-        style={{ color: "var(--text-primary)" }}
+        className="text-2xl font-semibold tabular-nums"
+        style={{ color: "var(--text-primary)", letterSpacing: "-0.02em" }}
       >
-        {formatTimeShort(now)}
+        {timeStr}
       </span>
-      <span
-        className="text-[10px] tabular-nums"
-        style={{ color: "var(--text-secondary)" }}
-      >
-        {formatDate(now)}
+      <span className="text-[11px] mt-1" style={{ color: "var(--text-secondary)" }}>
+        {dateStr} (WK {wk})
+      </span>
+      <span className="text-[11px] mt-0.5" style={{ color: "var(--text-secondary)" }}>
+        {shift ? (
+          <span style={{ color: "var(--text-primary)", fontWeight: 500 }}>
+            Shift {shift.code} ({shift.label})
+          </span>
+        ) : (
+          <span>No shift</span>
+        )}
+        {health.data && <>{" · up "}{formatUptimeShort(health.data.uptime_sec)}</>}
       </span>
     </div>
+  );
+}
+
+/**
+ * Notification bell with a live active-alarm count badge. Polls
+ * /api/alarms/active (same source the Alarms page uses) every 10s and
+ * shows the count as a red badge. Click navigates to the Alarms page.
+ * Distinct from the dashboard's alarm cards — this is the always-present
+ * cross-page signal.
+ */
+function NotificationBell() {
+  const navigate = useNavigate();
+  // Same queryKey + queryFn as Nav's alarm badge so TanStack Query dedupes
+  // them into ONE shared poll (no duplicate /alarms/active traffic).
+  const active = useQuery({
+    queryKey: ["alarms-active"],
+    queryFn: () => api.get<unknown[]>("/alarms/active").catch(() => []),
+    refetchInterval: 5_000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+    retry: false,
+  });
+  const count = Array.isArray(active.data) ? active.data.length : 0;
+
+  return (
+    <button
+      onClick={() => navigate("/alarms")}
+      className="relative flex items-center justify-center rounded-full transition-colors hover:opacity-80"
+      style={{ width: 32, height: 32 }}
+      title={count > 0 ? `${count} active alarm${count === 1 ? "" : "s"}` : "No active alarms"}
+      aria-label="Alarms"
+    >
+      <Bell className="h-5 w-5" style={{ color: "var(--text-secondary)" }} />
+      {count > 0 && (
+        <span
+          className="absolute flex items-center justify-center rounded-full text-white font-semibold"
+          style={{
+            top: 0,
+            right: 0,
+            minWidth: 16,
+            height: 16,
+            padding: "0 4px",
+            fontSize: 10,
+            lineHeight: 1,
+            backgroundColor: "var(--ios-red)",
+          }}
+        >
+          {count > 99 ? "99+" : count}
+        </span>
+      )}
+    </button>
   );
 }
 
