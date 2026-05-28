@@ -195,25 +195,49 @@ def reset_password(
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
-def disable_user(
+def disable_or_delete_user(
     user_id: int,
     admin: Annotated[CurrentUser, Depends(require_role(Role.ADMIN))],
     db: Annotated[Session, Depends(get_session)],
+    hard: bool = False,
 ):
-    # Soft-disable, never hard-delete (audit log references actors by id/name).
+    """Soft-disable a user (default) or permanently delete with ?hard=true.
+
+    hard delete: removes the row entirely. Safe — audit_log stores actor as a
+    username string (not a FK), so history is preserved, and no FK constraints
+    reference users. Use for purging junk/test accounts.
+    """
     target = db.execute(
-        text("SELECT role, is_enabled FROM users WHERE id = :id"), {"id": user_id}
+        text("SELECT username, role, is_enabled FROM users WHERE id = :id"),
+        {"id": user_id},
     ).mappings().first()
     if target is None:
         raise HTTPException(404, "User not found.")
+
+    # Guard: never delete/disable yourself (avoids self-lockout).
+    if target["username"] == admin.username:
+        raise HTTPException(
+            400, "You cannot delete or disable your own account while signed in."
+        )
+
+    # Guard: never remove the last enabled admin.
     if target["role"] == Role.ADMIN.value and target["is_enabled"]:
         admin_count = db.execute(
             text("SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_enabled = TRUE")
         ).scalar()
         if admin_count is not None and admin_count <= 1:
-            raise HTTPException(400, "Cannot disable the last enabled admin.")
-    db.execute(
-        text("UPDATE users SET is_enabled = FALSE, updated_at = NOW() WHERE id = :id"),
-        {"id": user_id},
-    )
+            raise HTTPException(
+                400,
+                "Cannot remove the last enabled admin." if hard
+                else "Cannot disable the last enabled admin.",
+            )
+
+    if hard:
+        # Permanent removal (audit history preserved via username string).
+        db.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+    else:
+        db.execute(
+            text("UPDATE users SET is_enabled = FALSE, updated_at = NOW() WHERE id = :id"),
+            {"id": user_id},
+        )
     db.commit()

@@ -13,7 +13,7 @@
  */
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { UserPlus, KeyRound, Ban, CheckCircle2, X } from "lucide-react";
+import { UserPlus, KeyRound, Ban, CheckCircle2, Trash2, AlertTriangle, HelpCircle, ChevronDown, ChevronUp, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -48,7 +48,9 @@ function roleBadgeVariant(role: string): "default" | "outline" | "success" | "wa
 export default function Users() {
   const qc = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
+  const [showRoles, setShowRoles] = useState(false);
   const [resetFor, setResetFor] = useState<User | null>(null);
+  const [deleteFor, setDeleteFor] = useState<User | null>(null);
   const [banner, setBanner] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   function flash(kind: "ok" | "err", text: string) {
@@ -77,6 +79,14 @@ export default function Users() {
     onError: (e: ApiError) => flash("err", e.detail),
   });
 
+  const deleteUser = useMutation({
+    // ?hard=true permanently removes the row (audit history is preserved
+    // because the audit log stores the username string, not a FK).
+    mutationFn: (id: number) => api.delete(`/admin/users/${id}?hard=true`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-users"] }); flash("ok", "User permanently deleted."); setDeleteFor(null); },
+    onError: (e: ApiError) => { flash("err", e.detail); setDeleteFor(null); },
+  });
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -86,9 +96,15 @@ export default function Users() {
             Manage accounts, roles, and access. Admin only.
           </p>
         </div>
+        <div className="flex items-center gap-2">
+        <Button variant="outline" onClick={() => setShowRoles((s) => !s)} className="gap-2">
+          <HelpCircle className="h-4 w-4" /> Role reference
+          {showRoles ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+        </Button>
         <Button onClick={() => setShowCreate(true)} className="gap-2">
           <UserPlus className="h-4 w-4" /> Add user
         </Button>
+        </div>
       </div>
 
       {banner && (
@@ -104,9 +120,11 @@ export default function Users() {
         </div>
       )}
 
+      {showRoles && <RoleReferenceCard />}
+
       <Card>
         <CardContent className="pt-6">
-          {usersQ.isLoading && <p className="text-sm" style={{ color: "var(--text-secondary)" }}>Loading…</p>}
+      {usersQ.isLoading && <p className="text-sm" style={{ color: "var(--text-secondary)" }}>Loading…</p>}
           {usersQ.isError && <p className="text-sm" style={{ color: "var(--ios-red)" }}>Failed to load users.</p>}
           {usersQ.data && (
             <Table>
@@ -172,6 +190,9 @@ export default function Users() {
                             <CheckCircle2 className="h-4 w-4" />
                           </Button>
                         )}
+                        <Button variant="ghost" size="sm" onClick={() => setDeleteFor(u)} title="Delete permanently" className="h-7 px-2" style={{ color: "var(--ios-red)" }}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -195,6 +216,14 @@ export default function Users() {
           onClose={() => setResetFor(null)}
           onDone={() => { setResetFor(null); flash("ok", "Password reset; user must change it on next login."); }}
           onError={(msg) => flash("err", msg)}
+        />
+      )}
+      {deleteFor && (
+        <DeleteUserModal
+          user={deleteFor}
+          busy={deleteUser.isPending}
+          onClose={() => setDeleteFor(null)}
+          onConfirm={() => deleteUser.mutate(deleteFor.id)}
         />
       )}
     </div>
@@ -336,5 +365,113 @@ function ResetPasswordModal({ user, onClose, onDone, onError }: { user: User; on
         </div>
       </form>
     </ModalShell>
+  );
+}
+
+function DeleteUserModal({ user, busy, onClose, onConfirm }: { user: User; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+  const [typed, setTyped] = useState("");
+  const confirmed = typed === user.username;
+  return (
+    <ModalShell title="Delete user permanently" onClose={onClose}>
+      <div className="space-y-4">
+        <div className="flex items-start gap-3 rounded-lg px-3 py-3" style={{ backgroundColor: "rgba(255,59,48,0.08)" }}>
+          <AlertTriangle className="h-5 w-5 shrink-0" style={{ color: "var(--ios-red)" }} />
+          <p className="text-sm" style={{ color: "var(--text-primary)" }}>
+            This permanently removes <strong>{user.username}</strong>. This cannot be undone.
+            Their past actions remain in the audit log. To disable instead of delete,
+            use the block button — that keeps the account and can be re-enabled later.
+          </p>
+        </div>
+        <div>
+          <Label htmlFor="confirm-del">Type the username to confirm</Label>
+          <Input id="confirm-del" value={typed} onChange={(e) => setTyped(e.target.value)}
+            placeholder={user.username} autoFocus autoComplete="off" />
+        </div>
+        <div className="flex gap-2">
+          <Button onClick={onConfirm} disabled={!confirmed || busy}
+            style={{ backgroundColor: confirmed ? "var(--ios-red)" : undefined }}>
+            {busy ? "Deleting…" : "Delete permanently"}
+          </Button>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Role reference — the live RBAC policy as a capability matrix. Roles are a
+// privilege ladder: each inherits everything below it (viewer < operator <
+// engineer < admin). This mirrors backend/app/auth/rbac_middleware.py.
+// ---------------------------------------------------------------------------
+const ROLE_CAPS: { area: string; v: boolean; o: boolean; e: boolean; a: boolean }[] = [
+  { area: "Log in / view own identity", v: true, o: true, e: true, a: true },
+  { area: "Change own password", v: true, o: true, e: true, a: true },
+  { area: "View dashboards, trends, live data", v: true, o: true, e: true, a: true },
+  { area: "View tags, devices, config (read)", v: true, o: true, e: true, a: true },
+  { area: "View diagnostics, health, gaps", v: true, o: true, e: true, a: true },
+  { area: "View alarms, audit log", v: true, o: true, e: true, a: true },
+  { area: "View settings, shifts", v: true, o: true, e: true, a: true },
+  { area: "Acknowledge alarms", v: false, o: true, e: true, a: true },
+  { area: "Write command / setpoint tags (Modbus)", v: false, o: true, e: true, a: true },
+  { area: "Create / edit / delete devices", v: false, o: false, e: true, a: true },
+  { area: "Create / edit tags, register blocks", v: false, o: false, e: true, a: true },
+  { area: "Configure channels / networks", v: false, o: false, e: true, a: true },
+  { area: "Configure alarm rules, calc blocks", v: false, o: false, e: true, a: true },
+  { area: "Configure OPC sources", v: false, o: false, e: true, a: true },
+  { area: "Edit settings, shifts, units, groups", v: false, o: false, e: true, a: true },
+  { area: "Manage users (create / role / disable / delete)", v: false, o: false, e: false, a: true },
+  { area: "Manage API keys", v: false, o: false, e: false, a: true },
+];
+
+function Cap({ on }: { on: boolean }) {
+  return on
+    ? <CheckCircle2 className="h-4 w-4 mx-auto" style={{ color: "var(--ios-green, #34c759)" }} />
+    : <span className="block text-center" style={{ color: "var(--text-tertiary, #b0b0b0)" }}>—</span>;
+}
+
+function RoleReferenceCard() {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Role reference</CardTitle>
+        <CardDescription>
+          What each role can do. Roles are a privilege ladder — each inherits everything
+          below it: <strong>viewer</strong> &lt; <strong>operator</strong> &lt;{" "}
+          <strong>engineer</strong> &lt; <strong>admin</strong>. The backend enforces this
+          on every request; the UI mirrors it.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Capability</TableHead>
+              <TableHead className="text-center w-20">Viewer</TableHead>
+              <TableHead className="text-center w-20">Operator</TableHead>
+              <TableHead className="text-center w-20">Engineer</TableHead>
+              <TableHead className="text-center w-20">Admin</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {ROLE_CAPS.map((c) => (
+              <TableRow key={c.area}>
+                <TableCell className="text-sm">{c.area}</TableCell>
+                <TableCell><Cap on={c.v} /></TableCell>
+                <TableCell><Cap on={c.o} /></TableCell>
+                <TableCell><Cap on={c.e} /></TableCell>
+                <TableCell><Cap on={c.a} /></TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+        <div className="mt-4 grid gap-1 text-xs" style={{ color: "var(--text-secondary)" }}>
+          <div><strong>Viewer</strong> — read-only observer: dashboards, trends, alarms, config (no changes).</div>
+          <div><strong>Operator</strong> — viewer + runs the plant: acknowledge alarms, write setpoints / commands.</div>
+          <div><strong>Engineer</strong> — operator + configures the system: devices, tags, alarms, OPC, settings.</div>
+          <div><strong>Admin</strong> — engineer + manages users and API keys.</div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
