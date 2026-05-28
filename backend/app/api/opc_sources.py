@@ -87,6 +87,12 @@ class OpcSourceCreate(BaseModel):
     reconnect_min_sec: float = Field(1.0, gt=0)
     reconnect_max_sec: float = Field(60.0, gt=0)
     is_enabled: bool = True
+    # Phase OPC-web.2.2 - opt-in to using DataValue.SourceTimestamp from
+    # the OPC server. Default FALSE because the AGG SoftBus simulator
+    # (and other untrusted servers) deliver wall-clock-as-UTC timestamps
+    # that drift by the local IST offset. Set TRUE only for production
+    # servers with verified clock sync. See migration 0055.
+    trust_server_timestamp: bool = False
 
 
 class OpcSourceUpdate(BaseModel):
@@ -99,6 +105,7 @@ class OpcSourceUpdate(BaseModel):
     reconnect_min_sec: float | None = Field(None, gt=0)
     reconnect_max_sec: float | None = Field(None, gt=0)
     is_enabled: bool | None = None
+    trust_server_timestamp: bool | None = None
 
 
 class OpcSourceResponse(BaseModel):
@@ -124,6 +131,15 @@ class OpcSourceResponse(BaseModel):
     # "● Live / ● Stale / ● Idle" state without a separate roundtrip.
     # NULL means no samples have ever landed for this source.
     last_sample_at: datetime | None = None
+    # Phase OPC-web.2.2 trust_server_timestamp API - per-source choice
+    # of timestamp source. See migration 0055 + opc_supervisor.py.
+    trust_server_timestamp: bool = False
+    # Phase OPC-web.2.3 server clock drift API - worker-managed
+    # telemetry. drift_sec is server_time - worker_time at the last
+    # check; check_at is when. UI uses these to flag suspect server
+    # clocks before the operator enables trust_server_timestamp.
+    last_server_clock_drift_sec: float | None = None
+    last_server_clock_check_at: datetime | None = None
 
 
 class OpcMappingCreate(BaseModel):
@@ -257,7 +273,8 @@ def _load_source_response(db: Session, source_id: int) -> OpcSourceResponse:
         SELECT s.id, s.name, s.description, s.endpoint, s.security_policy,
                s.username, s.publishing_interval_ms, s.reconnect_min_sec,
                s.reconnect_max_sec, s.is_enabled, s.channel_id, s.device_id,
-               s.created_at, s.updated_at,
+               s.created_at, s.updated_at, s.trust_server_timestamp,
+               s.last_server_clock_drift_sec, s.last_server_clock_check_at,
                COALESCE((SELECT COUNT(*) FROM opc_tag_mappings m
                          WHERE m.opc_source_id = s.id), 0) AS mapping_count,
                (SELECT MAX(ltv.time)
@@ -350,11 +367,12 @@ def create_opc_source(
             name, description, endpoint, security_policy,
             username, password, publishing_interval_ms,
             reconnect_min_sec, reconnect_max_sec, is_enabled,
-            channel_id, device_id, created_at, updated_at
+            channel_id, device_id, trust_server_timestamp,
+            created_at, updated_at
         ) VALUES (
             :name, :description, :endpoint, :security_policy,
             :username, :password, :pim, :rmin, :rmax, :enabled,
-            :ch, :dev, now(), now()
+            :ch, :dev, :trust_ts, now(), now()
         )
         RETURNING id
     """), {
@@ -370,6 +388,7 @@ def create_opc_source(
         "enabled": body.is_enabled,
         "ch": channel_id,
         "dev": device_id,
+        "trust_ts": body.trust_server_timestamp,
     }).scalar()
 
     db.commit()
@@ -387,7 +406,8 @@ def list_opc_sources(
         SELECT s.id, s.name, s.description, s.endpoint, s.security_policy,
                s.username, s.publishing_interval_ms, s.reconnect_min_sec,
                s.reconnect_max_sec, s.is_enabled, s.channel_id, s.device_id,
-               s.created_at, s.updated_at,
+               s.created_at, s.updated_at, s.trust_server_timestamp,
+               s.last_server_clock_drift_sec, s.last_server_clock_check_at,
                COALESCE((SELECT COUNT(*) FROM opc_tag_mappings m
                          WHERE m.opc_source_id = s.id), 0) AS mapping_count,
                (SELECT MAX(ltv.time)

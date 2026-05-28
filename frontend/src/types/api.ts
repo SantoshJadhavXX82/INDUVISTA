@@ -586,6 +586,19 @@ export type OpcSourceResponse = {
    *  synthetic device. NULL = no samples ever landed. The UI derives
    *  Live / Stale / Idle from how recent this is. */
   last_sample_at: string | null;
+  // Phase OPC-web.2.2 trust_server_timestamp - when true, the worker
+  // uses DataValue.SourceTimestamp; when false (default) it uses
+  // ingest-time UTC. Set true only for production servers with
+  // verified clock sync. See migration 0055.
+  trust_server_timestamp: boolean;
+  // Phase OPC-web.2.3 server clock drift - worker-measured offset
+  // between the OPC server's clock and the worker's clock at the
+  // last subscription activation. The modal uses these to warn the
+  // operator before they enable trust_server_timestamp.
+  // drift_sec: positive means server is ahead of worker
+  // check_at: when drift was measured; null if never
+  last_server_clock_drift_sec: number | null;
+  last_server_clock_check_at: string | null;
 };
 
 export type OpcSourceCreate = {
@@ -599,6 +612,7 @@ export type OpcSourceCreate = {
   reconnect_min_sec?: number;
   reconnect_max_sec?: number;
   is_enabled?: boolean;
+  trust_server_timestamp?: boolean;
 };
 
 export type OpcSourceUpdate = Partial<OpcSourceCreate>;

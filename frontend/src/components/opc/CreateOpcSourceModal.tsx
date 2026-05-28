@@ -64,6 +64,11 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
   const [reconnectMinSec, setReconnectMinSec] = useState(1);
   const [reconnectMaxSec, setReconnectMaxSec] = useState(60);
   const [isEnabled, setIsEnabled] = useState(true);
+  // Phase OPC-web.2.2 trust_server_timestamp — opt-in for production
+  // OPC servers with verified clock sync. Default false (safe) so
+  // simulators like AGG SoftBus don't poison tag_values.time with
+  // wall-clock-as-UTC values.
+  const [trustServerTimestamp, setTrustServerTimestamp] = useState(false);
 
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -81,6 +86,7 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
       setReconnectMinSec(existingSource.reconnect_min_sec);
       setReconnectMaxSec(existingSource.reconnect_max_sec);
       setIsEnabled(existingSource.is_enabled);
+      setTrustServerTimestamp(existingSource.trust_server_timestamp);
     } else {
       setName("");
       setDescription("");
@@ -92,6 +98,7 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
       setReconnectMinSec(1);
       setReconnectMaxSec(60);
       setIsEnabled(true);
+      setTrustServerTimestamp(false);
     }
     setSubmitError(null);
     setShowPw(false);
@@ -130,6 +137,8 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
         if (reconnectMaxSec !== existingSource.reconnect_max_sec)
           patch.reconnect_max_sec = reconnectMaxSec;
         if (isEnabled !== existingSource.is_enabled) patch.is_enabled = isEnabled;
+        if (trustServerTimestamp !== existingSource.trust_server_timestamp)
+          patch.trust_server_timestamp = trustServerTimestamp;
         // If nothing changed, the backend returns 400 — short-circuit
         // here for a friendlier UX message.
         if (Object.keys(patch).length === 0) {
@@ -151,6 +160,7 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
           reconnect_min_sec: reconnectMinSec,
           reconnect_max_sec: reconnectMaxSec,
           is_enabled: isEnabled,
+          trust_server_timestamp: trustServerTimestamp,
         };
         return api.post<OpcSourceResponse>("/opc-sources", body);
       }
@@ -399,6 +409,31 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
                 Max must be ≥ min.
               </p>
             )}
+
+            {/* Phase OPC-web.2.2 — per-source trust toggle. Default
+                off; enabling sends DataValue.SourceTimestamp instead
+                of ingest-time UTC. */}
+            <div className="mt-3 pt-3 border-t border-border">
+              <label className="text-xs flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={trustServerTimestamp}
+                  onChange={(e) => setTrustServerTimestamp(e.target.checked)}
+                  className="rounded mt-0.5"
+                />
+                <span>
+                  Trust server timestamps
+                  <span className="block text-[10px] text-muted-foreground mt-0.5 leading-relaxed">
+                    Use DataValue.SourceTimestamp from the OPC server
+                    instead of ingest-time UTC. Enable only for production
+                    servers with verified clock sync. Leave unchecked for
+                    simulators (AGG SoftBus, open62541 demos) — they
+                    typically deliver local-wall-clock-as-UTC values
+                    which contaminate the historian.
+                  </span>
+                </span>
+              </label>
+            </div>
           </div>
 
           {submitError && (
