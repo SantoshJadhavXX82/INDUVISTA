@@ -1,40 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { Activity } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Activity, ChevronDown, KeyRound, LogOut } from "lucide-react";
+import { useNavigate } from "react-router";
 import { type HealthResponse } from "@/types/api";
 import { Badge } from "@/components/ui/badge";
 import Nav from "@/components/layout/Nav";
 import MobileTabBar from "@/components/layout/MobileTabBar";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useIsMobile } from "@/lib/use-media-query";
-// Phase 21 - user menu
 import { useAuth } from "@/lib/auth";
-import { Button } from "@/components/ui/button";
-import { LogOut } from "lucide-react";
-
-function UserMenu() {
-  // Phase 21 - current user + logout. Hidden if somehow unauthenticated.
-  const { user, logout } = useAuth();
-  if (!user) return null;
-  return (
-    <div className="flex items-center gap-2">
-      <Badge variant="outline" className="font-mono text-xs">
-        {user.username} · {user.role}
-      </Badge>
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={logout}
-        title="Sign out"
-        className="h-7 px-2"
-      >
-        <LogOut className="h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
+import { useTimeFormat } from "@/lib/timeFormat";
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
-  // Light heartbeat at the app shell — keeps the role/version visible and
+  // Light heartbeat at the app shell — keeps the node/version visible and
   // tells the user whether the API is reachable at all. /health is not under
   // /api, so we bypass the api wrapper here.
   const health = useQuery({
@@ -63,28 +41,19 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       >
         <div className="px-4 py-4" style={{ borderBottom: "0.5px solid var(--separator)" }}>
           <div className="flex items-center gap-2.5">
-            {/* iOS-style brand mark: iOS-blue rounded square with a white
-                monitoring-pulse glyph. Inline SVG so it scales perfectly
-                and tints via CSS vars (will auto-adapt when dark mode is
-                turned on). Replaces the dark photographic /icon_induvista.png
-                which had no contrast against the white sidebar. */}
             <div
               className="shrink-0 flex items-center justify-center"
               style={{
                 width: 38,
                 height: 38,
                 backgroundColor: "var(--ios-blue)",
-                borderRadius: 9,    // ≈24% radius — iOS app icon proportion
+                borderRadius: 9,
                 boxShadow: "0 1px 2px rgba(0, 0, 0, 0.08)",
               }}
               aria-label="InduVista"
               role="img"
             >
-              <Activity
-                className="text-white"
-                style={{ width: 22, height: 22 }}
-                strokeWidth={2.5}
-              />
+              <Activity className="text-white" style={{ width: 22, height: 22 }} strokeWidth={2.5} />
             </div>
             <div>
               <div
@@ -112,48 +81,191 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             borderBottom: "0.5px solid var(--separator)",
           }}
         >
+          {/* Live clock — left of the diagnostics cluster, primary text weight. */}
+          <Clock />
+
+          {/* Diagnostics cluster — de-emphasized (muted, smaller). Status only. */}
+          <div className="hidden sm:flex items-center gap-2" style={{ color: "var(--text-secondary)" }}>
+            {health.isError ? (
+              <Badge variant="destructive" className="text-xs">backend offline</Badge>
+            ) : health.data ? (
+              <>
+                <Badge variant="outline" className="font-mono text-[11px] opacity-70">
+                  {health.data.app_env}
+                </Badge>
+                {/* HA node role — relabeled 'node:' so it doesn't collide
+                    with the USER role shown in the account menu. */}
+                <Badge
+                  variant={health.data.role === "active" ? "success" : "warning"}
+                  className="font-mono text-[11px]"
+                  title="High-availability node role (active / passive)"
+                >
+                  node: {health.data.role}
+                </Badge>
+                <span
+                  className="text-[11px] tabular-nums opacity-70"
+                  title={
+                    `Backend uptime: ${formatUptime(health.data.uptime_sec)}\n` +
+                    `Started: ${health.data.started_at}\n` +
+                    `Cycle count: ${health.data.cycle_count}\n` +
+                    `Migration: ${health.data.migration_version ?? "—"}`
+                  }
+                >
+                  {health.data.db_latency_ms.toFixed(1)} ms
+                </span>
+              </>
+            ) : (
+              <span className="text-xs">connecting…</span>
+            )}
+          </div>
+
+          {/* Divider */}
+          <span
+            className="hidden sm:block"
+            style={{ width: 1, height: 20, backgroundColor: "var(--separator)" }}
+          />
+
           <ThemeToggle />
+
+          {/* Account menu — primary, rightmost. Identity + actions. */}
           <UserMenu />
-          {health.isError ? (
-            <Badge variant="destructive">backend unreachable</Badge>
-          ) : health.data ? (
-            <>
-              <Badge variant="outline" className="font-mono text-xs">
-                {health.data.app_env}
-              </Badge>
-              <Badge
-                variant={health.data.role === "active" ? "success" : "warning"}
-                className="font-mono text-xs"
-              >
-                role: {health.data.role}
-              </Badge>
-              <span
-                className="text-xs tabular-nums"
-                style={{ color: "var(--text-secondary)" }}
-                title={
-                  `Backend uptime: ${formatUptime(health.data.uptime_sec)}\n` +
-                  `Started: ${health.data.started_at}\n` +
-                  `Cycle count: ${health.data.cycle_count}\n` +
-                  `Migration: ${health.data.migration_version ?? "—"}`
-                }
-              >
-                db {health.data.db_latency_ms.toFixed(1)} ms
-              </span>
-            </>
-          ) : (
-            <span className="text-xs" style={{ color: "var(--text-secondary)" }}>connecting…</span>
-          )}
         </header>
 
         <main
           className="flex-1 overflow-auto"
           style={{
             color: "var(--text-primary)",
-            padding: isMobile ? "12px 12px 80px" : "24px",   // bottom padding leaves room for the tab bar
+            padding: isMobile ? "12px 12px 80px" : "24px",
           }}
         >{children}</main>
       </div>
       {isMobile && <MobileTabBar />}
+    </div>
+  );
+}
+
+/** Live wall-clock, honoring the app's 24h/12h time-format preference. */
+function Clock() {
+  const { formatTimeShort, formatDate } = useTimeFormat();
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div className="hidden md:flex flex-col items-end leading-tight mr-1">
+      <span
+        className="text-sm font-medium tabular-nums"
+        style={{ color: "var(--text-primary)" }}
+      >
+        {formatTimeShort(now)}
+      </span>
+      <span
+        className="text-[10px] tabular-nums"
+        style={{ color: "var(--text-secondary)" }}
+      >
+        {formatDate(now)}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Account menu (Phase 21, redesigned). Avatar circle with the user's initial,
+ * username, and a chevron. Click opens a small dropdown: identity header
+ * (username + role), Change password, Sign out. Closes on outside-click /
+ * Escape. Lightweight — no dropdown dependency.
+ */
+function UserMenu() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    function onClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  if (!user) return null;
+
+  const initial = user.username.charAt(0).toUpperCase();
+  const roleLabel = user.role.charAt(0).toUpperCase() + user.role.slice(1);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 rounded-full pl-1 pr-2 py-1 transition-colors"
+        style={{ backgroundColor: open ? "var(--bg-grouped)" : "transparent" }}
+        title="Account"
+      >
+        <span
+          className="flex items-center justify-center rounded-full text-white text-xs font-semibold"
+          style={{ width: 26, height: 26, backgroundColor: "var(--ios-blue)" }}
+        >
+          {initial}
+        </span>
+        <span
+          className="hidden sm:block text-sm font-medium"
+          style={{ color: "var(--text-primary)" }}
+        >
+          {user.username}
+        </span>
+        <ChevronDown className="h-3.5 w-3.5" style={{ color: "var(--text-secondary)" }} />
+      </button>
+
+      {open && (
+        <div
+          className="absolute right-0 mt-2 w-56 rounded-xl py-1.5 z-50"
+          style={{
+            backgroundColor: "var(--bg-elevated)",
+            border: "0.5px solid var(--separator)",
+            boxShadow: "0 8px 28px rgba(0,0,0,0.16)",
+          }}
+        >
+          {/* Identity header */}
+          <div className="px-3 py-2" style={{ borderBottom: "0.5px solid var(--separator)" }}>
+            <div className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+              {user.username}
+            </div>
+            <div className="mt-0.5">
+              <Badge variant="outline" className="text-[10px] uppercase tracking-wide">
+                {roleLabel}
+              </Badge>
+            </div>
+          </div>
+
+          {/* Actions */}
+          <button
+            onClick={() => { setOpen(false); navigate("/account/password"); }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left transition-colors hover:opacity-80"
+            style={{ color: "var(--text-primary)" }}
+          >
+            <KeyRound className="h-4 w-4" style={{ color: "var(--text-secondary)" }} />
+            Change password
+          </button>
+          <button
+            onClick={() => { setOpen(false); logout(); }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left transition-colors hover:opacity-80"
+            style={{ color: "var(--ios-red)" }}
+          >
+            <LogOut className="h-4 w-4" />
+            Sign out
+          </button>
+        </div>
+      )}
     </div>
   );
 }
