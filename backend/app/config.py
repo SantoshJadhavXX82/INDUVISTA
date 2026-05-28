@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     # Required: connection string for SQLAlchemy
     database_url: str
 
+    # Phase 21 — auth settings.
+    # jwt_secret signs session tokens. The dev default below is INSECURE;
+    # set JWT_SECRET to a long random value in production (see .env.example).
+    # validate() below refuses to start in production with the default.
+    jwt_secret: str = "dev-insecure-change-me-in-production"
+    auth_token_ttl_min: int = 720  # 12h — one plant shift + margin
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -32,3 +39,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()  # type: ignore[call-arg]
+
+# Phase 21 — fail fast if production runs with the insecure default JWT secret.
+if settings.app_env == "production" and settings.jwt_secret == "dev-insecure-change-me-in-production":
+    raise RuntimeError(
+        "JWT_SECRET is still the insecure development default but APP_ENV=production. "
+        "Set JWT_SECRET to a strong random value (e.g. `openssl rand -hex 32`)."
+    )

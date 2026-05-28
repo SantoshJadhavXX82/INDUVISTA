@@ -1,6 +1,9 @@
 import { Navigate, Route, Routes } from "react-router";
 import AppShell from "@/components/layout/AppShell";
 import { TimeFormatProvider } from "@/lib/timeFormat";
+// Phase 21 - auth gate
+import Login from "@/pages/Login";
+import RequireAuth from "@/components/RequireAuth";
 import Dashboard from "@/pages/Dashboard";
 import Diagnostics from "@/pages/Diagnostics";
 import TagExplorer from "@/pages/TagExplorer";
@@ -37,8 +40,28 @@ import OpcSources from "@/pages/OpcSources";
 export default function App() {
   return (
     <TimeFormatProvider>
-      <AppShell>
       <Routes>
+        {/* Phase 21 - login lives OUTSIDE the shell (no nav/header). */}
+        <Route path="/login" element={<Login />} />
+        {/* Everything else requires authentication. */}
+        <Route
+          path="/*"
+          element={
+            <RequireAuth>
+              <AppShell>
+                <AuthedRoutes />
+              </AppShell>
+            </RequireAuth>
+          }
+        />
+      </Routes>
+    </TimeFormatProvider>
+  );
+}
+
+function AuthedRoutes() {
+  return (
+    <Routes>
         <Route path="/" element={<Navigate to="/diagnostics" replace />} />
         <Route path="/diagnostics" element={<Diagnostics />} />
         <Route path="/dashboard" element={<Dashboard />} />
@@ -95,8 +118,6 @@ export default function App() {
           <Route path="devices" element={<Devices />} />
           <Route path="blocks" element={<RegisterBlocks />} />
         </Route>
-      </Routes>
-    </AppShell>
-    </TimeFormatProvider>
+    </Routes>
   );
 }
