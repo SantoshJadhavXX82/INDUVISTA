@@ -527,6 +527,18 @@ def delete_opc_source(
             {"ids": tag_ids},
         )
 
+        # Phase OPC-web.2.6 — purge latest_tag_values orphan rows.
+        # The soft-delete above is an UPDATE, so the ON DELETE CASCADE on
+        # latest_tag_values.tag_id (migration 0050) never fires and the
+        # tag's last-value row would survive forever as a 'stale' orphan
+        # (the original KEPWARE leak). latest_tag_values is a small upsert
+        # table — one row per tag — so this is a tiny indexed delete, NOT a
+        # hypertable scan. Sample history in tag_values is preserved.
+        db.execute(
+            text("DELETE FROM latest_tag_values WHERE tag_id = ANY(:ids)"),
+            {"ids": tag_ids},
+        )
+
     # 3. opc_sources row itself. Note: opc_sources.device_id and
     #    opc_sources.channel_id are ON DELETE CASCADE pointing AT the
     #    parent, meaning deleting the device or channel would cascade
@@ -723,6 +735,15 @@ def delete_mapping(
     db.execute(text("UPDATE tags SET deleted_at = NOW() "
                     "WHERE id = :id AND deleted_at IS NULL"),
                {"id": row["tag_id"]})
+
+    # Phase OPC-web.2.6 — purge the latest_tag_values orphan for this tag.
+    # Soft-delete (UPDATE) above means the latest-value row would otherwise
+    # survive and show as a 'stale' orphan. Small indexed delete on a
+    # one-row-per-tag table; history in tag_values is preserved.
+    db.execute(
+        text("DELETE FROM latest_tag_values WHERE tag_id = :id"),
+        {"id": row["tag_id"]},
+    )
 
     # Phase OPC-web.2.1 — bump the source's updated_at so the worker's
     # config_reloader fingerprint changes and the source's subscription
