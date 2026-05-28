@@ -4,6 +4,7 @@ import { TimeFormatProvider } from "@/lib/timeFormat";
 // Phase 21 - auth gate
 import Login from "@/pages/Login";
 import RequireAuth from "@/components/RequireAuth";
+import ChangePassword from "@/pages/ChangePassword";
 import Dashboard from "@/pages/Dashboard";
 import Diagnostics from "@/pages/Diagnostics";
 import TagExplorer from "@/pages/TagExplorer";
@@ -65,6 +66,7 @@ function AuthedRoutes() {
         <Route path="/" element={<Navigate to="/diagnostics" replace />} />
         <Route path="/diagnostics" element={<Diagnostics />} />
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/account/password" element={<ChangePassword />} />
         <Route path="/tags" element={<TagExplorer />} />
         <Route path="/data-gaps" element={<DataGaps />} />
         {/* Phase 13.2 — Trend module (historical first, real-time in 13.3) */}
