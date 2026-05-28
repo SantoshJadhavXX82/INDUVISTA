@@ -50,6 +50,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.db import get_session
+from app.auth.deps import CurrentUser, get_current_user
 from app.modbus.writer import write_tag
 from app.utils.audit import audit, AuditEvent
 
@@ -92,6 +93,7 @@ async def write_tag_endpoint(
     body: TagWriteRequest,
     request: Request,
     db: Annotated[Session, Depends(get_session)],
+    user: Annotated[CurrentUser, Depends(get_current_user)],
 ):
     """Write a value to the named tag via Modbus.
 
@@ -147,7 +149,9 @@ async def write_tag_endpoint(
         ), request)
         raise HTTPException(409, f"Tag {tag_id} is disabled - enable before writing")
 
-    user_label = body.user_label or _request_label(request)
+    # Prefer an explicit label, then the authenticated username, then the
+    # request IP. After Phase 21 the JWT identity is the real actor.
+    user_label = body.user_label or user.username or _request_label(request)
 
     # ----- Execute the write -----
     try:
