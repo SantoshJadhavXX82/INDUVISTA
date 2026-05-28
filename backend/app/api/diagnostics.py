@@ -147,8 +147,12 @@ def diagnostics_summary(db: Annotated[Session, Depends(get_session)]):
           ON t1.device_id = t2.device_id
          AND t1.function_code = t2.function_code
          AND t1.id < t2.id
-        WHERE t1.device_protocol != 'computed'
-          AND t2.device_protocol != 'computed'
+        -- OPC UA tags have no register address; they all carry the
+        -- placeholder (function_code=3, address=0), so a naive overlap
+        -- query emits N*(N-1)/2 phantom pairs per OPC source. Excluded
+        -- here exactly as computed-device tags are.
+        WHERE t1.device_protocol NOT IN ('computed', 'opc_ua')
+          AND t2.device_protocol NOT IN ('computed', 'opc_ua')
           AND t1.address < t2.address + t2.effective_span
           AND t2.address < t1.address + t1.effective_span
     """)).scalar()
@@ -180,6 +184,11 @@ def diagnostics_summary(db: Annotated[Session, Depends(get_session)]):
           -- the real issues. Heartbeat-monitored writable tags still get
           -- their own freshness check via the HEARTBEAT_FROZEN code path.
           t.writable = false
+          -- Computed-tag st reflects INPUT quality (quality propagates),
+          -- not freshness. A calc block with bad inputs correctly emits
+          -- st<128; that is not a stale reading. Exclude computed devices
+          -- here, mirroring the overlap query's computed exclusion.
+          AND d.protocol != 'computed'
           AND (
             lv.st < 128
             OR EXTRACT(EPOCH FROM (NOW() - lv.time)) > d.stale_after_sec
@@ -334,7 +343,9 @@ def list_tag_overlaps(db: Annotated[Session, Depends(get_session)]):
          AND t1.function_code = t2.function_code
          AND t1.id < t2.id
         JOIN devices d ON d.id = t1.device_id
-        WHERE d.protocol <> 'computed'
+        -- OPC UA tags have no register address (see overlap_count note in
+        -- diagnostics_summary); exclude them alongside computed tags.
+        WHERE d.protocol NOT IN ('computed', 'opc_ua')
         AND t1.address < t2.address + t2.effective_span
           AND t2.address < t1.address + t1.effective_span
         ORDER BY t1.device_id, t1.function_code, t1.address
@@ -427,6 +438,9 @@ def list_stale_tags(db: Annotated[Session, Depends(get_session)]):
           -- Phase 17 — writable tags exempted from stale detection. See
           -- the matching filter in diagnostics_summary's stale_count.
           t.writable = false
+          -- See diagnostics_summary stale_count: computed-tag st reflects
+          -- input quality, not freshness. Exclude computed devices.
+          AND d.protocol != 'computed'
           AND (
             lv.st < 128
             OR EXTRACT(EPOCH FROM (NOW() - lv.time)) > d.stale_after_sec
