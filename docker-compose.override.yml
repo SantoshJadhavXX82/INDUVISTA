@@ -1,7 +1,17 @@
-services:
-  valkey:
-    image: valkey/valkey:latest
-    container_name: svj_valkey
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
+# docker-compose.override.yml — local dev overrides (auto-loaded by `docker compose`).
+#
+# valkey USED TO be defined here. It now lives in the base docker-compose.yml
+# so that `docker compose -f docker-compose.yml up` (base only, e.g. in CI or
+# prod) brings up a coherent stack. Do NOT redefine valkey here — that would
+# shadow the base definition.
+#
+# This file is intentionally minimal. Add machine-specific overrides below
+# (e.g. alternate host port bindings, extra mounts) without touching the base.
+#
+# Example — expose backend on a different host port locally:
+#   services:
+#     backend:
+#       ports:
+#         - "127.0.0.1:8001:8000"
+
+services: {}
