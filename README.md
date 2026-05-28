@@ -13,7 +13,9 @@ InduVista acquires data from industrial devices over **Modbus TCP** and **OPC UA
 - **Alarm engine** — configurable severities and rule types, rate-of-change / frozen / spike rules, acknowledge & shelve, density heatmap.
 - **Trends & analytics** — historical and real-time charts, aggregation modes, rate-of-change, sigma bands, saved views, data-gap analysis.
 - **Operations UI** — live dashboard, tag explorer, diagnostics, audit log, Modbus protocol tools (frame inspector, register browser, write console), with dark mode and mobile navigation.
-- **OPC UA admin (latest build)** — manage OPC UA sources and tag mappings from the web UI, browse a server's address space, and import nodes directly into tags.
+- **OPC UA admin** — manage OPC UA sources and tag mappings from the web UI, browse a server's address space, and import nodes directly into tags.
+- **OPC UA timestamp control (latest build, Phase OPC-web.2.3)** — per-source `trust_server_timestamp` toggle (worker time vs `SourceTimestamp`), with automatic server-clock-drift detection at subscription activation, surfaced in the UI with a severity callout.
+- **Soft delete** — tags and devices support soft deletion (hidden but retained); supervisors and APIs skip soft-deleted rows automatically.
 
 ## Stack
 
@@ -85,11 +87,11 @@ docs/                    Architecture and reference notes
 ## Acquisition paths
 
 1. **Modbus TCP** — `modbus_worker` polls configured devices/registers, decodes values and `st` quality, writes to the historian.
-2. **OPC UA (direct)** — `opc_worker` opens an asyncua client per configured OPC source, subscribes to mapped nodes, buffers samples, and flushes to the historian.
+2. **OPC UA (direct)** — `opc_worker` opens an asyncua client per configured OPC source, subscribes to mapped nodes, buffers samples, and flushes to the historian. Each source has `trust_server_timestamp`: when `false` (default), the worker uses its own UTC clock at ingest; when `true`, it uses the server's `SourceTimestamp`. Server clock drift is measured at every subscription activation and persisted on the source row so the UI can surface a warning.
 3. **Plant agent ingest** — a DataHub client (or any agent) authenticates with an API key and POSTs samples to `/api/ingest`; the backend range-checks and bulk-inserts them with `source = 'ingest'`.
 
 ## Roadmap
 
-- **Done:** Modbus acquisition + store-and-forward, configuration UI, calc engine, alarms, trends/diagnostics/audit, reference data, dark mode + mobile, OPC UA ingestion and web admin (sources, mappings, address-space browse & import).
-- **In progress:** OPC web hardening, integration test coverage.
+- **Done:** Modbus acquisition + store-and-forward, configuration UI, calc engine, alarms, trends/diagnostics/audit, reference data, dark mode + mobile, OPC UA ingestion and web admin (sources, mappings, address-space browse & import), per-source timestamp source + server clock drift detection (Phase OPC-web.2.3), soft delete for tags and devices, integration tests for OPC browse/import.
+- **In progress:** SF-buffer replay path for OPC samples, further OPC integration test coverage.
 - **Deferred:** OPC DA bridge (32-bit subprocess), DataHub push pipeline productionization, MQTT and REST/SQL connectors, reporting engine and scheduler.

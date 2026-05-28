@@ -65,6 +65,10 @@ _phase*/
 # One-off dev scripts kept out of the repo root
 /*.ps1
 /apply_*.py
+/fix_*.py
+/probe_*.py
+/cleanup_*.sql
+*.broken_*
 fix-writable-stale.sql
 restart_UI_5174.txt
 

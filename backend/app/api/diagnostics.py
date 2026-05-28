@@ -956,17 +956,29 @@ def _build_quality_heatmap(
     bin_minutes: int,
     device_id: int | None,
 ) -> "QualityHeatmapResponse":
-    """The cache-miss branch of the endpoint — extracted so the wrapper
-    above can apply try/except + caching uniformly without indentation
-    creep in the SQL-heavy body."""
+    """The cache-miss branch of the endpoint. SQL-heavy body extracted.
 
-    # ── Tags axis ───────────────────────────────────────────────────────
+    # Heatmap full fix: PDF-compliant no-data, soft-delete, bucket alignment
+    # See fix_heatmap_full.py for the full rationale. Summary:
+    #   - cells default to 0 (no-data), not 3 (green) - so empty bins
+    #     render grey, not green. Aligns with PDF guidance: never hide
+    #     missing data as good.
+    #   - aggregation returns ALL samples (no st<128 filter); the cell
+    #     value is classified per-row by worst_st: <64 INVALID, <128 SUSPECT,
+    #     >=128 VALID. Matches InduVista status.py tier ranges exactly.
+    #   - tag axis filters t.deleted_at IS NULL (Phase OPC-web.2.2.b)
+    #   - bucket lookup falls back to floor-snap walk when SQL/Python
+    #     timestamps disagree (timezone-bucketing edge case)
+    """
+
+    # -- Tags axis --------------------------------------------------------
     tag_sql = """
         SELECT t.id AS tag_id, t.name AS tag_name,
                t.device_id, d.name AS device_name
         FROM tags t
         JOIN devices d ON d.id = t.device_id
         WHERE t.enabled = true
+          AND t.deleted_at IS NULL
     """
     tag_params: dict = {}
     if device_id is not None:
@@ -978,13 +990,7 @@ def _build_quality_heatmap(
     tags = [HeatmapTag(**r) for r in tag_rows]
     tag_index = {t.tag_id: i for i, t in enumerate(tags)}
 
-    # ── Time-bin axis ───────────────────────────────────────────────────
-    # Bins must align to local-tz boundaries because the SQL uses
-    # time_bucket(width, ts, :tz) — buckets snap to local midnight, not
-    # UTC midnight. We compensate by offsetting epoch_secs by the local
-    # tz's UTC offset before the modulo snap. India has no DST so the
-    # offset is constant; for DST zones the offset comes from the
-    # *target* moment, which is close enough for any reasonable window.
+    # -- Time-bin axis ----------------------------------------------------
     now = datetime.now(timezone.utc)
     local_tz = ZoneInfo(settings.app_timezone)
     offset_secs = int(now.astimezone(local_tz).utcoffset().total_seconds())
@@ -1002,27 +1008,27 @@ def _build_quality_heatmap(
         cursor += bin_width
     bin_index: dict[datetime, int] = {b.start: i for i, b in enumerate(bins)}
 
-    # ── Per-tag last-seen times (small, fast query) ─────────────────────
+    # -- Per-tag last-seen ----------------------------------------------
     last_seen: dict[int, datetime | None] = {}
     for r in db.execute(text("SELECT tag_id, time FROM latest_tag_values")).mappings():
         last_seen[r["tag_id"]] = r["time"]
 
-    # ── Initialize cells: all GOOD by default ───────────────────────────
-    cells: list[list[int]] = [[3] * len(bins) for _ in tags]
+    # -- Initialize cells: ALL NO-DATA (0) by default --------------------
+    # Per PDF section 8, bins without samples must render distinctly from
+    # bins with good samples. Default 0 = grey; aggregation promotes to
+    # 1/2/3 only when data exists.
+    cells: list[list[int]] = [[0] * len(bins) for _ in tags]
 
-    # ── Aggregate ONLY non-good samples ─────────────────────────────────
-    # Prefer the continuous aggregate (sub-second). If migration 0044
-    # hasn't been applied yet, the to_regclass() lookup returns NULL and
-    # we fall back to scanning raw tag_values.
+    # -- Aggregate ALL samples (no quality filter) -----------------------
+    # Stage 19 filtered `st < 128` to skip good samples for performance.
+    # We return all rows now so we can explicitly mark "data present"
+    # vs "no data" - the missing-data class would otherwise be hidden.
     cagg_exists = db.execute(text(
         "SELECT to_regclass('tag_quality_5m_cagg') IS NOT NULL AS exists"
     )).scalar()
 
-    if cagg_exists and bin_minutes >= 5 and bin_minutes % 5 == 0:
-        # FAST PATH: read pre-aggregated 5-min buckets and roll up to the
-        # user-requested bin width via a second time_bucket().
-        # The :tz parameter passes the app's local timezone so bucket
-        # boundaries align to local midnight, not UTC midnight.
+    use_cagg = cagg_exists and bin_minutes >= 5 and bin_minutes % 5 == 0
+    if use_cagg:
         agg_sql = """
             SELECT
                 tag_id,
@@ -1030,18 +1036,11 @@ def _build_quality_heatmap(
                 min(min_st) AS worst_st
             FROM tag_quality_5m_cagg
             WHERE bucket >= :since
-              AND min_st < 128
         """
         if device_id is not None:
-            # The cagg doesn't carry device_id, so filter via tags subquery.
-            # This is still fast because the inner set is tiny.
             agg_sql += " AND tag_id IN (SELECT id FROM tags WHERE device_id = :device_id)"
         agg_sql += " GROUP BY tag_id, bucket"
     else:
-        # FALLBACK: raw hypertable scan. Slower, but always correct.
-        # Used when:
-        #   - migration 0044 hasn't been applied yet, OR
-        #   - bin_minutes < 5 (e.g. 1-minute bins for real-time tuning)
         agg_sql = """
             SELECT
                 tv.tag_id,
@@ -1049,25 +1048,57 @@ def _build_quality_heatmap(
                 min(tv.st) AS worst_st
             FROM tag_values tv
             WHERE tv.time >= :since
-              AND tv.st < 128
         """
         if device_id is not None:
             agg_sql += " AND tv.device_id = :device_id"
         agg_sql += " GROUP BY tv.tag_id, bucket"
 
-    agg_params: dict = {"bin_minutes": bin_minutes, "since": aligned_start, "tz": settings.app_timezone}
+    agg_params: dict = {
+        "bin_minutes": bin_minutes,
+        "since": aligned_start,
+        "tz": settings.app_timezone,
+    }
     if device_id is not None:
         agg_params["device_id"] = device_id
 
     for row in db.execute(text(agg_sql), agg_params).mappings():
         ti = tag_index.get(row["tag_id"])
-        bi = bin_index.get(row["bucket"])
-        if ti is None or bi is None:
+        if ti is None:
             continue
+        bucket_ts = row["bucket"]
+        if bucket_ts.tzinfo is None:
+            bucket_ts = bucket_ts.replace(tzinfo=timezone.utc)
+        bi = bin_index.get(bucket_ts)
+        if bi is None:
+            # SQL's time_bucket(...,:tz) produces UTC timestamps aligned to
+            # local-tz bucket boundaries; Python's aligned_start computes
+            # slightly different starts. Floor-snap by walking bins.
+            for j, b in enumerate(bins):
+                if b.start <= bucket_ts < b.start + bin_width:
+                    bi = j
+                    break
+            if bi is None:
+                continue
         worst = row["worst_st"]
-        cells[ti][bi] = 1 if worst < 64 else 2
+        # InduVista status tiers from status.py:
+        #   0-63   INVALID  -> 1 (red)
+        #   64-127 SUSPECT  -> 2 (orange)
+        #   128+   VALID    -> 3 (green)
+        # NULL: treat as no-data (leave cell at 0 - shouldn't happen in
+        # practice since aggregation only returns rows where samples exist)
+        if worst is None:
+            continue
+        if worst < 64:
+            cells[ti][bi] = 1
+        elif worst < 128:
+            cells[ti][bi] = 2
+        else:
+            cells[ti][bi] = 3
 
-    # ── Mark trailing bins as no-data for stale tags ────────────────────
+    # -- Mark trailing bins as no-data for stale tags --------------------
+    # If a tag's last sample is before bin.start, bins after that point
+    # are genuinely no-data regardless of what aggregation said. This also
+    # handles tags that have never been seen (last_seen is None).
     for i, t in enumerate(tags):
         last = last_seen.get(t.tag_id)
         if last is None:

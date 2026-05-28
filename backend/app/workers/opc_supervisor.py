@@ -216,6 +216,73 @@ def _coerce_value(val: Any) -> tuple[float | None, str | None]:
 # ── DataChange handler (asyncua callback target) ────────────────────
 
 
+# Phase OPC-web.2.3 server clock probe
+async def _probe_server_clock(client, source_id: int, source_name: str) -> None:
+    """Read Server_ServerStatus_CurrentTime, compute drift vs worker
+    clock, log, persist to opc_sources.
+
+    Best-effort. Any exception is logged at debug level and the
+    subscription continues. NodeId i=2258 is UA-standard; every
+    compliant server exposes it.
+    """
+    from datetime import datetime, timezone
+    from sqlalchemy import text
+    from app.db import SessionLocal
+
+    try:
+        server_time_node = client.get_node("i=2258")
+        server_time = await server_time_node.read_value()
+        worker_time = datetime.now(timezone.utc)
+
+        if server_time.tzinfo is None:
+            server_time = server_time.replace(tzinfo=timezone.utc)
+
+        drift_sec = (server_time - worker_time).total_seconds()
+        abs_drift = abs(drift_sec)
+
+        if abs_drift < 60:
+            drift_str = f"{drift_sec:+.2f}s"
+        elif abs_drift < 3600:
+            drift_str = f"{drift_sec / 60:+.1f}min"
+        else:
+            drift_str = f"{drift_sec / 3600:+.2f}h"
+
+        if abs_drift <= 5.0:
+            log.info("[%s] server clock valid (drift=%s)", source_name, drift_str)
+        elif abs_drift <= 60.0:
+            log.info("[%s] server clock acceptable (drift=%s)", source_name, drift_str)
+        elif abs_drift <= 3600.0:
+            log.warning(
+                "[%s] server clock SUSPECT (drift=%s); leaving "
+                "trust_server_timestamp off is strongly recommended",
+                source_name, drift_str,
+            )
+        else:
+            log.error(
+                "[%s] server clock GROSSLY WRONG (drift=%s) - likely sending "
+                "local-wall-clock-as-UTC. DO NOT enable trust_server_timestamp.",
+                source_name, drift_str,
+            )
+
+        with SessionLocal() as db:
+            db.execute(
+                text(
+                    "UPDATE opc_sources "
+                    "SET last_server_clock_drift_sec = :drift, "
+                    "    last_server_clock_check_at = :now "
+                    "WHERE id = :sid"
+                ),
+                {"drift": drift_sec, "now": worker_time, "sid": source_id},
+            )
+            db.commit()
+
+    except Exception as e:
+        log.debug(
+            "[%s] server clock probe failed: %s: %s",
+            source_name, type(e).__name__, str(e)[:200],
+        )
+
+
 @dataclass
 class _SourceContext:
     """Per-source bag passed to the asyncua subscription handler. Holds
@@ -235,6 +302,11 @@ class _SourceContext:
     tag_by_node: dict[str, int]
     buffer: "_SampleBuffer"
     last_sample_ts: float = 0.0
+    # Phase OPC-web.2.2: when True, use DataValue.SourceTimestamp; when
+    # False (default) use ingest-time UTC. AGG SoftBus simulator and
+    # other untrusted servers should stay at False to avoid wall-clock
+    # drift contaminating tag_values.time. See migration 0055.
+    trust_server_timestamp: bool = False
 
 
 class _SubHandler:
@@ -272,9 +344,21 @@ class _SubHandler:
                 return
 
             mv = data.monitored_item.Value
-            t = mv.SourceTimestamp or mv.ServerTimestamp or datetime.now(timezone.utc)
-            if t.tzinfo is None:
-                t = t.replace(tzinfo=timezone.utc)
+            # Phase OPC-web.2.2 trust_server_timestamp toggle.
+            # When FALSE (default) we discard server-supplied timestamps
+            # entirely - the AGG SoftBus simulator delivers them as
+            # local-wall-clock-tagged-as-UTC, which makes samples land
+            # 5h30m in the future on IST hosts and breaks CAGG refresh
+            # + heatmap rendering. Trade-off: lose sensor-to-ingest
+            # latency precision (typically 0-100ms for well-behaved
+            # servers). Production servers with verified clock sync can
+            # opt-in via opc_sources.trust_server_timestamp = TRUE.
+            if self.ctx.trust_server_timestamp:
+                t = mv.SourceTimestamp or mv.ServerTimestamp or datetime.now(timezone.utc)
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+            else:
+                t = datetime.now(timezone.utc)
             st, reason = _ua_status_to_st(mv.StatusCode)
             value_double, value_text = _coerce_value(val)
 
@@ -362,7 +446,7 @@ def load_sources_from_db() -> list[dict]:
         rows = conn.execute(text("""
             SELECT id, name, endpoint, security_policy, username, password,
                    publishing_interval_ms, reconnect_min_sec, reconnect_max_sec,
-                   device_id
+                   device_id, trust_server_timestamp
             FROM opc_sources
             WHERE is_enabled = TRUE
             ORDER BY id
@@ -415,6 +499,9 @@ class _SourceFingerprint:
     updated_at: datetime
     last_mapping_change: datetime | None
     mapping_count: int
+    # Phase OPC-web.2.2: toggling trust_server_timestamp restarts the
+    # worker via the reloader so the new value reaches _SourceContext.
+    trust_server_timestamp: bool
 
 
 def load_fingerprints_from_db() -> dict[int, _SourceFingerprint]:
@@ -432,12 +519,13 @@ def load_fingerprints_from_db() -> dict[int, _SourceFingerprint]:
             SELECT s.id,
                    s.is_enabled,
                    s.updated_at,
+                   s.trust_server_timestamp,
                    MAX(m.created_at) AS last_mapping_change,
                    COUNT(m.id) AS mapping_count
             FROM opc_sources s
             LEFT JOIN opc_tag_mappings m
                 ON m.opc_source_id = s.id
-            GROUP BY s.id, s.is_enabled, s.updated_at
+            GROUP BY s.id, s.is_enabled, s.updated_at, s.trust_server_timestamp
         """)).mappings().all()
         return {
             r["id"]: _SourceFingerprint(
@@ -445,6 +533,7 @@ def load_fingerprints_from_db() -> dict[int, _SourceFingerprint]:
                 updated_at=r["updated_at"],
                 last_mapping_change=r["last_mapping_change"],
                 mapping_count=int(r["mapping_count"]),
+                trust_server_timestamp=bool(r["trust_server_timestamp"]),
             )
             for r in rows
         }
@@ -461,7 +550,7 @@ def load_one_source_from_db(source_id: int) -> dict | None:
         s = conn.execute(text("""
             SELECT id, name, endpoint, security_policy, username, password,
                    publishing_interval_ms, reconnect_min_sec, reconnect_max_sec,
-                   device_id, is_enabled
+                   device_id, is_enabled, trust_server_timestamp
             FROM opc_sources
             WHERE id = :id
         """), {"id": source_id}).mappings().first()
@@ -511,6 +600,7 @@ async def opc_source_worker(
         device_id=source["device_id"],
         tag_by_node=source["tag_by_node"],
         buffer=buffer,
+        trust_server_timestamp=bool(source.get("trust_server_timestamp", False)),
     )
 
     while not global_stop_event.is_set() and not restart_event.is_set():
@@ -615,6 +705,20 @@ async def _connect_and_subscribe(
             "[%s] subscription active (%d/%d nodes)",
             ctx.source_name, subscribed, len(ctx.tag_by_node),
         )
+        # Phase OPC-web.2.3 server clock probe - non-blocking
+        # observability. Logs drift and persists to opc_sources for
+        # the UI. Does NOT change which timestamp the worker writes
+        # for samples (that is controlled by trust_server_timestamp).
+        try:
+            await _probe_server_clock(client, ctx.source_id, ctx.source_name)
+        except Exception:
+            # _probe_server_clock has its own try/except, but guard
+            # the call site too. Worker must NEVER die because of
+            # a diagnostic probe.
+            log.debug(
+                "[%s] server clock probe call site swallowed exception",
+                ctx.source_name,
+            )
 
         # Seed the watchdog timestamp — if no samples arrive, the
         # watchdog deadline is measured from now, not from 1970.
