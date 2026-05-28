@@ -147,7 +147,21 @@ def _extract_actor(request: Request | None) -> tuple[str, str | None, str | None
     if request is not None:
         actor_type = "api_client"
         actor_ip = request.client.host if request.client else None
-        # Future: actor_id = decoded_jwt.user_id, actor_type = "user"
+        # Phase 21 - decode JWT actor. If a valid bearer token is present,
+        # record the human user as the actor instead of a generic api_client.
+        try:
+            authz = request.headers.get("authorization")
+            if authz:
+                parts = authz.split(maxsplit=1)
+                if len(parts) == 2 and parts[0].lower() == "bearer":
+                    from app.auth.security import decode_token
+                    payload = decode_token(parts[1].strip())
+                    if payload and payload.get("username"):
+                        actor_type = "user"
+                        actor_id = payload["username"]
+        except Exception:
+            # Audit actor resolution must never break the request.
+            pass
     return actor_type, actor_id, actor_ip
 
 

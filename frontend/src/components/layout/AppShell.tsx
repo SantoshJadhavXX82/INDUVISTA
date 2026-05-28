@@ -6,6 +6,32 @@ import Nav from "@/components/layout/Nav";
 import MobileTabBar from "@/components/layout/MobileTabBar";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useIsMobile } from "@/lib/use-media-query";
+// Phase 21 - user menu
+import { useAuth } from "@/lib/auth";
+import { Button } from "@/components/ui/button";
+import { LogOut } from "lucide-react";
+
+function UserMenu() {
+  // Phase 21 - current user + logout. Hidden if somehow unauthenticated.
+  const { user, logout } = useAuth();
+  if (!user) return null;
+  return (
+    <div className="flex items-center gap-2">
+      <Badge variant="outline" className="font-mono text-xs">
+        {user.username} · {user.role}
+      </Badge>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={logout}
+        title="Sign out"
+        className="h-7 px-2"
+      >
+        <LogOut className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
 
 export default function AppShell({ children }: { children: React.ReactNode }) {
   // Light heartbeat at the app shell — keeps the role/version visible and
@@ -87,6 +113,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           }}
         >
           <ThemeToggle />
+          <UserMenu />
           {health.isError ? (
             <Badge variant="destructive">backend unreachable</Badge>
           ) : health.data ? (

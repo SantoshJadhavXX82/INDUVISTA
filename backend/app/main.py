@@ -44,6 +44,13 @@ app = FastAPI(
     version="0.3.0",
 )
 
+# Phase 21 - RBAC middleware. Gates every /api route by HTTP method + path
+# against the user's JWT role, in one auditable place. Public routes
+# (login, /health, docs) and API-key routes (/api/ingest) are exempted
+# inside the middleware's policy table. See app/auth/rbac_middleware.py.
+from app.auth.rbac_middleware import RBACMiddleware
+app.add_middleware(RBACMiddleware)
+
 
 @app.get("/")
 def root() -> dict[str, str]:
@@ -169,6 +176,12 @@ from app.api import api_keys as _api_keys
 app.include_router(_ingest.router)
 app.include_router(_api_keys.router)
 
+# Phase 21 — auth routers: login/me/change-password + admin user management.
+from app.api import auth as _auth
+from app.api import users_admin as _users_admin
+app.include_router(_auth.router)
+app.include_router(_users_admin.router)
+
 @app.on_event("startup")
 def _audit_schema_startup() -> None:
     # Phase 16.0g: create audit_log table + hypertable + retention on
@@ -184,3 +197,12 @@ def _audit_schema_startup() -> None:
             "Backend continues, but audit will not be recorded until resolved.",
             e,
         )
+
+
+@app.on_event("startup")
+def _auth_bootstrap_startup() -> None:
+    # Phase 21 — create the first admin from INDUVISTA_ADMIN_USER /
+    # INDUVISTA_ADMIN_PASSWORD if no admin exists yet. Idempotent and
+    # non-fatal (logs and continues on any error).
+    from app.auth.bootstrap import bootstrap_admin
+    bootstrap_admin()

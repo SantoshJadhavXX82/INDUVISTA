@@ -24,3 +24,10 @@ python-multipart==0.0.20
 # annotation deferral collides with asyncua's dataclass introspection).
 # Backend image is Python 3.12 so we're fine.
 asyncua>=1.1,<2
+
+# Phase 21 - auth (users + RBAC + JWT sessions).
+# pyjwt: stateless session tokens (HS256). passlib[bcrypt]: bcrypt password
+# hashing for local users (slow-hash, appropriate for low-entropy passwords).
+pyjwt==2.9.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.0
