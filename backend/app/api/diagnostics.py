@@ -184,6 +184,9 @@ def diagnostics_summary(db: Annotated[Session, Depends(get_session)]):
           -- the real issues. Heartbeat-monitored writable tags still get
           -- their own freshness check via the HEARTBEAT_FROZEN code path.
           t.writable = false
+          -- Phase OPC-web.2.7 - disabled devices excluded (intentionally
+          -- off, not a stale condition).
+          AND d.enabled = true
           -- Computed-tag st reflects INPUT quality (quality propagates),
           -- not freshness. A calc block with bad inputs correctly emits
           -- st<128; that is not a stale reading. Exclude computed devices
@@ -260,6 +263,10 @@ def list_worker_device_status(db: Annotated[Session, Depends(get_session)]):
                 AS seconds_since_last_cycle
         FROM worker_device_status wds
         JOIN devices d ON d.id = wds.device_id
+        -- Phase OPC-web.2.7 - disabled devices excluded. A disabled device
+        -- leaves a frozen worker_device_status row at its last (failed)
+        -- state. It is intentionally off, not unhealthy, so don't list it.
+        WHERE d.enabled = true
         ORDER BY wds.device_id
     """)).mappings().all()
     return [dict(r) for r in rows]
@@ -438,6 +445,8 @@ def list_stale_tags(db: Annotated[Session, Depends(get_session)]):
           -- Phase 17 — writable tags exempted from stale detection. See
           -- the matching filter in diagnostics_summary's stale_count.
           t.writable = false
+          -- Phase OPC-web.2.7 - disabled devices excluded.
+          AND d.enabled = true
           -- See diagnostics_summary stale_count: computed-tag st reflects
           -- input quality, not freshness. Exclude computed devices.
           AND d.protocol != 'computed'
