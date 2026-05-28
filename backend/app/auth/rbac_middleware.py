@@ -86,6 +86,11 @@ def _required_role(method: str, path: str) -> str | None:
     if path.startswith("/api/admin/"):
         return Role.ADMIN.value
 
+    # Self-service auth endpoints - any AUTHENTICATED user may manage
+    # their own session/password (change-password, future logout/refresh).
+    if path.startswith("/api/auth/"):
+        return Role.VIEWER.value
+
     # Reads — any authenticated user.
     if method in ("GET", "HEAD", "OPTIONS"):
         return Role.VIEWER.value

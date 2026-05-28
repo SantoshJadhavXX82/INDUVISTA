@@ -77,3 +77,5 @@ scripts/lifecycle/evidence_full*.txt
 
 # OPC web working snapshots (scratch duplicates)
 opc_web_*/
+
+test-results-ui/
