@@ -25,6 +25,7 @@ import {
   type StaleTag,
   type SystemStats,
   type OutOfRangeTag,
+  type OpcSourceDiag,
 } from "@/types/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -81,6 +82,15 @@ export default function Diagnostics() {
   const staleTags = useQuery({
     queryKey: ["diagnostics", "stale-tags"],
     queryFn: () => api.get<StaleTag[]>("/diagnostics/stale-tags"),
+    refetchInterval: REFRESH_MS,
+  });
+
+  // Phase OPC-web.2.5 OPC diagnostics panel — OPC sources are
+  // subscription-driven, so they get their own panel (not the
+  // Modbus Workers table).
+  const opcSources = useQuery({
+    queryKey: ["diagnostics", "opc-sources"],
+    queryFn: () => api.get<OpcSourceDiag[]>("/diagnostics/opc-sources"),
     refetchInterval: REFRESH_MS,
   });
 
@@ -272,6 +282,13 @@ export default function Diagnostics() {
         </CardContent>
       </Card>
 
+      {/* Phase OPC-web.2.5b — OPC panel positioned below Workers.
+          OPC sources are subscription-driven; shown in their own card
+          directly under the Modbus Workers table. */}
+      {opcSources.data && opcSources.data.length > 0 && (
+        <OpcSourcesCard sources={opcSources.data} />
+      )}
+
       {/* Phase 12.6 — system resources (CPU, memory, disk, top processes).
           Always rendered — operators want a constant view of the runtime,
           unlike config issues which only appear when there's a problem. */}
@@ -413,6 +430,102 @@ function ConfigIssuesCard({ summary }: { summary?: DiagnosticsSummary }) {
 // --------------------------------------------------------------------------
 // Connection badge
 // --------------------------------------------------------------------------
+
+// Phase OPC-web.2.5 OPC diagnostics panel
+function OpcStateBadge({ state }: { state: OpcSourceDiag["state"] }) {
+  if (state === "live") {
+    return (
+      <Badge variant="success" className="gap-1">
+        <CheckCircle2 className="h-3 w-3" />
+        live
+      </Badge>
+    );
+  }
+  if (state === "idle") {
+    return (
+      <Badge variant="warning" className="gap-1">
+        <Activity className="h-3 w-3" />
+        idle
+      </Badge>
+    );
+  }
+  if (state === "stale") {
+    return (
+      <Badge variant="warning" className="gap-1">
+        <AlertTriangle className="h-3 w-3" />
+        stale
+      </Badge>
+    );
+  }
+  if (state === "disabled") {
+    return (
+      <Badge variant="outline" className="gap-1 text-muted-foreground">
+        disabled
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="destructive" className="gap-1">
+      <XCircle className="h-3 w-3" />
+      lost
+    </Badge>
+  );
+}
+
+function OpcSourcesCard({ sources }: { sources: OpcSourceDiag[] }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>OPC UA sources ({sources.length})</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Source</TableHead>
+              <TableHead>State</TableHead>
+              <TableHead className="text-right">Last sample (s ago)</TableHead>
+              <TableHead className="text-right">Mappings</TableHead>
+              <TableHead className="text-right">Publish (ms)</TableHead>
+              <TableHead className="text-right">Clock drift (s)</TableHead>
+              <TableHead>Endpoint</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {sources.map((s) => (
+              <TableRow key={s.source_id}>
+                <TableCell className="font-medium">{s.name}</TableCell>
+                <TableCell><OpcStateBadge state={s.state} /></TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {s.seconds_since_last_sample != null
+                    ? s.seconds_since_last_sample.toFixed(1)
+                    : "—"}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">{s.mapping_count}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {s.publishing_interval_ms ?? "—"}
+                </TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {s.last_server_clock_drift_sec != null ? (
+                    <span className={cn(
+                      Math.abs(s.last_server_clock_drift_sec) > 60 && "text-amber-700",
+                      Math.abs(s.last_server_clock_drift_sec) > 3600 && "text-red-700 font-semibold",
+                    )}>
+                      {s.last_server_clock_drift_sec.toFixed(3)}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">{s.endpoint}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  );
+}
 
 function ConnectionBadge({ state }: { state: WorkerDeviceStatus["connection_state"] }) {
   if (state === "connected") {

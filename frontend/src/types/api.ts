@@ -601,6 +601,22 @@ export type OpcSourceResponse = {
   last_server_clock_check_at: string | null;
 };
 
+// Phase OPC-web.2.5 OPC diagnostics panel — shape returned by
+// GET /api/diagnostics/opc-sources (OPC-native runtime state).
+export type OpcSourceDiag = {
+  source_id: number;
+  name: string;
+  endpoint: string;
+  enabled: boolean;
+  mapping_count: number;
+  publishing_interval_ms: number | null;
+  last_sample_at: string | null;
+  seconds_since_last_sample: number | null;
+  last_server_clock_drift_sec: number | null;
+  last_server_clock_check_at: string | null;
+  state: "disabled" | "live" | "idle" | "stale" | "lost";
+};
+
 export type OpcSourceCreate = {
   name: string;
   description?: string | null;
