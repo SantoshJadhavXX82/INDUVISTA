@@ -28,6 +28,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Check, ChevronDown, Loader2, Search, X } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";  // Phase 27e
+import { Input } from "@/components/ui/input";  // Phase 27e
 // Phase 27d.1 — time format moved here from the top header. Uses the
 // existing context (localStorage-backed, per-browser preference) so
 // behavior is unchanged; only the UI surface migrated.
@@ -473,6 +475,9 @@ export default function Settings() {
           <TimeFormatSection />
         </CardContent>
       </Card>
+
+      {/* Phase 27e - ShiftsCard */}
+      <ShiftsCard />
     </div>
   );
 }
@@ -551,5 +556,116 @@ function TimeFormatSection() {
         picked themselves. Plant-wide data storage is unaffected.
       </p>
     </div>
+  );
+}
+
+
+// ---------------------------------------------------------------------------
+// Phase 27e - ShiftsCard: edit the plant shift schedule (A/B/C + times).
+// ---------------------------------------------------------------------------
+type ShiftRow = { code: string; label: string; start: string };
+type ShiftsCfg = { enabled: boolean; shifts: ShiftRow[] };
+
+function ShiftsCard() {
+  const qc = useQueryClient();
+  const [draft, setDraft] = useState<ShiftsCfg | null>(null);
+  const [msg, setMsg] = useState<{ kind: "idle" | "saved" | "error"; text?: string }>({ kind: "idle" });
+
+  const cfg = useQuery({
+    queryKey: ["settings-shifts"],
+    queryFn: async () => {
+      const res = await fetch("/api/settings/shifts", {
+        headers: localStorage.getItem("induvista:token")
+          ? { Authorization: `Bearer ${localStorage.getItem("induvista:token")}` }
+          : undefined,
+      });
+      if (!res.ok) throw new Error(`GET /api/settings/shifts ${res.status}`);
+      return (await res.json()) as ShiftsCfg;
+    },
+  });
+
+  // Initialize the editable draft once the config loads.
+  const view = draft ?? cfg.data ?? null;
+
+  const save = useMutation({
+    mutationFn: async (body: ShiftsCfg) => {
+      const res = await fetch("/api/settings/shifts", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          ...(localStorage.getItem("induvista:token")
+            ? { Authorization: `Bearer ${localStorage.getItem("induvista:token")}` }
+            : {}),
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `PATCH failed: ${res.status}`);
+      }
+      return (await res.json()) as ShiftsCfg;
+    },
+    onSuccess: (data) => {
+      setMsg({ kind: "saved" });
+      setDraft(null);
+      qc.setQueryData(["settings-shifts"], data);
+      setTimeout(() => setMsg({ kind: "idle" }), 2000);
+    },
+    onError: (e: Error) => setMsg({ kind: "error", text: e.message }),
+  });
+
+  function update(i: number, field: keyof ShiftRow, value: string) {
+    if (!view) return;
+    const next = { ...view, shifts: view.shifts.map((s, idx) => idx === i ? { ...s, [field]: value } : s) };
+    setDraft(next);
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Shifts</CardTitle>
+        <CardDescription>
+          Define the plant shift schedule. The sidebar clock shows the current
+          shift based on these start times (plant local time). Shifts are
+          contiguous — each runs until the next one begins; the last wraps past
+          midnight.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {cfg.isLoading && <p className="text-sm" style={{ color: "var(--text-secondary)" }}>Loading…</p>}
+        {view && (
+          <>
+            <div className="grid grid-cols-[60px_1fr_110px] gap-2 text-[11px] font-medium uppercase tracking-wide"
+                 style={{ color: "var(--text-secondary)" }}>
+              <span>Code</span><span>Label</span><span>Start (HH:MM)</span>
+            </div>
+            {view.shifts.map((s, i) => (
+              <div key={i} className="grid grid-cols-[60px_1fr_110px] gap-2 items-center">
+                <Input value={s.code} maxLength={4} onChange={(e) => update(i, "code", e.target.value)} />
+                <Input value={s.label} onChange={(e) => update(i, "label", e.target.value)} />
+                <Input value={s.start} placeholder="HH:MM" onChange={(e) => update(i, "start", e.target.value)} />
+              </div>
+            ))}
+            <div className="flex items-center gap-3 pt-1">
+              <Button
+                onClick={() => view && save.mutate(view)}
+                disabled={save.isPending || !draft}
+              >
+                {save.isPending ? "Saving…" : "Save shifts"}
+              </Button>
+              {draft && (
+                <Button variant="ghost" onClick={() => setDraft(null)}>Reset</Button>
+              )}
+              {msg.kind === "saved" && (
+                <span className="text-sm" style={{ color: "var(--ios-green, #34c759)" }}>Saved.</span>
+              )}
+              {msg.kind === "error" && (
+                <span className="text-sm" style={{ color: "var(--ios-red)" }}>{msg.text}</span>
+              )}
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
