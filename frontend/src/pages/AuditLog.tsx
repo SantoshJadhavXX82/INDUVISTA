@@ -12,6 +12,7 @@ import {
   CheckCircle2, XCircle, Ban,
 } from "lucide-react";
 
+import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { SectionCard } from "@/components/ui/section-card";
@@ -71,9 +72,8 @@ function useAuditEvents(filters: Filters, limit: number, offset: number) {
   return useQuery<AuditListResponse>({
     queryKey: ["audit-log", filters, limit, offset],
     queryFn: async () => {
-      const res = await fetch(`/api/audit-log?${params}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
+      // Use the api client so the Authorization header is attached (RBAC).
+      return api.get<AuditListResponse>(`/audit-log?${params}`);
     },
     refetchInterval: 10_000,
     staleTime: 5_000,
@@ -84,9 +84,7 @@ function useDistinctActions() {
   return useQuery<string[]>({
     queryKey: ["audit-log-actions"],
     queryFn: async () => {
-      const res = await fetch("/api/audit-log/actions");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
+      return api.get<string[]>("/audit-log/actions");
     },
     staleTime: 30_000,
   });
