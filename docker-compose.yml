@@ -1,16 +1,30 @@
-# InduVista — Phase 0–2 Compose stack.
+# InduVista — Compose stack.
 #
-# Default `docker compose up` brings up the rigid foundation only:
+# Default `docker compose up` brings up the foundation:
 #   - postgres (TimescaleDB)
-#   - migrate (runs `alembic upgrade head`, then exits)
-#   - backend (FastAPI)
+#   - valkey   (frame-capture buffer; failure-safe, default-OFF feature)
+#   - migrate  (runs `alembic upgrade head`, then exits)
+#   - backend  (FastAPI)
 #
 # Optional profiles:
-#   --profile workers  → modbus_worker + replay_worker
-#   --profile sim      → modbus_simulator (Phase 1 dev only)
+#   --profile workers  → modbus_worker + opc_worker
+#   --profile sim      → modbus_simulator (dev only)
 #
-# Example:
+# The always-on evaluators (alarm_evaluator, calc_evaluator) start with the
+# default stack — they are not behind a profile.
+#
+# Example (full dev stack):
 #   docker compose --profile sim --profile workers up
+#
+# NOTE on valkey: valkey is now defined HERE in the base file (it used to
+# live only in docker-compose.override.yml). frame_capture.py — imported by
+# BOTH the backend (api/frames.py) and the modbus_worker
+# (modbus_supervisor.py) — talks to valkey for the Frame Inspector buffer.
+# Keeping valkey base-level means `docker compose -f docker-compose.yml up`
+# (without the override) brings up a coherent stack. Frame capture is
+# failure-safe: if valkey is down it silently no-ops, so valkey is not a
+# hard dependency for polling — but it belongs in the base stack so the
+# Frame Inspector actually works out of the box.
 
 services:
   postgres:
@@ -37,6 +51,21 @@ services:
       retries: 10
       start_period: 30s
 
+  valkey:
+    image: valkey/valkey:latest
+    container_name: svj_valkey
+    restart: unless-stopped
+    ports:
+      # Bind to localhost only — the frame-capture buffer is internal.
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      # redis-cli ships in the valkey image. PING returns PONG when ready.
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
   migrate:
     build: ./backend
     container_name: svj_migrate
@@ -58,11 +87,17 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # backend imports frame_capture (via api/frames.py) which talks to valkey.
+    # Capture is failure-safe, so valkey is gated only by service_started
+    # (not service_healthy) — the backend must never fail to boot because the
+    # optional frame-capture buffer is slow to come up.
     depends_on:
       postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      valkey:
+        condition: service_started
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -97,11 +132,16 @@ services:
       - .env
     environment:
       SF_BUFFER_PATH: /data/sf_buffer.db
+    # modbus_worker imports frame_capture (via modbus_supervisor.py) which
+    # talks to valkey. Same failure-safe rationale as backend — gate on
+    # service_started so a slow valkey never blocks polling startup.
     depends_on:
       postgres:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      valkey:
+        condition: service_started
     # Workers need a moment to drain in-flight Modbus reads and flush the
     # store-and-forward SQLite buffer. 15s is comfortable headroom.
     stop_grace_period: 15s
@@ -126,7 +166,7 @@ services:
         # — different filename so the two workers don't contend.
         SF_OPC_BUFFER_PATH: /data/sf_opc.db
         LOG_LEVEL: INFO
-        # NEW — silence asyncua's verbose per-message logs.
+        # Silence asyncua's verbose per-message logs.
         # Our own __main__ logger stays at INFO; asyncua at WARNING.
         ASYNCUA_LOG_LEVEL: WARNING
       depends_on:
@@ -156,6 +196,8 @@ services:
       restart: unless-stopped
       env_file:
         - .env
+      # alarm_evaluator does NOT use valkey — it reads/writes Postgres only.
+      # (Earlier revisions wrongly listed valkey here; removed.)
       depends_on:
         postgres:
           condition: service_healthy
@@ -173,6 +215,7 @@ services:
       restart: unless-stopped
       env_file:
         - .env
+      # calc_evaluator does NOT use valkey — Postgres only.
       depends_on:
         postgres:
           condition: service_healthy
