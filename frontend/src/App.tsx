@@ -5,6 +5,7 @@ import { TimeFormatProvider } from "@/lib/timeFormat";
 import Login from "@/pages/Login";
 import RequireAuth from "@/components/RequireAuth";
 import ChangePassword from "@/pages/ChangePassword";
+import Users from "@/pages/Users";
 import Dashboard from "@/pages/Dashboard";
 import Diagnostics from "@/pages/Diagnostics";
 import TagExplorer from "@/pages/TagExplorer";
@@ -67,6 +68,10 @@ function AuthedRoutes() {
         <Route path="/diagnostics" element={<Diagnostics />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/account/password" element={<ChangePassword />} />
+        <Route
+          path="/global/users"
+          element={<RequireAuth minRole="admin"><Users /></RequireAuth>}
+        />
         <Route path="/tags" element={<TagExplorer />} />
         <Route path="/data-gaps" element={<DataGaps />} />
         {/* Phase 13.2 — Trend module (historical first, real-time in 13.3) */}

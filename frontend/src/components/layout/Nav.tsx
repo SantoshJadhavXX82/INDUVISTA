@@ -38,11 +38,13 @@ import {
   // Phase OPC-web.3 — OPC UA sources nav icon
   Wifi,
   Settings,
+  UserCog,
   type LucideIcon,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";  // Phase 21 - admin-only Users link
 
 
 type Leaf = {
@@ -59,6 +61,8 @@ type Leaf = {
   iconClassName?: string;
   /** Optional inline style for the icon (e.g. iOS-red color when alarming). */
   iconStyle?: React.CSSProperties;
+  /** Phase 21 - only render for admin users. */
+  adminOnly?: boolean;
 };
 
 type ExpandableGroup = {
@@ -150,6 +154,7 @@ function useEntries(alarmCount: number): Section[] {
             { kind: "leaf", to: "/global/named-sets",          label: "Enumerations",  icon: Hash,           matchPrefix: "/global/named-sets" },
             { kind: "leaf", to: "/global/duty-standby-values", label: "Duty/standby",  icon: ArrowLeftRight, matchPrefix: "/global/duty-standby-values" },
             { kind: "leaf", to: "/global/settings",            label: "General",       icon: Settings,       matchPrefix: "/global/settings" },
+            { kind: "leaf", to: "/global/users",               label: "Users",         icon: UserCog,        matchPrefix: "/global/users", adminOnly: true },
           ],
         },
       ],
@@ -160,6 +165,8 @@ function useEntries(alarmCount: number): Section[] {
 
 export default function Nav() {
   const location = useLocation();
+  const { hasRole } = useAuth();
+  const isAdmin = hasRole("admin");
 
   // Phase 18 fix — use the SAME query as the Alarms page so React Query
   // dedupes the fetch (one HTTP call shared by Alarms page + Dashboard +
@@ -180,7 +187,7 @@ export default function Nav() {
   return (
     <nav className="flex flex-col gap-3 p-2">
       {entries.map((section, i) => (
-        <SectionBlock key={`s-${i}`} section={section} activePath={location.pathname} />
+        <SectionBlock key={`s-${i}`} section={section} activePath={location.pathname} isAdmin={isAdmin} />
       ))}
     </nav>
   );
@@ -188,8 +195,8 @@ export default function Nav() {
 
 
 function SectionBlock({
-  section, activePath,
-}: { section: Section; activePath: string }) {
+  section, activePath, isAdmin,
+}: { section: Section; activePath: string; isAdmin: boolean }) {
   return (
     <div>
       <div
@@ -199,11 +206,13 @@ function SectionBlock({
         {section.label}
       </div>
       <div className="flex flex-col gap-0.5">
-        {section.children.map((c) =>
-          c.kind === "leaf"
-            ? <LeafLink key={c.to} item={c} />
-            : <ExpandableBlock key={c.id} group={c} activePath={activePath} />,
-        )}
+        {section.children
+          .filter((c) => c.kind !== "leaf" || !c.adminOnly || isAdmin)
+          .map((c) =>
+            c.kind === "leaf"
+              ? <LeafLink key={c.to} item={c} />
+              : <ExpandableBlock key={c.id} group={c} activePath={activePath} isAdmin={isAdmin} />,
+          )}
       </div>
     </div>
   );
@@ -253,8 +262,8 @@ function LeafLink({ item, nested = false }: { item: Leaf; nested?: boolean }) {
 
 
 function ExpandableBlock({
-  group, activePath,
-}: { group: ExpandableGroup; activePath: string }) {
+  group, activePath, isAdmin,
+}: { group: ExpandableGroup; activePath: string; isAdmin: boolean }) {
   // Phase 18 refinement — auto-expand when any of the group's CHILDREN
   // would be highlighted as active, not just when the parent matchPrefix
   // matches. This matters when sibling top-level leafs share a URL prefix
@@ -292,9 +301,11 @@ function ExpandableBlock({
       </button>
       {open && (
         <div className="flex flex-col gap-0.5 mt-0.5 mb-1">
-          {group.children.map((c) => (
-            <LeafLink key={c.to} item={c} nested />
-          ))}
+          {group.children
+            .filter((c) => !c.adminOnly || isAdmin)
+            .map((c) => (
+              <LeafLink key={c.to} item={c} nested />
+            ))}
         </div>
       )}
     </div>
