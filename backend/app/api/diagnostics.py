@@ -1161,3 +1161,90 @@ def _heatmap_cache_set(key: tuple, value: Any) -> None:
     if len(_HEATMAP_CACHE) > _HEATMAP_CACHE_MAX:
         oldest = min(_HEATMAP_CACHE.items(), key=lambda kv: kv[1][0])
         _HEATMAP_CACHE.pop(oldest[0], None)
+
+
+# ===========================================================================
+# Phase OPC-web.2.5 OPC diagnostics endpoint
+#
+# OPC UA sources are subscription-driven (push), not polled like Modbus, so
+# they don't fit the worker_device_status / Workers-table model. This gives
+# the Diagnostics page a dedicated OPC panel with OPC-native fields. Reads
+# only small tables (opc_sources + latest_tag_values via opc_tag_mappings),
+# no tag_values hypertable scan.
+# ===========================================================================
+
+class OpcSourceDiag(BaseModel):
+    source_id: int
+    name: str
+    endpoint: str
+    enabled: bool
+    mapping_count: int
+    publishing_interval_ms: int | None
+    last_sample_at: datetime | None
+    seconds_since_last_sample: float | None
+    last_server_clock_drift_sec: float | None
+    last_server_clock_check_at: datetime | None
+    state: str  # disabled | live | idle | stale | lost
+
+
+def _derive_opc_state(enabled: bool, age_sec: float | None) -> str:
+    """Live/Idle/Stale/Lost derivation — mirrors the OPC Sources page."""
+    if not enabled:
+        return "disabled"
+    if age_sec is None:
+        return "lost"
+    if age_sec <= 30:
+        return "live"
+    if age_sec <= 300:
+        return "idle"
+    if age_sec <= 3600:
+        return "stale"
+    return "lost"
+
+
+@router.get("/opc-sources", response_model=list[OpcSourceDiag])
+def list_opc_source_diagnostics(db: Annotated[Session, Depends(get_session)]):
+    """Per-OPC-source runtime state for the Diagnostics OPC panel.
+
+    last_sample_at reads from latest_tag_values (small table) joined via
+    opc_tag_mappings — sub-millisecond, no hypertable scan (see the
+    _load_source_response perf note in opc_sources.py).
+    """
+    rows = db.execute(text("""
+        SELECT
+            s.id              AS source_id,
+            s.name            AS name,
+            s.endpoint        AS endpoint,
+            s.is_enabled      AS enabled,
+            s.publishing_interval_ms        AS publishing_interval_ms,
+            s.last_server_clock_drift_sec   AS last_server_clock_drift_sec,
+            s.last_server_clock_check_at    AS last_server_clock_check_at,
+            COALESCE((SELECT COUNT(*) FROM opc_tag_mappings m
+                      WHERE m.opc_source_id = s.id), 0) AS mapping_count,
+            (SELECT MAX(ltv.time)
+               FROM latest_tag_values ltv
+               JOIN opc_tag_mappings m ON ltv.tag_id = m.tag_id
+              WHERE m.opc_source_id = s.id) AS last_sample_at
+        FROM opc_sources s
+        ORDER BY s.name
+    """)).mappings().all()
+
+    now = datetime.now(timezone.utc)
+    out: list[OpcSourceDiag] = []
+    for r in rows:
+        last = r["last_sample_at"]
+        age = (now - last).total_seconds() if last is not None else None
+        out.append(OpcSourceDiag(
+            source_id=r["source_id"],
+            name=r["name"],
+            endpoint=r["endpoint"],
+            enabled=r["enabled"],
+            mapping_count=r["mapping_count"],
+            publishing_interval_ms=r["publishing_interval_ms"],
+            last_sample_at=last,
+            seconds_since_last_sample=age,
+            last_server_clock_drift_sec=r["last_server_clock_drift_sec"],
+            last_server_clock_check_at=r["last_server_clock_check_at"],
+            state=_derive_opc_state(r["enabled"], age),
+        ))
+    return out
