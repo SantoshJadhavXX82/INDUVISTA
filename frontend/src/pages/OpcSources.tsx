@@ -36,6 +36,7 @@ import {
 
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { Gate } from "@/lib/rbac";
 import { PageHeader } from "@/components/ui/page-header";
 import { SectionCard } from "@/components/ui/section-card";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -185,6 +186,7 @@ export default function OpcSources() {
               )} />
               Refresh
             </button>
+            <Gate cap="configure">
             <button
               type="button"
               onClick={() => setCreateOpen(true)}
@@ -194,6 +196,7 @@ export default function OpcSources() {
               <Plus className="h-3 w-3" />
               Add OPC Source
             </button>
+            </Gate>
           </>
         }
       />

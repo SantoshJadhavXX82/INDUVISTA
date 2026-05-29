@@ -654,4 +654,207 @@ export const help = {
         "Matched values become FK references; unmatched values are stored as a per-tag override text. Add to the master under Configuration → Engineering Units if you import a unit repeatedly.",
     } satisfies HelpEntry,
   } satisfies Section,
+
+  alarm: {
+    rule_type: {
+      description:
+        "What condition triggers the alarm. hi/lo compare the value against a threshold; bool_true/bool_false fire on a digital state; frozen fires when the value stops changing for the window; rate-of-change types fire on fast movement.",
+      example: "hi for an over-pressure trip; frozen for a stuck transmitter; bool_true for a fault bit.",
+      impact:
+        "Determines which other fields apply — windowed types (frozen, rate) use the Window field; bool types ignore the threshold.",
+    } satisfies HelpEntry,
+    severity: {
+      description:
+        "Priority class for this alarm. Drives color, sort order, and how it surfaces on the dashboard and in reports.",
+      example: "critical for a safety trip; high for a process excursion; info for an advisory.",
+      impact:
+        "Severities are configurable under Configuration -> Severities (rank, color, code).",
+    } satisfies HelpEntry,
+    threshold: {
+      description:
+        "The value the tag is compared against. Interpreted in the tag's engineering units (or raw if no scaling).",
+      example: "For a hi alarm on a 0-30 bar transmitter, a threshold of 25 trips at 25 bar.",
+      impact:
+        "Ignored for bool rule types. For windowed/rate types it's the rate or count limit.",
+    } satisfies HelpEntry,
+    deadband: {
+      description:
+        "How far the value must recover past the threshold before the alarm clears. Prevents chattering when the value hovers at the limit.",
+      example: "Threshold 25, deadband 0.5 -> trips at 25, clears only below 24.5 (hi alarm).",
+      impact:
+        "Too small = chattering alarms on noisy signals; too large = slow to clear. Set just above the signal's noise band.",
+    } satisfies HelpEntry,
+    on_delay_sec: {
+      description:
+        "The condition must hold continuously for this many seconds before the alarm activates. Filters momentary spikes.",
+      example: "5 -> a brief 1-second excursion won't raise the alarm; a sustained one will.",
+      impact:
+        "Reduces nuisance alarms on transient noise. 0 = trip immediately.",
+    } satisfies HelpEntry,
+    off_delay_sec: {
+      description:
+        "The clear condition must hold for this many seconds before the alarm deactivates. Stabilises flapping near the threshold.",
+      example: "3 -> the value must stay in the safe band for 3s before the alarm clears.",
+      impact:
+        "Prevents rapid active/clear cycling. 0 = clear immediately when condition ends.",
+    } satisfies HelpEntry,
+    latched: {
+      description:
+        "A latched alarm stays active until a user acknowledges it, even if the condition has already cleared. Ensures transient trips aren't missed.",
+      example: "Enable for safety-critical trips that must be seen and acknowledged.",
+      impact:
+        "Latched alarms require an operator Ack to clear; unlatched alarms auto-clear when the condition ends.",
+    } satisfies HelpEntry,
+    window_seconds: {
+      description:
+        "Rolling time window for windowed rule types (frozen, rate-of-change). The rule evaluates the value's behaviour over this span.",
+      example: "frozen with a 60s window fires if the value hasn't changed in 60 seconds.",
+      impact:
+        "Only applies to windowed rule types; ignored for hi/lo/bool. Range 1-86400s.",
+    } satisfies HelpEntry,
+    message_template: {
+      description:
+        "The alarm text shown to operators. Use {value} and {threshold} placeholders to inject live numbers.",
+      example: "Pressure exceeded {threshold} bar (now {value})",
+      impact:
+        "A clear, specific message speeds operator response. Leave blank for an auto-generated default.",
+    } satisfies HelpEntry,
+  } satisfies Section,
+
+  opc_source: {
+    name: {
+      description:
+        "A friendly name for this OPC UA server connection. Shown throughout the UI and in logs.",
+      example: "Plant-A-UA, Compressor-PLC, GC-Analyzer",
+      impact:
+        "Locked after creation (changing it on a live source would orphan its subscription).",
+    } satisfies HelpEntry,
+    endpoint: {
+      description:
+        "The OPC UA server endpoint URL the worker connects to.",
+      example: "opc.tcp://192.168.1.50:4840  or  opc.tcp://host.docker.internal:14840",
+      impact:
+        "Must be reachable from the backend container. Locked after creation.",
+    } satisfies HelpEntry,
+    security_policy: {
+      description:
+        "The OPC UA security policy for the session - controls encryption and signing of traffic.",
+      example: "None for a trusted local test server; Basic256Sha256 for production over untrusted networks.",
+      impact:
+        "Anything other than None requires matching certificates configured on both ends.",
+    } satisfies HelpEntry,
+    publishing_interval_ms: {
+      description:
+        "How often (ms) the server publishes a batch of value changes to the subscription. The fastest the worker will hear about changes.",
+      example: "1000 = up to one update per second per changed node.",
+      impact:
+        "Lower = more responsive but more load on the server and network. The server may revise this to its own minimum.",
+    } satisfies HelpEntry,
+  } satisfies Section,
+
+  settings: {
+    timezone: {
+      description:
+        "The plant's local timezone. Dashboards, reports, and shift boundaries are presented in this zone; data is always stored in UTC.",
+      example: "Asia/Kolkata, Europe/London, America/Chicago",
+      impact:
+        "Changing it shifts how all timestamps are displayed (not the stored data) and recomputes shift windows.",
+    } satisfies HelpEntry,
+    shifts: {
+      description:
+        "Named work shifts with start times. Drives the current-shift indicator and shift-based report grouping.",
+      example: "Shift A 06:00, Shift B 14:00, Shift C 22:00",
+      impact:
+        "Shift boundaries are evaluated in the plant timezone above. Used by shift summaries and the sidebar clock.",
+    } satisfies HelpEntry,
+  } satisfies Section,
+
+  severity: {
+    code: {
+      description:
+        "A stable machine identifier for the severity, used by rules and the API. Immutable once created (system severities can't be renamed).",
+      example: "critical, high, medium, low, info",
+      impact:
+        "Rules reference severities by code; changing it would break existing rules, so it's locked after creation.",
+    } satisfies HelpEntry,
+    label: {
+      description:
+        "The human-readable name shown in the UI and reports.",
+      example: "Critical, High Priority, Advisory",
+      impact: "Display only - safe to edit anytime.",
+    } satisfies HelpEntry,
+    color_hex: {
+      description:
+        "The colour used for this severity's badges and dashboard accents.",
+      example: "#FF3B30 for critical, #FF9500 for high",
+      impact: "Pick distinct, high-contrast colours so operators can triage at a glance.",
+    } satisfies HelpEntry,
+    rank: {
+      description:
+        "Sort priority - lower rank = higher priority. Determines ordering in the active-alarms list and which severity wins when several apply.",
+      example: "critical = 1, high = 2, medium = 3 ...",
+      impact: "Must be unique. Drives the 'most severe first' sort everywhere alarms are listed.",
+    } satisfies HelpEntry,
+  } satisfies Section,
+
+  calc: {
+    name: {
+      description:
+        "The name of the computed tag. Follows the same conventions as a regular tag and appears alongside acquired tags.",
+      example: "TOTAL_MASS_FLOW, AVG_HEADER_PRESS, EFFICIENCY_PCT",
+      impact: "Must be unique within its computed device.",
+    } satisfies HelpEntry,
+    expression: {
+      description:
+        "The formula evaluated each cycle. References other tags by name and supports arithmetic and common functions.",
+      example: "(FC001_Flow + FC002_Flow) / 2,  P_in - P_out,  sqrt(dp) * K",
+      impact:
+        "Inputs must be valid tag names; a bad reference makes the computed tag read as BAD quality.",
+    } satisfies HelpEntry,
+    output_mode: {
+      description:
+        "Where the computed result goes. Internal keeps it as a computed tag only; external also writes it back to a real (writable) tag.",
+      example: "internal for a derived KPI; external to push a setpoint to a PLC.",
+      impact:
+        "External mode requires selecting a writable target tag and that tag's block be Read+Write.",
+    } satisfies HelpEntry,
+  } satisfies Section,
+
+  write: {
+    value: {
+      description:
+        "The value to write to this Coil or Holding Register. Interpreted in the tag's engineering units, then scaled to the raw register value.",
+      example: "For a setpoint tag scaled 0-100%, enter 75 to write 75%.",
+      impact:
+        "The write is sent immediately on confirm. Only tags on Read+Write blocks accept writes.",
+    } satisfies HelpEntry,
+    function_code: {
+      description:
+        "The Modbus write function, derived automatically from the register type and count (FC5/6 single, FC15/16 multiple).",
+      example: "A single Holding Register -> FC6; multiple -> FC16.",
+      impact: "Derived for you - shown for engineers who need wire-level detail.",
+    } satisfies HelpEntry,
+  } satisfies Section,
+
+  user: {
+    username: {
+      description:
+        "The login name. Used to sign in and recorded as the actor in the audit log.",
+      example: "j.smith, operator1, plant_engineer",
+      impact: "Must be unique. Shown against every action this user takes in the audit trail.",
+    } satisfies HelpEntry,
+    role: {
+      description:
+        "The user's permission level. Viewer reads only; Operator can acknowledge alarms and write setpoints; Engineer can configure devices/tags/alarms; Admin manages users and system settings.",
+      example: "Give shift operators Operator; give configuration staff Engineer.",
+      impact:
+        "Roles are hierarchical - each includes everything below it. Enforced both in the UI and on every API call.",
+    } satisfies HelpEntry,
+    password: {
+      description:
+        "The user's initial password. They'll be prompted to set their own on first login.",
+      example: "Use a strong temporary password; the user changes it immediately.",
+      impact: "Stored only as a secure hash; never recoverable - reset it if forgotten.",
+    } satisfies HelpEntry,
+  } satisfies Section,
 };

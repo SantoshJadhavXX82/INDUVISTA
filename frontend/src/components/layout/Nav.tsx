@@ -186,7 +186,7 @@ export default function Nav() {
   const entries = useEntries(alarmCount);
 
   return (
-    <nav className="flex flex-col gap-3 p-2">
+    <nav className="flex flex-col gap-3 p-2 flex-1 overflow-y-auto min-h-0">
       {entries.map((section, i) => (
         <SectionBlock key={`s-${i}`} section={section} activePath={location.pathname} isAdmin={isAdmin} />
       ))}

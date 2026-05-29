@@ -28,7 +28,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Check, ChevronDown, Loader2, Search, X } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 import { Button } from "@/components/ui/button";  // Phase 27e
+import { Gate } from "@/lib/rbac";
 import { Input } from "@/components/ui/input";  // Phase 27e
 // Phase 27d.1 — time format moved here from the top header. Uses the
 // existing context (localStorage-backed, per-browser preference) so
@@ -415,7 +418,7 @@ export default function Settings() {
       {/* Locale section */}
       <Card>
         <CardHeader>
-          <CardTitle>Locale</CardTitle>
+          <CardTitle className="inline-flex items-center">Locale<HelpTip entry={help.settings.timezone} /></CardTitle>
           <CardDescription>
             How dates and times are displayed across dashboards, heatmaps, and reports.
           </CardDescription>
@@ -623,7 +626,7 @@ function ShiftsCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Shifts</CardTitle>
+        <CardTitle className="inline-flex items-center">Shifts<HelpTip entry={help.settings.shifts} /></CardTitle>
         <CardDescription>
           Define the plant shift schedule. The sidebar clock shows the current
           shift based on these start times (plant local time). Shifts are
@@ -647,12 +650,14 @@ function ShiftsCard() {
               </div>
             ))}
             <div className="flex items-center gap-3 pt-1">
+              <Gate cap="administer" mode="disable">
               <Button
                 onClick={() => view && save.mutate(view)}
                 disabled={save.isPending || !draft}
               >
                 {save.isPending ? "Saving…" : "Save shifts"}
               </Button>
+              </Gate>
               {draft && (
                 <Button variant="ghost" onClick={() => setDraft(null)}>Reset</Button>
               )}

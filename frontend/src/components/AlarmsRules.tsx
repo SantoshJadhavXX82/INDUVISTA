@@ -20,6 +20,9 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { SeverityBadge } from "@/components/SeverityBadge";
 import AlarmsBulkImport from "@/components/AlarmsBulkImport";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
+import { Gate } from "@/lib/rbac";
 
 import type {
   AlarmRule, AlarmRuleCreate, AlarmRuleUpdate, RuleType, Severity,
@@ -276,11 +279,13 @@ export default function AlarmsRules() {
             </span>
             {!formOpen && (
               <div className="flex items-center gap-2">
+                <Gate cap="configure" mode="disable">
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
                         onClick={() => setBulkOpen(true)}>
                   <Upload className="h-3 w-3" />
                   Bulk import
                 </Button>
+                </Gate>
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
                         onClick={() => downloadExport("csv")}
                         disabled={rules.length === 0}
@@ -295,11 +300,13 @@ export default function AlarmsRules() {
                   <Download className="h-3 w-3" />
                   Export XLSX
                 </Button>
+                <Gate cap="configure" mode="disable">
                 <Button size="sm" variant="outline" className="h-7 text-xs gap-1"
                         onClick={openCreate}>
                   <Plus className="h-3 w-3" />
                   New rule
                 </Button>
+                </Gate>
               </div>
             )}
           </CardTitle>
@@ -420,6 +427,7 @@ export default function AlarmsRules() {
                       </td>
                       <td className="px-3 py-1.5 text-right">
                         <div className="inline-flex items-center gap-1">
+                          <Gate cap="configure">
                           <button
                             type="button"
                             onClick={() => openEdit(r)}
@@ -436,6 +444,7 @@ export default function AlarmsRules() {
                           >
                             <Trash2 className="h-3 w-3" />
                           </button>
+                          </Gate>
                         </div>
                       </td>
                     </tr>
@@ -526,7 +535,7 @@ function RuleForm({
         </label>
 
         <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Type</span>
+          <span className="text-muted-foreground inline-flex items-center">Type<HelpTip entry={help.alarm.rule_type} /></span>
           <select
             value={form.rule_type}
             onChange={(e) => set("rule_type", e.target.value as RuleType)}
@@ -552,7 +561,7 @@ function RuleForm({
         </label>
 
         <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground">Severity</span>
+          <span className="text-muted-foreground inline-flex items-center">Severity<HelpTip entry={help.alarm.severity} /></span>
           <select
             value={form.severity}
             onChange={(e) => set("severity", e.target.value as Severity)}
@@ -587,16 +596,16 @@ function RuleForm({
           return (
             <>
               <label className="flex flex-col gap-1 text-xs">
-                <span className="text-muted-foreground">{thresholdLabel}</span>
+                <span className="text-muted-foreground inline-flex items-center">{thresholdLabel}<HelpTip entry={help.alarm.threshold} /></span>
                 <Input value={form.threshold}
                        onChange={(e) => set("threshold", e.target.value)}
                        placeholder={isFrozen ? "e.g. 0.5" : "e.g. 100"}
                        {...numericLikeProps} />
               </label>
               <label className="flex flex-col gap-1 text-xs">
-                <span className="text-muted-foreground"
+                <span className="text-muted-foreground inline-flex items-center"
                       title="Hysteresis around the threshold to prevent chatter">
-                  Deadband
+                  Deadband<HelpTip entry={help.alarm.deadband} />
                 </span>
                 <Input value={form.deadband}
                        onChange={(e) => set("deadband", e.target.value)}
@@ -624,8 +633,8 @@ function RuleForm({
           }
           return (
             <label className="flex flex-col gap-1 text-xs col-span-2">
-              <span className="text-muted-foreground" title={hint}>
-                Window (seconds)
+              <span className="text-muted-foreground inline-flex items-center" title={hint}>
+                Window (seconds)<HelpTip entry={help.alarm.window_seconds} />
               </span>
               <Input value={form.window_seconds}
                      onChange={(e) => set("window_seconds", e.target.value)}
@@ -639,8 +648,8 @@ function RuleForm({
         })()}
 
         <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground" title="Seconds the condition must persist before activation">
-            On-delay (s)
+          <span className="text-muted-foreground inline-flex items-center" title="Seconds the condition must persist before activation">
+            On-delay (s)<HelpTip entry={help.alarm.on_delay_sec} />
           </span>
           <Input value={form.on_delay_sec}
                  onChange={(e) => set("on_delay_sec", e.target.value)}
@@ -649,8 +658,8 @@ function RuleForm({
         </label>
 
         <label className="flex flex-col gap-1 text-xs">
-          <span className="text-muted-foreground" title="Seconds the clear condition must persist before deactivation">
-            Off-delay (s)
+          <span className="text-muted-foreground inline-flex items-center" title="Seconds the clear condition must persist before deactivation">
+            Off-delay (s)<HelpTip entry={help.alarm.off_delay_sec} />
           </span>
           <Input value={form.off_delay_sec}
                  onChange={(e) => set("off_delay_sec", e.target.value)}
@@ -663,7 +672,7 @@ function RuleForm({
                  checked={form.latched}
                  onChange={(e) => set("latched", e.target.checked)} />
           <span>
-            <strong>Latched</strong>
+            <strong className="inline-flex items-center">Latched<HelpTip entry={help.alarm.latched} /></strong>
             <span className="block text-[10px] text-muted-foreground">
               Stays active until acknowledged
             </span>
@@ -683,8 +692,8 @@ function RuleForm({
         </label>
 
         <label className="flex flex-col gap-1 text-xs col-span-full">
-          <span className="text-muted-foreground">
-            Message template{" "}
+          <span className="text-muted-foreground inline-flex items-center">
+            Message template<HelpTip entry={help.alarm.message_template} />{" "}
             <span className="text-[10px]">
               (supports <code>{"{value}"}</code>, <code>{"{threshold}"}</code>, <code>{"{rule_type}"}</code>)
             </span>

@@ -17,6 +17,7 @@ import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { Gate } from "@/lib/rbac";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
@@ -106,9 +107,11 @@ export default function Groups() {
             blocks — a tag can belong to many groups (Area, Equipment, Report set, …).
           </p>
         </div>
+        <Gate cap="configure" mode="disable">
         <Button onClick={() => setCreateDrawerOpen(true)} size="sm">
           <Plus className="h-4 w-4 mr-1.5" /> New group
         </Button>
+        </Gate>
       </header>
 
       <div className="grid grid-cols-3 gap-3">

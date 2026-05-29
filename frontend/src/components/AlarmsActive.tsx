@@ -26,6 +26,7 @@ import { Badge } from "@/components/ui/badge";
 import { useTimeFormat } from "@/lib/timeFormat";
 import ShelveDialog from "@/components/ShelveDialog";
 import { useSeverityColors, hexWithAlpha } from "@/components/SeverityBadge";
+import { Gate } from "@/lib/rbac";
 import { useSeverities } from "@/lib/useSeverities";
 
 import type { AlarmActive, AlarmEvent, Severity, StateValue } from "@/types/alarms";
@@ -298,6 +299,7 @@ function ActiveRow({
       <td className="px-3 py-2 text-right">
         <div className="inline-flex items-center gap-1">
           {canShelve && (
+            <Gate cap="operate" mode="disable">
             <Button
               size="sm"
               variant="outline"
@@ -313,8 +315,10 @@ function ActiveRow({
               )}
               Shelve
             </Button>
+            </Gate>
           )}
           {canAck ? (
+            <Gate cap="operate" mode="disable">
             <Button
               size="sm"
               variant="outline"
@@ -329,6 +333,7 @@ function ActiveRow({
               )}
               Ack
             </Button>
+            </Gate>
           ) : (
             !canShelve && (
               <span className="text-[10px] text-muted-foreground">acked</span>

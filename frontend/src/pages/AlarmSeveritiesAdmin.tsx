@@ -18,6 +18,8 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 import {
   Plus, Pencil, Trash2, X, Save, AlertTriangle, RefreshCw, Palette,
 } from "lucide-react";
@@ -219,9 +221,9 @@ export default function AlarmSeveritiesAdmin() {
               <table className="w-full text-xs">
                 <thead className="bg-secondary/40 text-[10px] uppercase tracking-wider text-muted-foreground">
                   <tr>
-                    <th className="text-right px-3 py-2 font-medium w-12">Rank</th>
-                    <th className="text-left px-3 py-2 font-medium w-12">Color</th>
-                    <th className="text-left px-3 py-2 font-medium">Code</th>
+                    <th className="text-right px-3 py-2 font-medium w-12"><span className="inline-flex items-center">Rank<HelpTip entry={help.severity.rank} /></span></th>
+                    <th className="text-left px-3 py-2 font-medium w-12"><span className="inline-flex items-center">Color<HelpTip entry={help.severity.color_hex} /></span></th>
+                    <th className="text-left px-3 py-2 font-medium"><span className="inline-flex items-center">Code<HelpTip entry={help.severity.code} /></span></th>
                     <th className="text-left px-3 py-2 font-medium">Label</th>
                     <th className="text-center px-3 py-2 font-medium">Type</th>
                     <th className="text-right px-3 py-2 font-medium">In use</th>
