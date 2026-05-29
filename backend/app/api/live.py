@@ -69,6 +69,12 @@ class LiveTag(BaseModel):
     # and show stale freezes in red.
     is_heartbeat: bool
     heartbeat_max_stale_sec: int | None
+    # Phase 22 — logging config (so the tag form round-trips)
+    log_enabled: bool
+    log_mode: str
+    log_deadband: float
+    log_deadband_mode: str
+    log_interval_sec: int | None
     # Phase 8.5.1 — write opt-in flags. tag.writable is per-tag; block_writable
     # is the parent block's flag (null for unblocked writable tags). The
     # Write Console filters on (writable AND (block_writable IS NULL OR block_writable)).
@@ -114,6 +120,11 @@ _LIVE_SELECT = """
         t.enabled,
         t.is_heartbeat,
         t.heartbeat_max_stale_sec,
+        t.log_enabled,
+        t.log_mode,
+        t.log_deadband,
+        t.log_deadband_mode,
+        t.log_interval_sec,
         t.writable,
         rb.writable        AS block_writable,
         lv.value_double,

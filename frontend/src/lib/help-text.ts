@@ -168,6 +168,42 @@ export const help = {
         "Rule of thumb: 2-3× the expected update interval. Too tight = false alarms on normal jitter; too loose = late detection of frozen tasks.",
     } satisfies HelpEntry,
 
+    log_mode: {
+      description:
+        "Controls what gets written to history. every_sample logs every poll; on_change logs only when the value moves beyond the deadband; periodic logs once per force-log interval.",
+      example:
+        "on_change for steady process values (setpoints, slow temperatures); every_sample for fast counters or anything you need at full resolution.",
+      impact:
+        "on_change can cut storage 90-99% on steady tags. The live dashboard and alarms always see every reading regardless of mode — only history is gated.",
+    } satisfies HelpEntry,
+
+    log_deadband: {
+      description:
+        "For on_change mode: only log when the value differs from the last LOGGED value by more than this amount. 0 = log on any change.",
+      example:
+        "0.5 m3/h on a flow that jitters; 0.1 degC on a temperature.",
+      impact:
+        "Too small = little saving; too large = you miss real movements. Set it just above the sensor's normal noise band.",
+    } satisfies HelpEntry,
+
+    log_deadband_mode: {
+      description:
+        "Whether the deadband is in engineering units (absolute) or a percent of the tag's min..max range (percent).",
+      example:
+        "absolute 0.5 for a 0-100 flow; percent 1 = 1% of range.",
+      impact:
+        "percent is handy when you want the same relative sensitivity across tags with different ranges.",
+    } satisfies HelpEntry,
+
+    log_interval_sec: {
+      description:
+        "Force-log: the maximum gap between logged samples even if the value hasn't moved. Guarantees trend anchor points and bounds how long a steady tag goes unlogged. Also the period for periodic mode.",
+      example:
+        "60 for a steady value you still want a heartbeat row for once a minute.",
+      impact:
+        "Gap detection treats anything under this interval as expected stillness for on_change tags, so it won't false-alarm. Leave empty for no forced logging.",
+    } satisfies HelpEntry,
+
     named_set: {
       description:
         "Translates raw integer values into human-readable text in dashboards and reports.",

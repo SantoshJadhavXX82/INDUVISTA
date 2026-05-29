@@ -1367,6 +1367,12 @@ type EditableFields = {
   enabled: boolean;
   is_heartbeat: boolean;
   heartbeat_max_stale_sec: string;
+  // Phase 22 — logging config (strings for numeric inputs)
+  log_enabled: boolean;
+  log_mode: string;
+  log_deadband: string;
+  log_deadband_mode: string;
+  log_interval_sec: string;
   // Phase 8.2 — group memberships. Persisted via a separate endpoint
   // (PUT /api/tags/:id/groups), not the main PATCH body.
   group_ids: number[];
@@ -1473,6 +1479,17 @@ function TagEditPanel({
       if (form.writable !== original.writable)
         body.writable = form.writable;
     }
+    // Phase 22 — logging config diff (applies to all tag kinds).
+    if (form.log_enabled !== original.log_enabled)
+      body.log_enabled = form.log_enabled;
+    if (form.log_mode !== original.log_mode)
+      body.log_mode = form.log_mode;
+    if (form.log_deadband !== original.log_deadband)
+      body.log_deadband = form.log_deadband === "" ? 0 : parseFloat(form.log_deadband);
+    if (form.log_deadband_mode !== original.log_deadband_mode)
+      body.log_deadband_mode = form.log_deadband_mode;
+    if (form.log_interval_sec !== original.log_interval_sec)
+      body.log_interval_sec = form.log_interval_sec === "" ? null : parseInt(form.log_interval_sec, 10);
     if (form.named_set_id !== original.named_set_id)
       body.named_set_id = form.named_set_id;
 
@@ -1791,6 +1808,89 @@ function TagEditPanel({
           )}
         </div>
 
+        {/* Phase 22 — historian logging config. Applies to every tag kind
+            (Modbus, OPC, computed). Live value + alarms are unaffected;
+            this only controls what's written to history. */}
+        <div className="rounded-lg border p-3 space-y-2 bg-secondary/30">
+          <div className="font-medium text-sm inline-flex items-center gap-1">
+            Historian logging
+            <HelpTip entry={help.tag.log_mode} />
+          </div>
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              checked={form.log_enabled}
+              onChange={(e) => setForm({ ...form, log_enabled: e.target.checked })}
+              className="h-4 w-4"
+            />
+            <span>Write this tag to history</span>
+          </label>
+          {form.log_enabled && (
+            <div className="pl-6 space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="log_mode">Mode <HelpTip entry={help.tag.log_mode} /></Label>
+                  <select
+                    id="log_mode"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                    value={form.log_mode}
+                    onChange={(e) => setForm({ ...form, log_mode: e.target.value })}
+                  >
+                    <option value="every_sample">Every sample</option>
+                    <option value="on_change">On change</option>
+                    <option value="periodic">Periodic</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="log_interval">
+                    Force-log interval (s) <HelpTip entry={help.tag.log_interval_sec} />
+                  </Label>
+                  <Input
+                    id="log_interval"
+                    type="number"
+                    min="1"
+                    placeholder={form.log_mode === "periodic" ? "required" : "optional"}
+                    value={form.log_interval_sec}
+                    onChange={(e) => setForm({ ...form, log_interval_sec: e.target.value })}
+                  />
+                </div>
+              </div>
+              {form.log_mode === "on_change" && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="log_deadband">
+                      Deadband <HelpTip entry={help.tag.log_deadband} />
+                    </Label>
+                    <Input
+                      id="log_deadband"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={form.log_deadband}
+                      onChange={(e) => setForm({ ...form, log_deadband: e.target.value })}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="log_db_mode">
+                      Deadband unit <HelpTip entry={help.tag.log_deadband_mode} />
+                    </Label>
+                    <select
+                      id="log_db_mode"
+                      className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                      value={form.log_deadband_mode}
+                      onChange={(e) => setForm({ ...form, log_deadband_mode: e.target.value })}
+                    >
+                      <option value="absolute">Absolute (eng. units)</option>
+                      <option value="percent">Percent of range</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+              <LoggingEstimate form={form} />
+            </div>
+          )}
+        </div>
+
         {/* Phase 8.5.1 — writability opt-in.
             If the parent block is Read-only, lock this checkbox OFF —
             tags can't be writable when their block isn't. To allow
@@ -1894,6 +1994,55 @@ function DT({ label, children }: { label: string; children: React.ReactNode }) {
   );
 }
 
+function LoggingEstimate({ form }: { form: EditableFields }) {
+  // Relative storage guidance. We assume a 1 Hz scan (the common case) since
+  // the device scan interval isn't in the form; this is a guide, not a promise.
+  const ASSUMED_SCAN_HZ = 1;
+  const perDayEvery = ASSUMED_SCAN_HZ * 86400;
+  let perDay = perDayEvery;
+  let basis = "";
+  if (!form.log_enabled) {
+    return (
+      <div className="text-xs rounded-md px-3 py-2" style={{ backgroundColor: "var(--secondary)", color: "var(--text-secondary)" }}>
+        History disabled — 0 rows/day for this tag. Live value still updates.
+      </div>
+    );
+  }
+  if (form.log_mode === "every_sample") {
+    perDay = perDayEvery;
+    basis = "every poll";
+  } else if (form.log_mode === "periodic") {
+    const iv = parseInt(form.log_interval_sec, 10);
+    perDay = iv > 0 ? Math.floor(86400 / iv) : perDayEvery;
+    basis = `one row / ${iv || "?"}s`;
+  } else {
+    // on_change: assume a moderate change rate of ~5% of polls, plus force-log.
+    const changeRows = Math.round(perDayEvery * 0.05);
+    const iv = parseInt(form.log_interval_sec, 10);
+    const forceRows = iv > 0 ? Math.floor(86400 / iv) : 0;
+    perDay = Math.max(changeRows, forceRows, 1);
+    basis = "~5% change rate + force-log (estimate)";
+  }
+  const BYTES_PER_ROW = 76; // uncompressed tag_values row, approx
+  const mbDay = (perDay * BYTES_PER_ROW) / 1e6;
+  const mbYear = mbDay * 365;
+  const reductionPct = perDayEvery > 0 ? (1 - perDay / perDayEvery) * 100 : 0;
+  return (
+    <div className="text-xs rounded-md px-3 py-2 space-y-0.5" style={{ backgroundColor: "var(--secondary)", color: "var(--text-secondary)" }}>
+      <div>
+        <strong style={{ color: "var(--text-primary)" }}>Est. ~{perDay.toLocaleString()} rows/day</strong>
+        {" "}({basis}) · {mbDay < 1 ? `${(mbDay * 1000).toFixed(0)} KB` : `${mbDay.toFixed(1)} MB`}/day
+        {" "}· {mbYear < 1000 ? `${mbYear.toFixed(0)} MB` : `${(mbYear / 1000).toFixed(1)} GB`}/yr
+      </div>
+      {form.log_mode !== "every_sample" && reductionPct > 0 && (
+        <div style={{ color: "var(--ios-green, #34c759)" }}>
+          ~{reductionPct.toFixed(0)}% less than every-sample (assumes 1 Hz scan).
+        </div>
+      )}
+    </div>
+  );
+}
+
 function seedForm(tag: LiveTag): EditableFields {
   return {
     name: tag.tag_name,
@@ -1910,6 +2059,11 @@ function seedForm(tag: LiveTag): EditableFields {
     is_heartbeat: tag.is_heartbeat,
     heartbeat_max_stale_sec:
       tag.heartbeat_max_stale_sec === null ? "" : String(tag.heartbeat_max_stale_sec),
+    log_enabled: tag.log_enabled ?? true,
+    log_mode: tag.log_mode ?? "every_sample",
+    log_deadband: tag.log_deadband == null ? "0" : String(tag.log_deadband),
+    log_deadband_mode: tag.log_deadband_mode ?? "absolute",
+    log_interval_sec: tag.log_interval_sec == null ? "" : String(tag.log_interval_sec),
     group_ids: tag.group_ids ?? [],
     named_set_id: tag.named_set_id,
     writable: tag.writable,
