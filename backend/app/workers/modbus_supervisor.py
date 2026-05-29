@@ -183,7 +183,7 @@ def load_polling_config() -> list[dict]:
 
 
 def _run_stale_check(eng) -> int:
-    """SQL UPDATE that downgrades VALID rows past their stale threshold.
+    """SQL UPDATE that downgrades VALID rows past their stale threshold (scan-interval aware).
 
     Phase 17 — writable tags are exempt. These are command/setpoint
     registers that sit at the same value indefinitely by design (a start
@@ -195,15 +195,27 @@ def _run_stale_check(eng) -> int:
     HEARTBEAT_FROZEN code path.
     """
     with eng.begin() as conn:
+        # Phase 22.3 — scan-interval aware threshold. A tag is only stale
+        # when it has missed its EFFECTIVE cadence, not a flat device value.
+        # effective = max(device.stale_after_sec, effective_scan_sec * 1.5).
+        # This stops healthy tags on slow blocks (e.g. 60s chromatograph
+        # blocks) from being swept in the gap between scans, while a dead
+        # fast tag still trips at stale_after_sec.
         result = conn.execute(text("""
             UPDATE latest_tag_values lv
             SET st = 64, st_reason = 'STALE'
             FROM tags t
             JOIN devices d ON d.id = t.device_id
+            LEFT JOIN register_blocks b ON b.id = t.register_block_id
             WHERE lv.tag_id = t.id
               AND t.writable = false
               AND lv.st >= 128
-              AND lv.time < NOW() - (d.stale_after_sec * INTERVAL '1 second')
+              AND lv.time < NOW() - (
+                    GREATEST(
+                      d.stale_after_sec,
+                      COALESCE(b.scan_interval_ms, d.scan_interval_ms) / 1000.0 * 1.5
+                    ) * INTERVAL '1 second'
+                  )
         """))
         return result.rowcount
 

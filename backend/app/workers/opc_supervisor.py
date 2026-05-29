@@ -110,7 +110,7 @@ import logging
 import os
 import signal
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -134,6 +134,9 @@ log = logging.getLogger(__name__)
 # update rate × dozens of tags). Tune higher if your sources fire
 # faster than the historian can absorb.
 FLUSH_INTERVAL_SEC = 1.0
+# Phase 22.2 — re-emit cached OPC values this often so constant tags
+# don't go STALE (change-driven subscriptions send nothing when steady).
+OPC_KEEPALIVE_SEC = float(os.environ.get("OPC_KEEPALIVE_SEC", "20"))
 
 # Session + secure-channel timeouts handed to asyncua. Phase OPC-web.2.1
 # bumped these from 30s after observing asyncua's secure-channel renewal
@@ -302,6 +305,9 @@ class _SourceContext:
     tag_by_node: dict[str, int]
     buffer: "_SampleBuffer"
     last_sample_ts: float = 0.0
+    # Phase 22.2 — last sample per tag_id, re-emitted by the keep-alive
+    # loop so constant values keep latest_tag_values.time fresh.
+    last_value_by_tag: dict = field(default_factory=dict)
     # Phase OPC-web.2.2: when True, use DataValue.SourceTimestamp; when
     # False (default) use ingest-time UTC. AGG SoftBus simulator and
     # other untrusted servers should stay at False to avoid wall-clock
@@ -374,6 +380,9 @@ class _SubHandler:
                 source="opc_ua",
             )
             self.ctx.buffer.append(sample)
+            # Phase 22.2 — remember the latest sample so the keep-alive
+            # loop can re-emit it while the value stays constant.
+            self.ctx.last_value_by_tag[tag_id] = sample
             # Watchdog timestamp — monotonic, used by the per-source
             # watchdog to detect silent stalls. Update AFTER successful
             # enqueue so a malformed sample doesn't pretend liveness.
@@ -574,6 +583,50 @@ def load_one_source_from_db(source_id: int) -> dict | None:
 # ── Per-source worker ───────────────────────────────────────────────
 
 
+async def _keepalive_loop(
+    ctx: "_SourceContext",
+    stop_event: asyncio.Event,
+) -> None:
+    """Re-emit each tag's last value periodically so constant OPC tags keep
+    latest_tag_values.time fresh and don't get falsely marked STALE.
+
+    Re-emitted samples carry a new ingest timestamp and flow through the
+    normal buffer -> flusher path. The flusher's logging policy decides
+    history: an unchanged value under on_change/every_sample is NOT
+    historized again here (write_latest_only), so this adds no storage.
+    """
+    log.info(
+        "[%s] keep-alive started (every %.0fs)",
+        ctx.source_name, OPC_KEEPALIVE_SEC,
+    )
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=OPC_KEEPALIVE_SEC)
+            break  # stop requested
+        except asyncio.TimeoutError:
+            pass
+        # Snapshot cached values and re-emit with a fresh timestamp.
+        for tag_id, last in list(ctx.last_value_by_tag.items()):
+            refreshed = Sample(
+                tag_id=last.tag_id,
+                device_id=last.device_id,
+                register_block_id=last.register_block_id,
+                time=datetime.now(timezone.utc),
+                value_double=last.value_double,
+                value_text=last.value_text,
+                st=last.st,
+                # KEEPALIVE marker: the flusher policy detects this prefix and
+                # routes the sample to latest_only ALWAYS (it's a liveness
+                # refresh, never history), then stores the real reason.
+                st_reason="KEEPALIVE:" + (last.st_reason or ""),
+                source=last.source,
+            )
+            ctx.buffer.append(refreshed)
+            # Keep the cache holding the real (un-marked) sample so we don't
+            # accumulate KEEPALIVE: prefixes on every cycle.
+            ctx.last_value_by_tag[tag_id] = last
+
+
 async def opc_source_worker(
     source: dict,
     buffer: _SampleBuffer,
@@ -736,6 +789,13 @@ async def _connect_and_subscribe(
             _heartbeat_watchdog(ctx, source, stalled_flag),
             name=f"watchdog-{ctx.source_name}",
         )
+        # Phase 22.2 — keep-alive: re-emit constant values so they don't
+        # go STALE. Cancelled in the same finally block as the watchdog.
+        keepalive_stop: asyncio.Event = asyncio.Event()
+        keepalive_task = asyncio.create_task(
+            _keepalive_loop(ctx, keepalive_stop),
+            name=f"keepalive-{ctx.source_name}",
+        )
 
         try:
             # Hold until any of three things happen:
@@ -756,8 +816,14 @@ async def _connect_and_subscribe(
                 )
         finally:
             watchdog_task.cancel()
+            keepalive_stop.set()
+            keepalive_task.cancel()
             try:
                 await watchdog_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            try:
+                await keepalive_task
             except (asyncio.CancelledError, Exception):
                 pass
 
@@ -933,6 +999,12 @@ class _LoggingPolicy:
         """Return (to_log, latest_only). Updates state for logged samples."""
         to_log, latest_only = [], []
         for s in batch:
+            # Phase 22.2 — keep-alive liveness refresh: never history, always
+            # latest_only. Strip the marker so the stored reason is clean.
+            if s.st_reason and s.st_reason.startswith("KEEPALIVE:"):
+                s.st_reason = s.st_reason[len("KEEPALIVE:"):] or None
+                latest_only.append(s)
+                continue
             if self._should_log(s):
                 to_log.append(s)
                 self._state[s.tag_id] = (
