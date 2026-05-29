@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Gate } from "@/lib/rbac";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
@@ -96,9 +97,11 @@ export default function EngineeringUnits() {
             or override with a custom value for one-off cases.
           </p>
         </div>
+        <Gate cap="configure" mode="disable">
         <Button onClick={() => setCreateDrawerOpen(true)} size="sm">
           <Plus className="h-4 w-4 mr-1.5" /> New unit
         </Button>
+        </Gate>
       </header>
 
       <div className="grid grid-cols-3 gap-3">

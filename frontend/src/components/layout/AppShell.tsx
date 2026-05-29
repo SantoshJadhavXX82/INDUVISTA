@@ -35,7 +35,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen" style={{ backgroundColor: "var(--bg-grouped)", color: "var(--ios-gray-1)" }}>
       {!isMobile && (
       <aside
-        className="w-60 shrink-0 flex flex-col"
+        className="w-60 shrink-0 flex flex-col h-screen min-h-0"  /* scrollfix */
         style={{
           backgroundColor: "var(--bg-elevated)",
           borderRight: "0.5px solid var(--separator)",

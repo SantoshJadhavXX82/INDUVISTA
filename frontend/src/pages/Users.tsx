@@ -12,6 +12,8 @@
  * backend independently enforces admin on every endpoint — defense in depth.
  */
 import { useState } from "react";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { UserPlus, KeyRound, Ban, CheckCircle2, Trash2, AlertTriangle, HelpCircle, ChevronDown, ChevronUp, X } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
@@ -130,8 +132,8 @@ export default function Users() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Username</TableHead>
-                  <TableHead>Role</TableHead>
+                  <TableHead><span className="inline-flex items-center">Username<HelpTip entry={help.user.username} /></span></TableHead>
+                  <TableHead><span className="inline-flex items-center">Role<HelpTip entry={help.user.role} /></span></TableHead>
                   <TableHead>Provider</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Last login</TableHead>

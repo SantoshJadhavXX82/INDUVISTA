@@ -23,6 +23,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { PageHeader } from "@/components/ui/page-header";
+import { Gate } from "@/lib/rbac";
 import { SectionCard } from "@/components/ui/section-card";
 import { formatFloat } from "@/lib/format";
 
@@ -258,6 +259,7 @@ export default function CalcDefinitionsAdmin() {
               <Settings className="h-3 w-3" />
               Manage devices
             </button>
+            <Gate cap="configure">
             <button
               type="button"
               onClick={handleCreateGlobal}
@@ -271,6 +273,7 @@ export default function CalcDefinitionsAdmin() {
               <Plus className="h-3 w-3" />
               New computed tag
             </button>
+            </Gate>
           </>
         }
       />

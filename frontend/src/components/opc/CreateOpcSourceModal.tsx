@@ -26,6 +26,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { X, AlertTriangle, Loader2, Eye, EyeOff } from "lucide-react";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 
 import { api } from "@/lib/api";
 import type { OpcSourceCreate, OpcSourceResponse, OpcSourceUpdate } from "@/types/api";
@@ -218,7 +220,7 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
           {/* Name */}
           <div>
             <label className="text-[11px] text-muted-foreground block mb-1">
-              Name {!isEdit && <span className="text-destructive">*</span>}
+              Name <HelpTip entry={help.opc_source.name} />{!isEdit && <span className="text-destructive">*</span>}
             </label>
             <input
               type="text"
@@ -257,7 +259,7 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
           {/* Endpoint */}
           <div>
             <label className="text-[11px] text-muted-foreground block mb-1">
-              Endpoint URL {!isEdit && <span className="text-destructive">*</span>}
+              Endpoint URL <HelpTip entry={help.opc_source.endpoint} />{!isEdit && <span className="text-destructive">*</span>}
             </label>
             <input
               type="text"
@@ -282,7 +284,7 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="text-[11px] text-muted-foreground block mb-1">
-                Security policy
+                Security policy<HelpTip entry={help.opc_source.security_policy} />
               </label>
               <select
                 value={securityPolicy}
@@ -362,7 +364,7 @@ export function CreateOpcSourceModal({ open, onClose, existingSource }: Props) {
             <div className="grid grid-cols-3 gap-3">
               <div>
                 <label className="text-[10px] text-muted-foreground block mb-1">
-                  Publishing interval (ms)
+                  Publishing interval (ms)<HelpTip entry={help.opc_source.publishing_interval_ms} />
                 </label>
                 <input
                   type="number"

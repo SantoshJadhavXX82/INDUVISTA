@@ -28,6 +28,9 @@ export function HelpTip({
 }) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<"bottom" | "top">("bottom");
+  // Phase UI — horizontal flip (halign) so the popover never clips the
+  // right edge of the window (e.g. in the tag-form drawer).
+  const [halign, setHalign] = useState<"left" | "right">("left");
   const buttonRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 
@@ -59,6 +62,11 @@ export function HelpTip({
     const rect = buttonRef.current.getBoundingClientRect();
     const spaceBelow = window.innerHeight - rect.bottom;
     setPosition(spaceBelow < 180 ? "top" : "bottom");
+    // Popover is w-72 (288px). If there isn't room to the right of the icon,
+    // anchor it to the right edge so it opens leftward and stays on-screen.
+    const POPOVER_W = 288;
+    const spaceRight = window.innerWidth - rect.left;
+    setHalign(spaceRight < POPOVER_W + 16 ? "right" : "left");
   }, [open]);
 
   return (
@@ -100,7 +108,7 @@ export function HelpTip({
           role="tooltip"
           className={cn(
             "absolute z-50 w-72 rounded-md border bg-popover shadow-md p-3 text-sm",
-            "left-0",
+            halign === "left" ? "left-0" : "right-0",
             position === "bottom" ? "top-full mt-1" : "bottom-full mb-1",
           )}
           onMouseLeave={() => setOpen(false)}

@@ -34,6 +34,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Gate } from "@/lib/rbac";
 import {
   Table,
   TableHeader,
@@ -387,6 +388,7 @@ export default function WriteConsole() {
                             />
                           </TableCell>
                           <TableCell>
+                            <Gate cap="operate" mode="disable">
                             <Button
                               size="sm"
                               variant="secondary"
@@ -403,6 +405,7 @@ export default function WriteConsole() {
                                 </>
                               )}
                             </Button>
+                            </Gate>
                           </TableCell>
                           <TableCell>
                             <WriteResultBadge state={state} />
