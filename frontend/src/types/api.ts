@@ -208,6 +208,12 @@ export type LiveTag = {
   // Phase 7 E1a — heartbeat metadata
   is_heartbeat: boolean;
   heartbeat_max_stale_sec: number | null;
+  // Phase 22 — historian logging config
+  log_enabled: boolean;
+  log_mode: string;
+  log_deadband: number;
+  log_deadband_mode: string;
+  log_interval_sec: number | null;
   // Phase 8.5.1 — write opt-in flags. tag-level + parent-block-level.
   // block_writable is null for unblocked tags (no parent to gate on).
   writable: boolean;
