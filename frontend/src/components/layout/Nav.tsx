@@ -39,6 +39,7 @@ import {
   Wifi,
   Settings,
   UserCog,
+  FileBarChart,
   HelpCircle, Info,
   type LucideIcon,
 } from "lucide-react";
@@ -90,6 +91,7 @@ function useEntries(alarmCount: number): Section[] {
       children: [
         { kind: "leaf", to: "/dashboard", label: "Dashboard", icon: Gauge },
         { kind: "leaf", to: "/trend",     label: "Trend",     icon: TrendingUp, matchPrefix: "/trend" },
+        { kind: "leaf", to: "/reports",   label: "Reports",   icon: FileBarChart, matchPrefix: "/reports" },
         {
           kind: "leaf", to: "/alarms", label: "Alarms",
           // When alarms are firing, swap the static Bell for the animated
@@ -231,6 +233,7 @@ function SectionBlock({
 
 const NAV_TILE_COLORS: Record<string, string> = {
   "/dashboard": "blue",
+  "/reports": "indigo",
   "/trend": "teal",
   "/alarms": "red",
   "/tags": "green",

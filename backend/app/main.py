@@ -27,6 +27,7 @@ from app.api import (
     live,
     named_sets,
     register_blocks,
+    reports,
     tags,
     writes,
 )
@@ -108,6 +109,7 @@ app.include_router(channels.router)
 app.include_router(devices.router)
 app.include_router(register_blocks.router)
 app.include_router(tags.router)
+app.include_router(reports.router)
 
 # Phase 5 router
 app.include_router(diagnostics.router)

@@ -31,3 +31,6 @@ asyncua>=1.1,<2
 pyjwt==2.9.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.2.0
+
+# Phase 20 - PDF report generation (pure-Python, no system deps).
+reportlab==4.2.5
