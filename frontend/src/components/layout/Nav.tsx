@@ -39,6 +39,7 @@ import {
   Wifi,
   Settings,
   UserCog,
+  HelpCircle, Info,
   type LucideIcon,
 } from "lucide-react";
 
@@ -160,6 +161,14 @@ function useEntries(alarmCount: number): Section[] {
         },
       ],
     },
+    {
+      kind: "section",
+      label: "Help",
+      children: [
+        { kind: "leaf", to: "/help",  label: "Help",  icon: HelpCircle, matchPrefix: "/help" },
+        { kind: "leaf", to: "/about", label: "About", icon: Info,       matchPrefix: "/about" },
+      ],
+    },
   ], [alarmCount]);
 }
 
@@ -186,7 +195,7 @@ export default function Nav() {
   const entries = useEntries(alarmCount);
 
   return (
-    <nav className="flex flex-col gap-3 p-2 flex-1 overflow-y-auto min-h-0">
+    <nav className="nav-autohide flex flex-col gap-3 p-2 flex-1 overflow-y-auto min-h-0">
       {entries.map((section, i) => (
         <SectionBlock key={`s-${i}`} section={section} activePath={location.pathname} isAdmin={isAdmin} />
       ))}
@@ -220,6 +229,40 @@ function SectionBlock({
 }
 
 
+const NAV_TILE_COLORS: Record<string, string> = {
+  "/dashboard": "blue",
+  "/trend": "teal",
+  "/alarms": "red",
+  "/tags": "green",
+  "/diagnostics": "pink",
+  "/audit-log": "gray",
+  "/data-gaps": "orange",
+  "/historian": "indigo",
+  "/config/channels": "teal",
+  "/config/devices": "blue",
+  "/config/blocks": "indigo",
+  "/global/calc-blocks": "purple",
+  "/config/opc-sources": "teal",
+  "/modbus/registers": "blue",
+  "/modbus/frames": "indigo",
+  "/modbus/write-console": "orange",
+  "/modbus/write-audit": "gray",
+  "/global/engineering-units": "green",
+  "/global/alarm-severities": "purple",
+  "/global/alarm-types": "indigo",
+  "/global/groups": "green",
+  "/global/named-sets": "teal",
+  "/global/duty-standby-values": "orange",
+  "/global/settings": "gray",
+  "/global/users": "blue",
+  "/help": "blue",
+  "/about": "gray",
+};
+
+function tileColor(to: string): string {
+  return NAV_TILE_COLORS[to] ?? "gray";
+}
+
 function LeafLink({ item, nested = false }: { item: Leaf; nested?: boolean }) {
   return (
     <NavLink
@@ -228,7 +271,7 @@ function LeafLink({ item, nested = false }: { item: Leaf; nested?: boolean }) {
       className={() =>
         cn(
           "flex items-center gap-3 rounded-md text-[13px] transition-colors",
-          nested ? "pl-9 pr-3 py-1.5" : "px-3 py-1.5",
+          nested ? "pl-8 pr-3 py-1" : "px-3 py-1.5",
         )
       }
       style={({ isActive }) => isActive
@@ -246,13 +289,28 @@ function LeafLink({ item, nested = false }: { item: Leaf; nested?: boolean }) {
               current route, the icon gets fill=currentColor (becomes a
               "weight increase" you can feel in peripheral vision). When
               inactive it stays clean outline. iOS Settings does this. */}
-          <item.icon
-            className={cn("h-4 w-4 shrink-0", item.iconClassName)}
-            style={item.iconStyle}
-            fill={isActive && !item.iconStyle ? "currentColor" : "none"}
-            fillOpacity={isActive && !item.iconStyle ? 0.18 : undefined}
-            strokeWidth={isActive ? 2 : 1.75}
-          />
+          <span
+            className="shrink-0 inline-flex items-center justify-center rounded-[7px]"
+            style={{
+              width: 28,
+              height: 28,
+              backgroundColor: item.iconStyle?.color
+                ? "transparent"
+                : isActive
+                  ? `var(--ios-${tileColor(item.to)})`
+                  : `var(--ios-${tileColor(item.to)}-soft)`,
+            }}
+          >
+            <item.icon
+              className={cn("h-5 w-5", item.iconClassName)}
+              style={
+                item.iconStyle ?? {
+                  color: isActive ? "#fff" : `var(--ios-${tileColor(item.to)})`,
+                }
+              }
+              strokeWidth={2}
+            />
+          </span>
           <span className="flex-1 truncate">{item.label}</span>
           {item.badge}
         </>
