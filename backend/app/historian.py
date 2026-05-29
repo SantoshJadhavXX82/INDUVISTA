@@ -216,6 +216,36 @@ class HistorianWriter:
             conn.execute(_INSERT_HISTORY_SQL, kept)
         return len(kept)
 
+    def write_latest_only(self, samples: Sequence[Sample]) -> int:
+        """Upsert into latest_tag_values ONLY — skip tag_values (history).
+
+        Used for samples the per-tag logging policy decided NOT to historize
+        (e.g. on_change with the value still inside the deadband). The live
+        value must still reflect the newest reading, so latest is updated.
+
+        The latest upsert already guards `WHERE latest.time < EXCLUDED.time`,
+        so this can never move latest backwards. FK-violation recovery matches
+        write_samples: drop orphans (tag deleted mid-cycle), retry.
+        """
+        if not samples:
+            return 0
+        rows = self._rows_from(samples)
+        try:
+            with self._engine.begin() as conn:
+                conn.execute(_UPSERT_LATEST_SQL, rows)
+            return len(rows)
+        except IntegrityError as e:
+            if not self._is_fk_violation(e):
+                raise
+        kept, missing = self._drop_orphaned_rows(rows)
+        if missing:
+            self._log_dropped(len(rows) - len(kept), missing)
+        if not kept:
+            return 0
+        with self._engine.begin() as conn:
+            conn.execute(_UPSERT_LATEST_SQL, kept)
+        return len(kept)
+
     def is_healthy(self, timeout_seconds: float = 2.0) -> bool:
         """Fast probe: can we reach Postgres right now?
 
@@ -279,6 +309,17 @@ class BufferedHistorianWriter:
                     self._consecutive_failures, len(samples),
                 )
             return self._buffer.append(list(samples))
+
+    def write_latest_only(self, samples: Sequence[Sample]) -> int:
+        """Best-effort latest-only update. If Postgres is down, no-op — the
+        next successful poll refreshes latest. We never buffer latest-only
+        samples (a stale latest must not be replayed over a fresh value)."""
+        if not samples:
+            return 0
+        try:
+            return self._direct.write_latest_only(samples)
+        except Exception:
+            return 0
 
     @property
     def consecutive_failures(self) -> int:

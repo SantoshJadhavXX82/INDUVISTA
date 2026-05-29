@@ -69,6 +69,22 @@ class StaleTag(BaseModel):
     st_reason: str | None
 
 
+class DataGapsContext(BaseModel):
+    """Logging context so the UI can explain the effective gap threshold."""
+    tag_id: int
+    tag_name: str
+    log_mode: str
+    log_interval_sec: int | None
+    requested_min_gap_sec: float
+    effective_min_gap_sec: float
+    note: str
+
+
+class DataGapsResponse(BaseModel):
+    context: DataGapsContext
+    gaps: list["DataGap"]
+
+
 class DataGap(BaseModel):
     tag_id: int
     gap_start: datetime
@@ -459,7 +475,7 @@ def list_stale_tags(db: Annotated[Session, Depends(get_session)]):
     return [dict(r) for r in rows]
 
 
-@router.get("/data-gaps/{tag_id}", response_model=list[DataGap])
+@router.get("/data-gaps/{tag_id}", response_model=DataGapsResponse)
 def find_data_gaps(
     tag_id: int,
     db: Annotated[Session, Depends(get_session)],
@@ -473,7 +489,7 @@ def find_data_gaps(
     ] = 10.0,
     limit: Annotated[int, Query(ge=1, le=10000)] = 1000,
 ):
-    """Find time gaps in tag_values for one tag, longest first.
+    """Find time gaps in tag_values for one tag, longest first (logging-mode aware).
 
     A "gap" is the interval between two consecutive samples that exceeds
     `min_gap_sec`. Defaults: last 24 hours, gaps > 10 seconds.
@@ -484,7 +500,8 @@ def find_data_gaps(
     to ignore micro-jitter from cycle scheduling.
     """
     tag = db.execute(
-        text("SELECT id, name FROM tags WHERE id = :id"),
+        text("""SELECT id, name, log_mode, log_interval_sec
+                FROM tags WHERE id = :id"""),
         {"id": tag_id},
     ).mappings().first()
     if not tag:
@@ -492,6 +509,32 @@ def find_data_gaps(
 
     if since is None:
         since = datetime.now(timezone.utc) - timedelta(hours=24)
+
+    # Phase 22 — logging-mode aware threshold. For on_change/periodic tags a
+    # steady value produces no samples by design; only an interval exceeding
+    # the force-log interval (plus tolerance for scheduler jitter) is a real
+    # gap (the guaranteed anchor failed to arrive = genuine data loss).
+    _TOLERANCE = 1.10  # 10% headroom for cycle jitter
+    log_mode = tag.get("log_mode") or "every_sample"
+    log_interval = tag.get("log_interval_sec")
+    effective_min_gap = float(min_gap_sec)
+    if log_mode in ("on_change", "periodic"):
+        if log_interval:
+            effective_min_gap = max(float(min_gap_sec), float(log_interval) * _TOLERANCE)
+            note = (
+                f"Tag logs '{log_mode}' with a {log_interval}s force-log interval. "
+                f"Gaps shorter than {effective_min_gap:.0f}s are expected (steady "
+                f"value) and not reported."
+            )
+        else:
+            note = (
+                f"Tag logs '{log_mode}' with NO force-log interval, so a steady "
+                f"value legitimately produces long stretches without samples. "
+                f"Reporting gaps over {effective_min_gap:.0f}s, but they may be "
+                f"expected — set a force-log interval to bound this."
+            )
+    else:
+        note = f"Tag logs every sample; gaps over {effective_min_gap:.0f}s reported."
 
     rows = db.execute(text("""
         WITH samples AS (
@@ -511,11 +554,11 @@ def find_data_gaps(
     """), {
         "tag_id": tag_id,
         "since": since,
-        "min_gap_sec": min_gap_sec,
+        "min_gap_sec": effective_min_gap,
         "limit": limit,
     }).mappings().all()
 
-    return [
+    gaps = [
         {
             "tag_id": tag_id,
             "gap_start": r["gap_start"],
@@ -524,6 +567,18 @@ def find_data_gaps(
         }
         for r in rows
     ]
+    return {
+        "context": {
+            "tag_id": tag_id,
+            "tag_name": tag["name"],
+            "log_mode": log_mode,
+            "log_interval_sec": log_interval,
+            "requested_min_gap_sec": float(min_gap_sec),
+            "effective_min_gap_sec": effective_min_gap,
+            "note": note,
+        },
+        "gaps": gaps,
+    }
 
 
 # ===========================================================================
