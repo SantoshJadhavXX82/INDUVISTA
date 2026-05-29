@@ -30,7 +30,7 @@ import { useQuery } from "@tanstack/react-query";
 import { NavLink, useLocation } from "react-router";
 import {
   Gauge, TrendingUp, BellRing, Bell, Tag as TagIcon,
-  HeartPulse, FileText, LineChart,
+  HeartPulse, FileText, LineChart, Database,
   Cpu, Sigma, Wrench, SlidersHorizontal,
   ChevronDown, ChevronRight,
   ScanLine, Radio, Zap, FileClock,
@@ -111,6 +111,7 @@ function useEntries(alarmCount: number): Section[] {
         { kind: "leaf", to: "/diagnostics", label: "Health", icon: HeartPulse },
         { kind: "leaf", to: "/audit-log",   label: "Audit",  icon: FileText, matchPrefix: "/audit-log" },
         { kind: "leaf", to: "/data-gaps",   label: "Gaps",   icon: LineChart },
+        { kind: "leaf", to: "/historian",   label: "Historian", icon: Database, matchPrefix: "/historian" },
       ],
     },
     {
