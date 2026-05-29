@@ -13,6 +13,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { X, AlertTriangle, Loader2, Settings, Plus, ArrowRight } from "lucide-react";
+import { HelpTip } from "@/components/ui/help-tip";
+import { help } from "@/lib/help-text";
 
 import {
   useBlockTypes, useComputedDevices, useExternalOutputCandidates,
@@ -387,7 +389,7 @@ export function CreateCalcModal({
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className="text-[11px] uppercase tracking-wider text-muted-foreground mb-0.5 block">
-                      Tag name <span className="text-destructive">*</span>
+                      <span className="inline-flex items-center">Tag name<HelpTip entry={help.calc.name} /></span> <span className="text-destructive">*</span>
                       {isEditMode && (
                         <span className="ml-2 normal-case tracking-normal">(locked)</span>
                       )}
@@ -528,8 +530,8 @@ export function CreateCalcModal({
 
                 {/* 7. Phase 17.0b - Output target */}
                 <div className="border border-border rounded p-3 bg-secondary/10">
-                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">
-                    Output target
+                  <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2 inline-flex items-center">
+                    Output target<HelpTip entry={help.calc.output_mode} />
                   </div>
                   <div className="space-y-2">
                     {/* Internal mode */}

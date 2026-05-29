@@ -1,3 +1,12 @@
+
+/* Auto-hide scrollbar for the sidebar nav: transparent at rest, visible only
+   on hover/scroll, so there's no visible scrollbar when idle. */
+.nav-autohide { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+.nav-autohide:hover { scrollbar-color: var(--ios-gray-3) transparent; }
+.nav-autohide::-webkit-scrollbar { width: 8px; }
+.nav-autohide::-webkit-scrollbar-thumb { background: transparent; border-radius: 8px; }
+.nav-autohide:hover::-webkit-scrollbar-thumb { background: var(--ios-gray-3); }
+.nav-autohide::-webkit-scrollbar-track { background: transparent; }
 @import "tailwindcss";
 
 /* shadcn/ui (new-york style, neutral base color) — light mode only for now.

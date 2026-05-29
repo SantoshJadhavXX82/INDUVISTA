@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { Activity, Bell, ChevronDown, KeyRound, LogOut } from "lucide-react";
+import { Activity, Bell, ChevronDown, KeyRound, LogOut, Info } from "lucide-react";
 import { useNavigate } from "react-router";
 import { type HealthResponse } from "@/types/api";
 import { api } from "@/lib/api";
@@ -360,6 +360,14 @@ function UserMenu() {
           >
             <KeyRound className="h-4 w-4" style={{ color: "var(--text-secondary)" }} />
             Change password
+          </button>
+          <button
+            onClick={() => { setOpen(false); navigate("/about"); }}
+            className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left transition-colors hover:opacity-80"
+            style={{ color: "var(--text-primary)" }}
+          >
+            <Info className="h-4 w-4" style={{ color: "var(--text-secondary)" }} />
+            About
           </button>
           <button
             onClick={() => { setOpen(false); logout(); }}
