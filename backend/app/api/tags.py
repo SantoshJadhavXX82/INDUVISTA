@@ -66,6 +66,13 @@ class TagCreate(BaseModel):
     decimal_places: int | None = Field(None, ge=0, le=15)
     is_heartbeat: bool = False
     heartbeat_max_stale_sec: int | None = Field(None, gt=0)
+    # Phase 22 — logging config (historian write policy; live value + alarms
+    # are unaffected, only the tag_values history write is gated).
+    log_enabled: bool = True
+    log_mode: str = Field("every_sample", pattern="^(every_sample|on_change|periodic)$")
+    log_deadband: float = Field(0.0, ge=0)
+    log_deadband_mode: str = Field("absolute", pattern="^(absolute|percent)$")
+    log_interval_sec: int | None = Field(None, gt=0)
     # Phase 8.3 — optional reference to a named_set for value→label translation.
     # Only meaningful for integer/boolean data types; the API doesn't enforce
     # this (data_type can change) but the UI does.
@@ -102,6 +109,12 @@ class TagUpdate(BaseModel):
     enabled: bool | None = None
     is_heartbeat: bool | None = None
     heartbeat_max_stale_sec: int | None = Field(None, gt=0)
+    # Phase 22 — logging config
+    log_enabled: bool | None = None
+    log_mode: str | None = Field(None, pattern="^(every_sample|on_change|periodic)$")
+    log_deadband: float | None = Field(None, ge=0)
+    log_deadband_mode: str | None = Field(None, pattern="^(absolute|percent)$")
+    log_interval_sec: int | None = Field(None, gt=0)
     named_set_id: int | None = None
     # Phase 8.5.1 — writability toggle
     writable: bool | None = None
@@ -140,6 +153,12 @@ class TagResponse(BaseModel):
     enabled: bool
     is_heartbeat: bool
     heartbeat_max_stale_sec: int | None
+    # Phase 22 — logging config
+    log_enabled: bool
+    log_mode: str
+    log_deadband: float
+    log_deadband_mode: str
+    log_interval_sec: int | None
     # Phase 8.3 — named_set FK + resolved name (NULL when no set assigned)
     named_set_id: int | None
     named_set_name: str | None
@@ -171,6 +190,8 @@ _TAG_SELECT = """
            t.scale, t."offset",
            t.min_value, t.max_value, t.decimal_places, t.enabled,
            t.is_heartbeat, t.heartbeat_max_stale_sec,
+           t.log_enabled, t.log_mode, t.log_deadband,
+           t.log_deadband_mode, t.log_interval_sec,
            t.named_set_id, ns.name AS named_set_name,
            t.writable
     FROM tags t
@@ -433,6 +454,8 @@ def create_tag(body: TagCreate, db: Annotated[Session, Depends(get_session)]):
                     engineering_unit_id, engineering_unit, scale, "offset",
                     min_value, max_value, decimal_places,
                     is_heartbeat, heartbeat_max_stale_sec,
+                    log_enabled, log_mode, log_deadband,
+                    log_deadband_mode, log_interval_sec,
                     named_set_id, writable
                 )
                 VALUES (
@@ -442,6 +465,8 @@ def create_tag(body: TagCreate, db: Annotated[Session, Depends(get_session)]):
                     :engineering_unit_id, :engineering_unit, :scale, :offset,
                     :min_value, :max_value, :decimal_places,
                     :is_heartbeat, :heartbeat_max_stale_sec,
+                    :log_enabled, :log_mode, :log_deadband,
+                    :log_deadband_mode, :log_interval_sec,
                     :named_set_id, :writable
                 )
                 RETURNING id
