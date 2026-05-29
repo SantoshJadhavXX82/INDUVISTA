@@ -54,6 +54,11 @@ def pytest_configure(config):
         "slow: tests that take >10 seconds. Skipped by default; run with `-m slow` "
         "or `pytest --runslow` to include.",
     )
+    config.addinivalue_line(
+        "markers",
+        "smoke: live-backend integration smoke tests (auto-skip if unreachable). "
+        "Self-seeding and self-cleaning; safe to run against a running stack.",
+    )
 
 
 # ---------------------------------------------------------------------------
