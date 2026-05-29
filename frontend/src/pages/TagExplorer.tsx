@@ -32,6 +32,7 @@ import { UnitSelect } from "@/components/forms/unit-select";
 import { GroupSelect } from "@/components/forms/group-select";
 import { NamedSetSelect } from "@/components/forms/named-set-select";
 import { HelpTip } from "@/components/ui/help-tip";
+import { Gate } from "@/lib/rbac";
 import { help } from "@/lib/help-text";
 import { useNamedSetMap, resolveNamedSet } from "@/lib/named-set-resolve";
 import { Sparkline } from "@/components/ui/sparkline";
@@ -426,14 +427,16 @@ export default function TagExplorer() {
           <Button variant="outline" size="sm" onClick={clearSelection}>
             Clear
           </Button>
-          <Button
-            size="sm"
-            onClick={() => setConfirmingBulkDelete(true)}
-            className="bg-red-600 hover:bg-red-700 text-white"
-          >
-            <Trash2 className="h-4 w-4 mr-1.5" />
-            Delete {selectedTagIds.size}
-          </Button>
+          <Gate cap="configure" mode="disable">
+            <Button
+              size="sm"
+              onClick={() => setConfirmingBulkDelete(true)}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              <Trash2 className="h-4 w-4 mr-1.5" />
+              Delete {selectedTagIds.size}
+            </Button>
+          </Gate>
         </div>
       )}
 
@@ -470,15 +473,19 @@ export default function TagExplorer() {
           Export CSV
         </Button>
 
-        <Button size="sm" variant="outline" onClick={() => setImporting(true)}>
-          <Upload className="h-4 w-4 mr-1.5" />
-          Import CSV
-        </Button>
+        <Gate cap="configure" mode="disable">
+          <Button size="sm" variant="outline" onClick={() => setImporting(true)}>
+            <Upload className="h-4 w-4 mr-1.5" />
+            Import CSV
+          </Button>
+        </Gate>
 
-        <Button size="sm" onClick={() => setCreatingTag(true)}>
-          <Plus className="h-4 w-4 mr-1.5" />
-          Add tag
-        </Button>
+        <Gate cap="configure" mode="disable">
+          <Button size="sm" onClick={() => setCreatingTag(true)}>
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add tag
+          </Button>
+        </Gate>
       </div>
 
       {/* Table */}
@@ -1946,9 +1953,11 @@ function TagEditPanel({
         )}
 
         <div className="flex gap-2">
-          <Button type="submit" disabled={update.isPending}>
-            {update.isPending ? "Saving…" : "Save changes"}
-          </Button>
+          <Gate cap="configure" mode="disable">
+            <Button type="submit" disabled={update.isPending}>
+              {update.isPending ? "Saving…" : "Save changes"}
+            </Button>
+          </Gate>
         </div>
       </section>
 
@@ -2830,9 +2839,11 @@ function NewTagPanel({
       )}
 
       <div className="flex gap-2">
-        <Button type="submit" disabled={create.isPending}>
-          {create.isPending ? "Creating…" : "Create tag"}
-        </Button>
+        <Gate cap="configure" mode="disable">
+          <Button type="submit" disabled={create.isPending}>
+            {create.isPending ? "Creating…" : "Create tag"}
+          </Button>
+        </Gate>
       </div>
     </form>
   );
