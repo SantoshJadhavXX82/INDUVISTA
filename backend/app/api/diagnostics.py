@@ -1312,3 +1312,203 @@ def list_opc_source_diagnostics(db: Annotated[Session, Depends(get_session)]):
             state=_derive_opc_state(r["enabled"], age),
         ))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Phase 22 — site-wide storage projection (the "storage-projection" endpoint)
+# ---------------------------------------------------------------------------
+class StorageTagRow(BaseModel):
+    tag_id: int
+    tag_name: str
+    device_name: str
+    protocol: str
+    log_mode: str
+    log_enabled: bool
+    scan_interval_ms: int
+    rows_per_day_every: float       # baseline if every_sample
+    rows_per_day_projected: float   # under current config
+    bytes_per_day_projected: float
+
+
+class StorageDeviceRow(BaseModel):
+    device_name: str
+    protocol: str
+    tag_count: int
+    rows_per_day_projected: float
+    bytes_per_day_projected: float
+
+
+class StorageProjection(BaseModel):
+    measured_bytes_per_row: float
+    tag_values_total_bytes: int | None
+    db_total_bytes: int | None
+    enabled_tag_count: int
+    # Totals (projected under current per-tag config)
+    rows_per_day_projected: float
+    rows_per_day_every_sample: float
+    reduction_pct: float
+    bytes_per_day_projected: float
+    bytes_per_year_projected: float
+    bytes_per_year_every_sample: float
+    by_device: list[StorageDeviceRow]
+    by_protocol: dict[str, float]   # protocol -> rows/day projected
+    noisiest: list[StorageTagRow]   # top 20 by projected rows/day
+    note: str
+
+
+@router.get("/storage-projection", response_model=StorageProjection)
+def storage_projection(
+    db: "Annotated[Session, Depends(get_session)]",
+    top_n: "Annotated[int, Query(ge=1, le=100)]" = 20,
+):
+    """Project historian storage across all enabled tags vs the every_sample
+    baseline. Grounded in the measured bytes/row of the live hypertable."""
+    # 1. Measured bytes/row from the real hypertable (compression-aware).
+    #    Prefer TimescaleDB's hypertable_size; fall back to plain Postgres
+    #    pg_total_relation_size if the TS function isn't available, and to a
+    #    fixed estimate if even the row count can't be had. Defensive so the
+    #    endpoint never 500s on a version mismatch.
+    total_bytes = None
+    approx_rows = None
+    try:
+        bpr_row = db.execute(text(
+            "SELECT hypertable_size('tag_values') AS total_bytes, "
+            "approximate_row_count('tag_values') AS approx_rows"
+        )).mappings().first()
+        if bpr_row:
+            total_bytes = bpr_row["total_bytes"]
+            approx_rows = bpr_row["approx_rows"]
+    except Exception:
+        db.rollback()
+    if total_bytes is None:
+        try:
+            total_bytes = db.execute(
+                text("SELECT pg_total_relation_size('tag_values')")
+            ).scalar()
+        except Exception:
+            db.rollback()
+    if approx_rows is None:
+        try:
+            approx_rows = db.execute(
+                text("SELECT reltuples::bigint FROM pg_class WHERE relname = 'tag_values'")
+            ).scalar()
+        except Exception:
+            db.rollback()
+    if total_bytes and approx_rows and approx_rows > 0:
+        bytes_per_row = float(total_bytes) / float(approx_rows)
+    else:
+        bytes_per_row = 76.0  # uncompressed estimate fallback
+
+    db_total = db.execute(
+        text("SELECT pg_database_size(current_database())")
+    ).scalar()
+
+    # 2. Per-tag config + effective scan interval + recent measured rate.
+    rows = db.execute(text("""
+        WITH recent AS (
+          SELECT tag_id, COUNT(*)::float AS n
+          FROM tag_values
+          WHERE time > NOW() - INTERVAL '24 hours'
+          GROUP BY tag_id
+        )
+        SELECT
+          t.id                       AS tag_id,
+          t.name                     AS tag_name,
+          d.name                     AS device_name,
+          d.protocol                 AS protocol,
+          t.log_enabled,
+          t.log_mode,
+          t.log_interval_sec,
+          COALESCE(b.scan_interval_ms, d.scan_interval_ms, 1000) AS scan_ms,
+          COALESCE(r.n, 0)           AS recent_24h_rows
+        FROM tags t
+        JOIN devices d ON d.id = t.device_id
+        LEFT JOIN register_blocks b ON b.id = t.register_block_id
+        LEFT JOIN recent r ON r.tag_id = t.id
+        WHERE t.enabled = TRUE AND t.deleted_at IS NULL
+    """)).mappings().all()
+
+    tag_rows: list[StorageTagRow] = []
+    by_device: dict[tuple, dict] = {}
+    by_protocol: dict[str, float] = {}
+    total_proj = 0.0
+    total_every = 0.0
+
+    for r in rows:
+        scan_ms = int(r["scan_ms"]) or 1000
+        per_day_every = 86_400_000.0 / scan_ms   # samples/day at full scan
+        log_enabled = r["log_enabled"]
+        mode = r["log_mode"] or "every_sample"
+        interval = r["log_interval_sec"]
+        recent = float(r["recent_24h_rows"] or 0)
+
+        if not log_enabled:
+            proj = 0.0
+        elif mode == "every_sample":
+            proj = per_day_every
+        elif mode == "periodic":
+            proj = (86_400.0 / interval) if interval else per_day_every
+        else:  # on_change
+            force = (86_400.0 / interval) if interval else 0.0
+            if recent > 0:
+                # Use the tag's own measured last-24h rate (most accurate),
+                # but never below the guaranteed force-log rate.
+                proj = max(recent, force)
+            else:
+                # No history yet: assume ~5% of polls change, plus force-log.
+                proj = max(per_day_every * 0.05, force, 1.0)
+
+        bytes_day = proj * bytes_per_row
+        total_proj += proj
+        total_every += per_day_every
+
+        prot = r["protocol"] or "unknown"
+        by_protocol[prot] = by_protocol.get(prot, 0.0) + proj
+        key = (r["device_name"], prot)
+        dd = by_device.setdefault(key, {"tags": 0, "rows": 0.0})
+        dd["tags"] += 1
+        dd["rows"] += proj
+
+        tag_rows.append(StorageTagRow(
+            tag_id=r["tag_id"], tag_name=r["tag_name"],
+            device_name=r["device_name"], protocol=prot,
+            log_mode=mode, log_enabled=log_enabled,
+            scan_interval_ms=scan_ms,
+            rows_per_day_every=per_day_every,
+            rows_per_day_projected=proj,
+            bytes_per_day_projected=bytes_day,
+        ))
+
+    reduction = (1.0 - total_proj / total_every) * 100.0 if total_every > 0 else 0.0
+    noisiest = sorted(tag_rows, key=lambda x: x.rows_per_day_projected, reverse=True)[:top_n]
+    dev_rows = [
+        StorageDeviceRow(
+            device_name=k[0], protocol=k[1],
+            tag_count=v["tags"],
+            rows_per_day_projected=v["rows"],
+            bytes_per_day_projected=v["rows"] * bytes_per_row,
+        )
+        for k, v in sorted(by_device.items(), key=lambda kv: kv[1]["rows"], reverse=True)
+    ]
+
+    return StorageProjection(
+        measured_bytes_per_row=round(bytes_per_row, 1),
+        tag_values_total_bytes=total_bytes,
+        db_total_bytes=db_total,
+        enabled_tag_count=len(tag_rows),
+        rows_per_day_projected=round(total_proj, 1),
+        rows_per_day_every_sample=round(total_every, 1),
+        reduction_pct=round(reduction, 1),
+        bytes_per_day_projected=round(total_proj * bytes_per_row, 1),
+        bytes_per_year_projected=round(total_proj * bytes_per_row * 365, 1),
+        bytes_per_year_every_sample=round(total_every * bytes_per_row * 365, 1),
+        by_device=dev_rows,
+        by_protocol={k: round(v, 1) for k, v in by_protocol.items()},
+        noisiest=noisiest,
+        note=(
+            "Projection uses measured bytes/row from the live hypertable and "
+            "each tag's effective scan interval. on_change tags with recent "
+            "history use their actual 24h rate; new on_change tags use a 5% "
+            "change-rate estimate bounded by the force-log interval."
+        ),
+    )

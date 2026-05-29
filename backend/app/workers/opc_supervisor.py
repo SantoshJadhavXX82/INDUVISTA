@@ -846,6 +846,103 @@ async def _heartbeat_watchdog(
             return
 
 
+# ── Logging policy (Phase 22.1) ─────────────────────────────────────
+
+
+class _LoggingPolicy:
+    """Per-tag historian logging policy for the OPC flusher.
+
+    Loads log config from the tags table and caches per-tag last-LOGGED
+    state. partition() splits a drained batch into (to_log, latest_only).
+    Config is refreshed every `refresh_every` flushes so edits in the UI
+    take effect without a worker restart.
+    """
+
+    def __init__(self, refresh_every: int = 30) -> None:
+        self._cfg: dict[int, dict] = {}
+        # tag_id -> (value_double, value_text, last_logged_time, st)
+        self._state: dict[int, tuple] = {}
+        self._refresh_every = max(1, refresh_every)
+        self._ticks = 0
+        self._load_cfg()
+
+    def _load_cfg(self) -> None:
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(text("""
+                    SELECT id, log_enabled, log_mode, log_deadband,
+                           log_deadband_mode, log_interval_sec,
+                           min_value, max_value
+                    FROM tags
+                    WHERE enabled = TRUE AND deleted_at IS NULL
+                """)).mappings().all()
+            self._cfg = {
+                r["id"]: {
+                    "enabled": r["log_enabled"],
+                    "mode": r["log_mode"] or "every_sample",
+                    "deadband": r["log_deadband"] or 0.0,
+                    "deadband_mode": r["log_deadband_mode"] or "absolute",
+                    "interval": r["log_interval_sec"],
+                    "min_value": r["min_value"],
+                    "max_value": r["max_value"],
+                }
+                for r in rows
+            }
+        except Exception:
+            log.exception("logging-policy: config reload failed; keeping prior")
+
+    def maybe_refresh(self) -> None:
+        self._ticks += 1
+        if self._ticks % self._refresh_every == 0:
+            self._load_cfg()
+
+    def _should_log(self, s: "Sample") -> bool:
+        cfg = self._cfg.get(s.tag_id)
+        if cfg is None:
+            return True  # unknown/new tag -> log to be safe
+        if not cfg["enabled"]:
+            return False
+        if cfg["mode"] == "every_sample":
+            return True
+        prev = self._state.get(s.tag_id)
+        if prev is None:
+            return True  # anchor
+        prev_val, prev_text, prev_time, prev_st = prev
+        interval = cfg["interval"]
+        if interval is not None and prev_time is not None:
+            if (s.time - prev_time).total_seconds() >= interval:
+                return True
+        if s.st != prev_st:
+            return True
+        if cfg["mode"] == "periodic":
+            return False  # time-driven only (handled above)
+        # on_change:
+        if s.value_double is None:
+            return s.value_text != prev_text
+        if prev_val is None:
+            return True
+        delta = abs(s.value_double - prev_val)
+        band = cfg["deadband"]
+        if cfg["deadband_mode"] == "percent":
+            lo, hi = cfg.get("min_value"), cfg.get("max_value")
+            if lo is not None and hi is not None and hi > lo:
+                band = (cfg["deadband"] / 100.0) * (hi - lo)
+        return delta > band
+
+    def partition(self, batch):
+        """Return (to_log, latest_only). Updates state for logged samples."""
+        to_log, latest_only = [], []
+        for s in batch:
+            if self._should_log(s):
+                to_log.append(s)
+                self._state[s.tag_id] = (
+                    s.value_double, s.value_text, s.time, s.st,
+                )
+            else:
+                latest_only.append(s)
+        return to_log, latest_only
+
+
 # ── Flusher ─────────────────────────────────────────────────────────
 
 
@@ -860,6 +957,9 @@ async def flusher_loop(
     log.info(
         "flusher: started (interval=%.1fs)", FLUSH_INTERVAL_SEC,
     )
+    # Phase 22.1 — per-tag logging policy. Gates the HISTORY write only;
+    # latest_tag_values (live value) + alarms always see every sample.
+    policy = _LoggingPolicy()
     samples_written_total = 0
     while not stop_event.is_set():
         try:
@@ -869,19 +969,25 @@ async def flusher_loop(
         except asyncio.TimeoutError:
             pass
 
+        policy.maybe_refresh()
         batch = buffer.drain()
         if not batch:
             continue
+        to_log, latest_only = policy.partition(batch)
         try:
-            n = writer.write_samples(batch)
+            n = 0
+            if to_log:
+                n = writer.write_samples(to_log)
+            if latest_only:
+                writer.write_latest_only(latest_only)
             samples_written_total += n
-            if n != len(batch):
+            if to_log and n != len(to_log):
                 # write_samples returning fewer than submitted means
                 # the buffered writer spilled to SQLite — log at info
                 # so the user sees Postgres trouble surface here.
                 log.info(
-                    "flusher: wrote %d/%d samples (rest buffered locally)",
-                    n, len(batch),
+                    "flusher: wrote %d/%d history samples (rest buffered locally)",
+                    n, len(to_log),
                 )
         except Exception:
             log.exception("flusher: write_samples raised unexpectedly")
@@ -890,9 +996,12 @@ async def flusher_loop(
     final = buffer.drain()
     if final:
         try:
-            n = writer.write_samples(final)
+            f_log, f_latest = policy.partition(final)
+            n = writer.write_samples(f_log) if f_log else 0
+            if f_latest:
+                writer.write_latest_only(f_latest)
             samples_written_total += n
-            log.info("flusher: final drain wrote %d samples", n)
+            log.info("flusher: final drain wrote %d history samples", n)
         except Exception:
             log.exception("flusher: final drain failed")
 

@@ -12,6 +12,7 @@ import TagExplorer from "@/pages/TagExplorer";
 import FrameInspector from "@/pages/FrameInspector";
 import RegisterBrowser from "@/pages/RegisterBrowser";
 import DataGaps from "@/pages/DataGaps";
+import Historian from "@/pages/Historian";
 import Writes from "@/pages/Writes";
 import WriteConsole from "@/pages/WriteConsole";
 import ConfigLayout from "@/pages/config/ConfigLayout";
@@ -74,6 +75,7 @@ function AuthedRoutes() {
         />
         <Route path="/tags" element={<TagExplorer />} />
         <Route path="/data-gaps" element={<DataGaps />} />
+        <Route path="/historian" element={<Historian />} />
         {/* Phase 13.2 — Trend module (historical first, real-time in 13.3) */}
         <Route path="/trend" element={<Trend />} />
         {/* Phase 14.5 - Alarms */}
