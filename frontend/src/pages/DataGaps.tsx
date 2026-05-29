@@ -39,6 +39,20 @@ type DataGap = {
   gap_seconds: number;
 };
 
+type DataGapsContext = {
+  tag_id: number;
+  tag_name: string;
+  log_mode: string;
+  log_interval_sec: number | null;
+  requested_min_gap_sec: number;
+  effective_min_gap_sec: number;
+  note: string;
+};
+type DataGapsResponse = {
+  context: DataGapsContext;
+  gaps: DataGap[];
+};
+
 const RANGES = [
   { label: "Last hour", sec: 3600 },
   { label: "Last 6 hours", sec: 6 * 3600 },
@@ -85,7 +99,7 @@ export default function DataGaps() {
     queryFn: async () => {
       if (!runKey) throw new Error("no run");
       const since = new Date(Date.now() - runKey.sinceSec * 1000).toISOString();
-      return api.get<DataGap[]>(
+      return api.get<DataGapsResponse>(
         `/diagnostics/data-gaps/${runKey.tagId}?since=${encodeURIComponent(since)}&min_gap_sec=${runKey.minGap}`,
       );
     },
@@ -203,7 +217,7 @@ export default function DataGaps() {
         </div>
       </SectionCard>
 
-      {gaps.data && runKey && <GapResults gaps={gaps.data} windowSec={runKey.windowSec} minGap={runKey.minGap} />}
+      {gaps.data && runKey && <GapResults gaps={gaps.data.gaps} context={gaps.data.context} windowSec={runKey.windowSec} minGap={runKey.minGap} />}
       {gaps.isError && (
         <SectionCard>
           <div className="text-sm" style={{ color: "var(--status-error-on-soft)" }}>
@@ -217,7 +231,7 @@ export default function DataGaps() {
 
 // --------------------------------------------------------------------------
 
-function GapResults({ gaps, windowSec, minGap }: { gaps: DataGap[]; windowSec: number; minGap: number }) {
+function GapResults({ gaps, context, windowSec, minGap }: { gaps: DataGap[]; context: DataGapsContext; windowSec: number; minGap: number }) {
   const totalDowntime = gaps.reduce((sum, g) => sum + g.gap_seconds, 0);
   const uptimePct = windowSec > 0
     ? Math.max(0, Math.min(100, ((windowSec - totalDowntime) / windowSec) * 100))
@@ -230,6 +244,18 @@ function GapResults({ gaps, windowSec, minGap }: { gaps: DataGap[]; windowSec: n
 
   return (
     <div className="space-y-3">
+      {context.log_mode !== "every_sample" && (
+        <SectionCard>
+          <div className="text-xs" style={{ color: "var(--text-secondary)" }}>
+            <strong style={{ color: "var(--text-primary)" }}>Logging mode: {context.log_mode}.</strong>{" "}
+            {context.note}
+            {" "}Effective threshold: {context.effective_min_gap_sec.toFixed(0)}s
+            {context.effective_min_gap_sec !== context.requested_min_gap_sec
+              ? ` (raised from your ${context.requested_min_gap_sec.toFixed(0)}s request).`
+              : "."}
+          </div>
+        </SectionCard>
+      )}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         <StatCard label="Gaps found" value={gaps.length.toString()} />
         <StatCard label="Total downtime" value={formatDuration(totalDowntime)} />
@@ -243,7 +269,7 @@ function GapResults({ gaps, windowSec, minGap }: { gaps: DataGap[]; windowSec: n
       {sorted.length === 0 ? (
         <SectionCard>
           <div className="text-sm text-center py-2" style={{ color: "var(--text-secondary)" }}>
-            No gaps found in this window above the minimum-gap threshold of {minGap}s.
+            No gaps found in this window above the effective threshold of {context.effective_min_gap_sec.toFixed(0)}s.
           </div>
         </SectionCard>
       ) : (

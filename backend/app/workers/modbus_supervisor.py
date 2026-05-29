@@ -160,7 +160,9 @@ def load_polling_config() -> list[dict]:
                        data_type, byte_order, function_code,
                        address, register_count, scale, "offset",
                        min_value, max_value,
-                       is_heartbeat, heartbeat_max_stale_sec
+                       is_heartbeat, heartbeat_max_stale_sec,
+                       log_enabled, log_mode, log_deadband,
+                       log_deadband_mode, log_interval_sec
                 FROM tags
                 WHERE device_id = :did
                   AND enabled = TRUE
@@ -331,6 +333,19 @@ class DeviceWorker:
         self.device = device
         self.blocks = blocks
         self.tags_by_block = tags_by_block
+        # Phase 22 — logging policy: flat tag_id -> log config for fast lookup.
+        self._log_cfg: dict[int, dict] = {}
+        for _blk_tags in tags_by_block.values():
+            for _tg in _blk_tags:
+                self._log_cfg[_tg["id"]] = {
+                    "enabled": _tg.get("log_enabled", True),
+                    "mode": _tg.get("log_mode", "every_sample"),
+                    "deadband": _tg.get("log_deadband", 0.0) or 0.0,
+                    "deadband_mode": _tg.get("log_deadband_mode", "absolute"),
+                    "interval": _tg.get("log_interval_sec"),
+                    "min_value": _tg.get("min_value"),
+                    "max_value": _tg.get("max_value"),
+                }
         self.historian = historian
 
         self.client: AsyncModbusTcpClient | None = None
@@ -352,6 +367,9 @@ class DeviceWorker:
         # RANGE_WARN logging. Keys are tag ids, values are the previous
         # cycle's `st` (only ST_RANGE_WARN vs anything-else matters).
         self._range_state: dict[int, int] = {}
+        # Phase 22 — logging policy: per-tag last LOGGED state for on_change /
+        # periodic / force-log decisions. value, monotonic time, st.
+        self._log_state: dict[int, tuple[float | None, str | None, float, int]] = {}
 
         # Worker-restart-local cumulative counters (Phase 7 E1c).
         self._cumulative_total = 0
@@ -507,9 +525,22 @@ class DeviceWorker:
             try:
                 samples = await self._poll_block_with_retry(block)
                 if samples:
-                    n = await asyncio.to_thread(
-                        self.historian.write_samples, samples,
+                    # Phase 22 — logging policy: history-log only the samples
+                    # that pass the per-tag policy; the rest still update the
+                    # live value via write_latest_only so dashboards/alarms
+                    # never go stale.
+                    to_log, latest_only = self._partition_for_logging(
+                        samples, time.monotonic(),
                     )
+                    n = 0
+                    if to_log:
+                        n = await asyncio.to_thread(
+                            self.historian.write_samples, to_log,
+                        )
+                    if latest_only:
+                        await asyncio.to_thread(
+                            self.historian.write_latest_only, latest_only,
+                        )
                     self._cumulative_total += len(samples)
                     good = sum(1 for s in samples if s.st == ST_READ_OK)
                     self._cumulative_good += good
@@ -1401,6 +1432,59 @@ class DeviceWorker:
                     st=ST_DECODE_FAIL, st_reason="DECODE_FAIL",
                 ))
         return samples
+
+    # Phase 22 — logging policy ------------------------------------------
+    def _should_log(self, s: Sample, now_mono: float) -> bool:
+        """Decide whether this sample is written to HISTORY. Latest is always
+        written regardless (by the caller via write_latest_only on skip)."""
+        cfg = self._log_cfg.get(s.tag_id)
+        if cfg is None:
+            return True  # unknown tag (shouldn't happen) -> log to be safe
+        if not cfg["enabled"]:
+            return False
+        if cfg["mode"] == "every_sample":
+            return True
+
+        prev = self._log_state.get(s.tag_id)
+        if prev is None:
+            return True  # first sample after (re)start -> anchor point
+        prev_val, prev_text, prev_mono, prev_st = prev
+
+        interval = cfg["interval"]
+        # Force-log / periodic period: enough time elapsed since last logged.
+        if interval is not None and (now_mono - prev_mono) >= interval:
+            return True
+        # Quality transition is always significant (READ_OK -> STALE -> FROZEN).
+        if s.st != prev_st:
+            return True
+        if cfg["mode"] == "periodic":
+            return False  # time-driven only; interval handled above
+        # on_change:
+        if s.value_double is None:
+            # text/bool-as-text or decode-fail: log on any text change
+            return s.value_text != prev_text
+        if prev_val is None:
+            return True
+        delta = abs(s.value_double - prev_val)
+        band = cfg["deadband"]
+        if cfg["deadband_mode"] == "percent":
+            lo, hi = cfg.get("min_value"), cfg.get("max_value")
+            if lo is not None and hi is not None and hi > lo:
+                band = (cfg["deadband"] / 100.0) * (hi - lo)
+        return delta > band
+
+    def _partition_for_logging(self, samples, now_mono: float):
+        """Split into (to_log, latest_only). Updates _log_state for logged ones."""
+        to_log, latest_only = [], []
+        for s in samples:
+            if self._should_log(s, now_mono):
+                to_log.append(s)
+                self._log_state[s.tag_id] = (
+                    s.value_double, s.value_text, now_mono, s.st,
+                )
+            else:
+                latest_only.append(s)
+        return to_log, latest_only
 
     def _failed_samples(
         self, block: dict, now: datetime, st: int, reason: str,
