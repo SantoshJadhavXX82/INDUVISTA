@@ -230,5 +230,21 @@ services:
         - ./backend/app:/app/app
       command: ["python", "-m", "app.workers.calc_evaluator"]
 
+  report_scheduler:
+      build: ./backend
+      container_name: svj_report_scheduler
+      restart: unless-stopped
+      env_file:
+        - .env
+      depends_on:
+        postgres:
+          condition: service_healthy
+        migrate:
+          condition: service_completed_successfully
+      stop_grace_period: 15s
+      volumes:
+        - ./backend/app:/app/app
+      command: ["python", "-m", "app.workers.report_scheduler"]
+
 volumes:
   svj_postgres_data:
