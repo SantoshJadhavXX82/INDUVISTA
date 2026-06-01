@@ -17,7 +17,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query, Response
+from datetime import datetime as _dt
+from zoneinfo import ZoneInfo as _ZoneInfo
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -25,6 +27,8 @@ from sqlalchemy.orm import Session
 
 from app.db import get_session
 from app.utils.audit import audit, AuditEvent
+from app.config import settings
+from app.services.report_render import build_live_context, render_report
 
 router = APIRouter(prefix="/api/report-config", tags=["report-config"])
 
@@ -474,3 +478,63 @@ def unlink_destination(def_id: int, dest_id: int, request: Request,
     audit(AuditEvent(action="report_def.unlink_dest", target_type="report_definition",
                      target_id=def_id, summary=f"Unlinked destination {dest_id} from report {def_id}"),
           request)
+
+
+
+# ===========================================================================
+# Render (on-demand) — DanPac category C
+# ===========================================================================
+@router.post("/definitions/{def_id}/render")
+def render_definition(
+    def_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+    tag_ids: Annotated[list[int], Query(description="Tags to bind into the report context")] = [],
+):
+    """Render a report definition's template to PDF using current live values."""
+    row = db.execute(text(
+        "SELECT name, category, template_html, page_size, orientation "
+        "FROM report_definitions WHERE id = :id"), {"id": def_id}).mappings().first()
+    if not row:
+        raise HTTPException(404, f"Report definition {def_id} not found.")
+    if not (row["template_html"] or "").strip():
+        raise HTTPException(400, "This report has no template_html to render.")
+
+    tz_name = settings.app_timezone
+    snapshot_at = _dt.now(_ZoneInfo("UTC"))
+    ctx = build_live_context(db, list(tag_ids), tz_name)
+    # Let templates reference the report's own name/metadata.
+    ctx["report"]["name"] = row["name"]
+    ctx["report"]["category"] = row["category"]
+
+    try:
+        pdf = render_report(row["template_html"], ctx, row["page_size"], row["orientation"])
+        status, err = "ok", None
+    except Exception as e:  # render/template error -> record + 400
+        status, err = "error", str(e)
+
+    # Record the attempt either way (audit + history).
+    db.execute(text("""
+        INSERT INTO report_records
+            (report_id, report_name, category, trigger_kind, snapshot_at,
+             fmt, byte_size, status, error)
+        VALUES (:rid, :name, :cat, 'manual', :snap, 'pdf', :size, :status, :err)
+    """), {
+        "rid": def_id, "name": row["name"], "cat": row["category"],
+        "snap": snapshot_at, "size": (len(pdf) if status == "ok" else None),
+        "status": status, "err": err,
+    })
+    db.commit()
+
+    audit(AuditEvent(action="report.render", target_type="report_definition",
+                     target_id=def_id, target_label=row["name"],
+                     summary=f"Rendered report '{row['name']}' on demand ({status})",
+                     status=("success" if status == "ok" else "error"),
+                     error_message=err), request)
+
+    if status != "ok":
+        raise HTTPException(400, f"Render failed: {err}")
+
+    fname = f"{row['name'].replace(' ', '_')}_{snapshot_at.strftime('%Y%m%d_%H%M%S')}.pdf"
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})

@@ -34,3 +34,12 @@ bcrypt==4.2.0
 
 # Phase 20 - PDF report generation (pure-Python, no system deps).
 reportlab==4.2.5
+
+# Phase 20 - report render pipeline (Jinja2 template -> HTML -> PDF).
+# WeasyPrint needs system libs (pango/cairo/gdk-pixbuf) - see Dockerfile.
+jinja2==3.1.4
+weasyprint==65.1
+
+# Phase 20 - no-code report builder: safe calc + server-side charts.
+simpleeval==0.9.13
+matplotlib==3.9.2

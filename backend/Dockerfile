@@ -8,6 +8,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# WeasyPrint system libraries (Pango/Cairo/GDK-Pixbuf + fonts). Required for
+# HTML->PDF report rendering. Installed before pip so the wheel links cleanly.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libcairo2 \
+        libgdk-pixbuf-2.0-0 \
+        libffi-dev \
+        shared-mime-info \
+        fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies first so this layer is cached when only
 # application code changes.
 COPY requirements.txt ./
