@@ -484,6 +484,73 @@ def unlink_destination(def_id: int, dest_id: int, request: Request,
 # ===========================================================================
 # Render (on-demand) — DanPac category C
 # ===========================================================================
+
+
+# --------------------------------------------------------------- report tags
+class ReportTagsBody(BaseModel):
+    tag_ids: list[int] = Field(default_factory=list)
+
+
+@router.get("/definitions/{def_id}/tags")
+def get_report_tags(def_id: int, db: Annotated[Session, Depends(get_session)]):
+    """Ordered tag ids (+ names) that this report includes."""
+    rows = db.execute(text("""
+        SELECT rt.tag_id, t.name, rt.position
+        FROM report_tags rt
+        LEFT JOIN tags t ON t.id = rt.tag_id
+        WHERE rt.report_id = :rid
+        ORDER BY rt.position, rt.tag_id
+    """), {"rid": def_id}).mappings().all()
+    return [{"tag_id": r["tag_id"], "name": r["name"], "position": r["position"]}
+            for r in rows]
+
+
+@router.put("/definitions/{def_id}/tags", status_code=204)
+def set_report_tags(def_id: int, body: ReportTagsBody, request: Request,
+                    db: Annotated[Session, Depends(get_session)]):
+    """Replace the report's full tag list (ordered by the array order)."""
+    exists = db.execute(text("SELECT 1 FROM report_definitions WHERE id = :id"),
+                        {"id": def_id}).first()
+    if not exists:
+        raise HTTPException(404, f"Report definition {def_id} not found.")
+    try:
+        db.execute(text("DELETE FROM report_tags WHERE report_id = :rid"),
+                   {"rid": def_id})
+        for pos, tid in enumerate(body.tag_ids):
+            db.execute(text("""
+                INSERT INTO report_tags (report_id, tag_id, position)
+                VALUES (:r, :t, :p) ON CONFLICT (report_id, tag_id) DO UPDATE
+                  SET position = EXCLUDED.position
+            """), {"r": def_id, "t": tid, "p": pos})
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise _integrity(e, "report tags")
+    audit(AuditEvent(action="report_def.set_tags", target_type="report_definition",
+                     target_id=def_id,
+                     summary=f"Set {len(body.tag_ids)} tag(s) on report {def_id}"),
+          request)
+
+
+@router.delete("/definitions/{def_id}/tags", status_code=204)
+def clear_report_tags(def_id: int, request: Request,
+                      db: Annotated[Session, Depends(get_session)]):
+    db.execute(text("DELETE FROM report_tags WHERE report_id = :rid"),
+               {"rid": def_id})
+    db.commit()
+    audit(AuditEvent(action="report_def.clear_tags", target_type="report_definition",
+                     target_id=def_id, summary=f"Cleared tags on report {def_id}"),
+          request)
+
+
+def _saved_report_tag_ids(db, def_id: int) -> list[int]:
+    """Tag ids saved for a report (used as render fallback)."""
+    rows = db.execute(text(
+        "SELECT tag_id FROM report_tags WHERE report_id = :rid ORDER BY position, tag_id"
+    ), {"rid": def_id}).fetchall()
+    return [r[0] for r in rows]
+
+
 @router.post("/definitions/{def_id}/render")
 def render_definition(
     def_id: int,
@@ -502,7 +569,10 @@ def render_definition(
 
     tz_name = settings.app_timezone
     snapshot_at = _dt.now(_ZoneInfo("UTC"))
-    ctx = build_live_context(db, list(tag_ids), tz_name)
+    # Fall back to the report's saved tags when none are passed explicitly,
+    # so scheduled + on-demand renders use the same tag set.
+    effective_tag_ids = list(tag_ids) if tag_ids else _saved_report_tag_ids(db, def_id)
+    ctx = build_live_context(db, effective_tag_ids, tz_name)
     # Let templates reference the report's own name/metadata.
     ctx["report"]["name"] = row["name"]
     ctx["report"]["category"] = row["category"]
