@@ -29,6 +29,7 @@ from app.db import get_session
 from app.utils.audit import audit, AuditEvent
 from app.config import settings
 from app.services.report_render import build_live_context, render_report
+from app.services.report_formats import render_html, build_report_data, to_json, to_xml
 
 router = APIRouter(prefix="/api/report-config", tags=["report-config"])
 
@@ -72,6 +73,7 @@ class DefinitionResponse(BaseModel):
     updated_at: datetime
     trigger_ids: list[int] = []
     destination_ids: list[int] = []
+    destination_fmts: dict[int, str] = {}
 
 
 class TriggerCreate(BaseModel):
@@ -86,11 +88,15 @@ class TriggerCreate(BaseModel):
     day_of_month: int | None = Field(None, ge=1, le=28)
     month_of_year: int | None = Field(None, ge=1, le=12)
     day_of_week: int | None = Field(None, ge=0, le=6)        # 0=Mon..6=Sun (weekly)
+    days_of_week: str | None = Field(None, max_length=32)   # "0,2,4" = Mon,Wed,Fri (multi-day weekly)
     interval_minutes: int | None = Field(None, ge=1)         # every-N-minutes
     cron_expr: str | None = Field(None, max_length=120)
     # tag
     tag_id: int | None = None
     tag_edge: str = Field("to_nonzero", pattern="^(to_nonzero|rising|any_change)$")
+    tag_op: str | None = Field(None, pattern="^(=|==|!=|>|>=|<|<=)$")
+    tag_value: float | None = None
+    tag_expr: str | None = Field(None, max_length=200)
     enabled: bool = True
 
 
@@ -103,10 +109,14 @@ class TriggerUpdate(BaseModel):
     day_of_month: int | None = Field(None, ge=1, le=28)
     month_of_year: int | None = Field(None, ge=1, le=12)
     day_of_week: int | None = Field(None, ge=0, le=6)
+    days_of_week: str | None = Field(None, max_length=32)
     interval_minutes: int | None = Field(None, ge=1)
     cron_expr: str | None = Field(None, max_length=120)
     tag_id: int | None = None
     tag_edge: str | None = Field(None, pattern="^(to_nonzero|rising|any_change)$")
+    tag_op: str | None = Field(None, pattern="^(=|==|!=|>|>=|<|<=)$")
+    tag_value: float | None = None
+    tag_expr: str | None = Field(None, max_length=200)
     enabled: bool | None = None
 
 
@@ -122,10 +132,14 @@ class TriggerResponse(BaseModel):
     day_of_month: int | None
     month_of_year: int | None
     day_of_week: int | None
+    days_of_week: str | None
     interval_minutes: int | None
     cron_expr: str | None
     tag_id: int | None
     tag_edge: str | None
+    tag_op: str | None
+    tag_value: float | None
+    tag_expr: str | None
     enabled: bool
     created_at: datetime
     updated_at: datetime
@@ -137,6 +151,8 @@ class DestinationCreate(BaseModel):
     dest_type: str = Field(..., pattern="^(folder|network_drive|printer)$")
     target: str = Field(..., min_length=1)
     enabled: bool = True
+    owner_report_id: int | None = None          # null = Global, set = private to a report
+    default_fmts: str = Field("pdf", max_length=64)  # comma-separated default set
 
 
 class DestinationUpdate(BaseModel):
@@ -145,6 +161,8 @@ class DestinationUpdate(BaseModel):
     dest_type: str | None = Field(None, pattern="^(folder|network_drive|printer)$")
     target: str | None = Field(None, min_length=1)
     enabled: bool | None = None
+    owner_report_id: int | None = None
+    default_fmts: str | None = Field(None, max_length=64)
 
 
 class DestinationResponse(BaseModel):
@@ -154,6 +172,8 @@ class DestinationResponse(BaseModel):
     dest_type: str
     target: str
     enabled: bool
+    owner_report_id: int | None
+    default_fmts: str
     created_at: datetime
     updated_at: datetime
 
@@ -183,10 +203,13 @@ def _def_row(db: Session, def_id: int) -> DefinitionResponse:
     tids = [r[0] for r in db.execute(text(
         "SELECT trigger_id FROM report_trigger_links WHERE report_id = :id"),
         {"id": def_id}).all()]
-    dids = [r[0] for r in db.execute(text(
-        "SELECT destination_id FROM report_destination_links WHERE report_id = :id"),
-        {"id": def_id}).all()]
-    return DefinitionResponse(**dict(row), trigger_ids=tids, destination_ids=dids)
+    drows = db.execute(text(
+        "SELECT destination_id, fmt FROM report_destination_links WHERE report_id = :id"),
+        {"id": def_id}).all()
+    dids = [r[0] for r in drows]
+    dfmts = {r[0]: r[1] for r in drows}
+    return DefinitionResponse(**dict(row), trigger_ids=tids,
+                              destination_ids=dids, destination_fmts=dfmts)
 
 
 @router.get("/definitions", response_model=list[DefinitionResponse])
@@ -280,12 +303,12 @@ def create_trigger(body: TriggerCreate, request: Request,
             INSERT INTO report_triggers
                 (name, description, trigger_type, owner_report_id, period,
                  at_minute, at_time_min, day_of_month, month_of_year,
-                 day_of_week, interval_minutes, cron_expr,
-                 tag_id, tag_edge, enabled)
+                 day_of_week, days_of_week, interval_minutes, cron_expr,
+                 tag_id, tag_edge, tag_op, tag_value, tag_expr, enabled)
             VALUES (:name, :description, :trigger_type, :owner_report_id, :period,
                     :at_minute, :at_time_min, :day_of_month, :month_of_year,
-                    :day_of_week, :interval_minutes, :cron_expr,
-                    :tag_id, :tag_edge, :enabled)
+                    :day_of_week, :days_of_week, :interval_minutes, :cron_expr,
+                    :tag_id, :tag_edge, :tag_op, :tag_value, :tag_expr, :enabled)
             RETURNING id
         """), body.model_dump()).scalar_one()
         db.commit()
@@ -358,8 +381,9 @@ def create_destination(body: DestinationCreate, request: Request,
                        db: Annotated[Session, Depends(get_session)]):
     try:
         new_id = db.execute(text("""
-            INSERT INTO report_destinations (name, description, dest_type, target, enabled)
-            VALUES (:name, :description, :dest_type, :target, :enabled)
+            INSERT INTO report_destinations
+                (name, description, dest_type, target, enabled, owner_report_id, default_fmts)
+            VALUES (:name, :description, :dest_type, :target, :enabled, :owner_report_id, :default_fmts)
             RETURNING id
         """), body.model_dump()).scalar_one()
         db.commit()
@@ -452,8 +476,8 @@ def unlink_trigger(def_id: int, trig_id: int, request: Request,
 @router.put("/definitions/{def_id}/destinations/{dest_id}", status_code=204)
 def link_destination(def_id: int, dest_id: int, request: Request,
                      db: Annotated[Session, Depends(get_session)], fmt: str = "pdf"):
-    if fmt not in ("pdf", "csv"):
-        raise HTTPException(400, "fmt must be 'pdf' or 'csv'.")
+    if fmt not in ("pdf", "html", "json", "xml", "csv"):
+        raise HTTPException(400, "fmt must be one of: pdf, html, json, xml, csv.")
     try:
         db.execute(text("""
             INSERT INTO report_destination_links (report_id, destination_id, fmt)
@@ -465,7 +489,7 @@ def link_destination(def_id: int, dest_id: int, request: Request,
         db.rollback()
         raise _integrity(e, "destination link")
     audit(AuditEvent(action="report_def.link_dest", target_type="report_definition",
-                     target_id=def_id, summary=f"Linked destination {dest_id} ({fmt}) to report {def_id}"),
+                     target_id=def_id, summary=f"Linked destination {dest_id} (override={fmt_val or 'default'}) to report {def_id}"),
           request)
 
 
@@ -557,16 +581,14 @@ def render_definition(
     request: Request,
     db: Annotated[Session, Depends(get_session)],
     tag_ids: Annotated[list[int], Query(description="Tags to bind into the report context")] = [],
+    format: Annotated[str, Query(pattern="^(pdf|html|json|xml)$")] = "pdf",
 ):
     """Render a report definition's template to PDF using current live values."""
     row = db.execute(text(
-        "SELECT name, category, template_html, page_size, orientation "
+        "SELECT name, category, report_type, template_html, page_size, orientation "
         "FROM report_definitions WHERE id = :id"), {"id": def_id}).mappings().first()
     if not row:
         raise HTTPException(404, f"Report definition {def_id} not found.")
-    if not (row["template_html"] or "").strip():
-        raise HTTPException(400, "This report has no template_html to render.")
-
     tz_name = settings.app_timezone
     snapshot_at = _dt.now(_ZoneInfo("UTC"))
     # Fall back to the report's saved tags when none are passed explicitly,
@@ -576,35 +598,57 @@ def render_definition(
     # Let templates reference the report's own name/metadata.
     ctx["report"]["name"] = row["name"]
     ctx["report"]["category"] = row["category"]
+    ctx["report"]["report_type"] = row["report_type"]
 
+    # data formats (json/xml) need only the computed data; html/pdf need a template.
+    needs_template = format in ("pdf", "html")
+    if needs_template and not (row["template_html"] or "").strip():
+        raise HTTPException(400, "This report has no template_html to render.")
+
+    out_bytes: bytes = b""
+    media = "application/pdf"
+    ext = "pdf"
     try:
-        pdf = render_report(row["template_html"], ctx, row["page_size"], row["orientation"])
+        if format == "pdf":
+            out_bytes = render_report(row["template_html"], ctx, row["page_size"], row["orientation"])
+            media, ext = "application/pdf", "pdf"
+        elif format == "html":
+            html = render_html(row["template_html"], ctx, row["page_size"], row["orientation"])
+            out_bytes = html.encode("utf-8")
+            media, ext = "text/html; charset=utf-8", "html"
+        elif format == "json":
+            out_bytes = to_json(build_report_data(ctx))
+            media, ext = "application/json", "json"
+        elif format == "xml":
+            out_bytes = to_xml(build_report_data(ctx))
+            media, ext = "application/xml", "xml"
         status, err = "ok", None
-    except Exception as e:  # render/template error -> record + 400
+    except Exception as e:  # render/serialize error -> record + 400
         status, err = "error", str(e)
 
-    # Record the attempt either way (audit + history).
+    # Record the attempt either way (audit + history), with the actual fmt.
     db.execute(text("""
         INSERT INTO report_records
             (report_id, report_name, category, trigger_kind, snapshot_at,
              fmt, byte_size, status, error)
-        VALUES (:rid, :name, :cat, 'manual', :snap, 'pdf', :size, :status, :err)
+        VALUES (:rid, :name, :cat, 'manual', :snap, :fmt, :size, :status, :err)
     """), {
         "rid": def_id, "name": row["name"], "cat": row["category"],
-        "snap": snapshot_at, "size": (len(pdf) if status == "ok" else None),
+        "snap": snapshot_at, "fmt": format,
+        "size": (len(out_bytes) if status == "ok" else None),
         "status": status, "err": err,
     })
     db.commit()
 
     audit(AuditEvent(action="report.render", target_type="report_definition",
                      target_id=def_id, target_label=row["name"],
-                     summary=f"Rendered report '{row['name']}' on demand ({status})",
+                     summary=f"Rendered report '{row['name']}' on demand ({format}, {status})",
                      status=("success" if status == "ok" else "error"),
                      error_message=err), request)
 
     if status != "ok":
         raise HTTPException(400, f"Render failed: {err}")
 
-    fname = f"{row['name'].replace(' ', '_')}_{snapshot_at.strftime('%Y%m%d_%H%M%S')}.pdf"
-    return Response(content=pdf, media_type="application/pdf",
-                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    fname = f"{row['name'].replace(' ', '_')}_{snapshot_at.strftime('%Y%m%d_%H%M%S')}.{ext}"
+    headers = {"Content-Disposition": f'attachment; filename="{fname}"'} if format != "json" else {}
+    return Response(content=out_bytes, media_type=media, headers=headers)

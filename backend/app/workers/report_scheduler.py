@@ -31,7 +31,7 @@ from typing import Any, Optional
 from sqlalchemy import text
 from app.db import SessionLocal
 from app.services.report_render import build_live_context, render_report
-from app.workers.report_schedule import due_instant, tag_edge_fires
+from app.workers.report_schedule import due_instant, tag_condition_fires
 
 log = logging.getLogger("report_scheduler")
 
@@ -76,7 +76,7 @@ def _load_jobs(db) -> list[dict[str, Any]]:
                t.id AS trigger_id, t.trigger_type, t.period,
                t.at_minute, t.at_time_min, t.day_of_month, t.month_of_year,
                t.day_of_week, t.interval_minutes, t.cron_expr,
-               t.tag_id, t.tag_edge,
+               t.tag_id, t.tag_edge, t.tag_op, t.tag_value, t.tag_expr,
                s.last_fired_at, s.last_seen_value
         FROM report_definitions d
         JOIN report_trigger_links l ON l.report_id = d.id
@@ -253,7 +253,7 @@ def _tick(db, tz: ZoneInfo) -> int:
                     continue
                 cur = _latest_value(db, tag_id)
                 last = job.get("last_seen_value")
-                if tag_edge_fires(job.get("tag_edge"), last, cur):
+                if tag_condition_fires(job, last, cur):
                     _fire(db, job, tz, snapshot_at=now, trigger_kind="tag")
                     fired += 1
                 # always record the latest value so edges are detected next tick

@@ -48,6 +48,36 @@ def _last_weekly(now: datetime, day_of_week: int, minute_of_day: int) -> datetim
     return candidate
 
 
+def _last_weekly_multi(now: datetime, days: list[int], minute_of_day: int) -> datetime:
+    """Most recent occurrence among several weekdays at minute-of-day.
+    days: list of 0=Mon..6=Sun. Returns the latest matching instant <= now."""
+    best = None
+    for d in days:
+        c = _last_weekly(now, d, minute_of_day)
+        if best is None or c > best:
+            best = c
+    return best
+
+
+def _parse_days(raw) -> list[int]:
+    """Parse a days_of_week value: comma-separated string, list, or None."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        vals = raw
+    else:
+        vals = str(raw).split(",")
+    out = []
+    for v in vals:
+        try:
+            i = int(str(v).strip())
+            if 0 <= i <= 6:
+                out.append(i)
+        except (ValueError, TypeError):
+            continue
+    return sorted(set(out))
+
+
 def _last_monthly(now: datetime, day_of_month: int, minute_of_day: int) -> datetime:
     def at(year: int, month: int) -> datetime:
         dom = min(day_of_month, calendar.monthrange(year, month)[1])
@@ -106,7 +136,10 @@ def due_instant(trigger: dict[str, Any], now: datetime,
     if g("day_of_month"):
         return _last_monthly(now, int(g("day_of_month")), at_time_min)
 
-    # 4. weekly (day_of_week set)
+    # 4. weekly — prefer multi-day (days_of_week), fall back to single day_of_week
+    days = _parse_days(g("days_of_week"))
+    if days:
+        return _last_weekly_multi(now, days, at_time_min)
     dow = g("day_of_week")
     if dow is not None:
         return _last_weekly(now, int(dow), at_time_min)
@@ -149,3 +182,76 @@ def tag_edge_fires(edge: str, last_value: Optional[float],
     if e == "any_change":
         return last_value is None or current_value != last_value
     return False
+
+
+# --------------------------------------------------------------------------- #
+# Tag condition evaluation (edge | comparison | formula), becomes-true firing. #
+# --------------------------------------------------------------------------- #
+def _cond_true(trigger: dict, value: Optional[float]) -> Optional[bool]:
+    """Is the trigger's tag condition TRUE for `value`? None if undeterminable.
+    Mode precedence: formula (tag_expr) > comparison (tag_op+tag_value) > edge.
+    Edge conditions are transition-based and handled by tag_condition_fires, so
+    here edge returns None (defer to the edge path)."""
+    if value is None:
+        return None
+    g = trigger.get
+    expr = g("tag_expr")
+    if expr:
+        try:
+            from simpleeval import simple_eval
+            return bool(simple_eval(expr, names={"x": value, "value": value, "v": value}))
+        except Exception:
+            return None  # bad expression -> never fires (safe)
+    op = g("tag_op")
+    tv = g("tag_value")
+    if op and tv is not None:
+        try:
+            tv = float(tv)
+        except (TypeError, ValueError):
+            return None
+        if op == "=" or op == "==":
+            return value == tv
+        if op == "!=":
+            return value != tv
+        if op == ">":
+            return value > tv
+        if op == ">=":
+            return value >= tv
+        if op == "<":
+            return value < tv
+        if op == "<=":
+            return value <= tv
+        return None
+    return None  # no comparison/formula -> caller uses edge logic
+
+
+def _has_condition(trigger: dict) -> bool:
+    """True if this trigger uses comparison/formula mode (vs edge mode)."""
+    g = trigger.get
+    if g("tag_expr"):
+        return True
+    if g("tag_op") and g("tag_value") is not None:
+        return True
+    return False
+
+
+def tag_condition_fires(trigger: dict, last_value: Optional[float],
+                        current_value: Optional[float]) -> bool:
+    """Unified tag-trigger decision.
+
+    - If a comparison (tag_op+tag_value) or formula (tag_expr) is configured,
+      fire on the FALSE->TRUE transition of that condition (one fire per crossing).
+      A condition that cannot be evaluated (bad expression, missing value) fails
+      CLOSED -> never fires (it does NOT fall back to edge mode).
+    - Otherwise (no comparison/formula configured) use edge semantics
+      (tag_edge: to_nonzero | rising | any_change).
+    """
+    if _has_condition(trigger):
+        cur_cond = _cond_true(trigger, current_value)
+        if cur_cond is not True:
+            return False  # current not true (or unevaluable) -> no fire
+        prev_cond = _cond_true(trigger, last_value)
+        return prev_cond is not True  # becomes-true crossing only
+    # edge mode
+    return tag_edge_fires(trigger.get("tag_edge") or "to_nonzero",
+                          last_value, current_value)
