@@ -14,10 +14,11 @@ plant operators. Collects sensor data from PLCs over Modbus and OPC UA,
 stores in a time-series DB, evaluates calc tags and alarms, renders
 heatmaps and dashboards, exports PDF/Excel reports.
 
-**Status**: Active development. Reports render pipeline live (Phase 21+),
-on top of Phase OPC-web.2.3 (server clock drift + trust_server_timestamp).
-Current HEAD: `84291a3` ("feat(reports): render pipeline live (Jinja2 +
-WeasyPrint 65.1) + block builder + calc engine; migration 0061").
+**Status**: Active development. **BI Explorer + Reports trigger engine
+live** (Phase 22+), on top of Reports render pipeline (Phase 21) and
+Phase OPC-web.2.3 (server clock drift + trust_server_timestamp). Latest
+work: scheduled reports with tag data, trigger builder v2/v3, output
+formats + destinations model, BI Explorer field-shelf exploration.
 
 **User context**: Sole developer. Host is Windows, PowerShell, IST
 timezone. Postgres + workers run UTC internally.
@@ -44,6 +45,8 @@ timezone. Postgres + workers run UTC internally.
 | svj_modbus_simulator | dev-only Modbus device sim |
 | svj_calc_evaluator | calc tag evaluator |
 | svj_alarm_evaluator | alarm evaluator |
+| svj_report_scheduler | timed + tag-triggered report rendering & delivery |
+| svj_valkey | Redis-compatible cache |
 
 **DB credentials** (dev): user `induvista_admin`, db `induvista`.
 
@@ -206,15 +209,24 @@ check both MIN AND MAX, or use windowed queries on real time.
 
 ## 8. Active phase status
 
-### Current
-- **Reports render pipeline live** (`84291a3`, today)
-  - Migration 0061 — report blocks schema
-  - `backend/app/services/report_render.py` — Jinja2 + WeasyPrint render
-  - `backend/app/services/report_blocks.py` — block builder + calc engine
-  - Pango 1.56 compatibility fix in WeasyPrint usage
+### Current — BI Explorer + Reports trigger engine (`bbf30c2` and ancestors)
+- **`bbf30c2`** — BI Explorer field-shelf exploration + triggers/formats/destinations
+  - `backend/app/api/bi.py`, `backend/app/services/bi_query.py`
+  - `frontend/src/pages/Explorer.tsx` (BI Explorer page)
+- **`8222d0a`** — trigger builder v2/v3 + output formats + destinations model
+  - `backend/app/services/report_formats.py`
+  - `frontend/src/pages/ReportTriggers.tsx`, `ReportDestinations.tsx`, `ReportsConfig.tsx`, `triggers-shared.tsx`
+  - Migrations `0064_report_trigger_days`, `0065_tag_trigger_conditions`, `0066_dest_scope_fmts`
+- **`e0fb545`** — `report_tags`: scheduled reports render with their tag data
+  - Migration `0063_report_tags`, tag API + render fallback to saved tags
+- **`6cf94b0`** — trigger engine (`report_scheduler` worker)
+  - `backend/app/workers/report_scheduler.py`, `report_schedule.py`
+  - Timed + tag triggers fire, render, deliver, record
+  - Migration `0062_report_trigger_state`; injects report metadata into context
 
 ### Recent history
-- Phase OPC-web.2.3 (`c7ba4c2`, ancestor of HEAD): migrations 0055/0056, server clock drift probe, trust_server_timestamp toggle, `docs/opc_quality_and_timestamps.md`
+- **Phase 21 — Reports render pipeline** (`84291a3`): Jinja2 + WeasyPrint 65.1, Pango 1.56 compat fix, block builder + calc engine, migration `0061_report_blocks`
+- **Phase OPC-web.2.3** (`c7ba4c2`): migrations 0055/0056, server clock drift probe, trust_server_timestamp toggle, `docs/opc_quality_and_timestamps.md`
 - Phase OPC-web.2.2: OPC UA address-space browse & bulk import, integration tests (Kepware)
 - Phase 19: dark mode, mobile nav, theming, tag-quality CAGG (migration 0044)
 - Phase 17c: calc diagnostics, shared UI component library, screenshots tooling
