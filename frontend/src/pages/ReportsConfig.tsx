@@ -39,6 +39,7 @@ import { BatchControl } from "@/components/reports/BatchControl";
 import { ReportPeriodTab } from "@/components/reports/ReportPeriodTab";
 import { ReportDataTab } from "@/components/reports/ReportDataTab";
 import { ReportRevisionsTab } from "@/components/reports/ReportRevisionsTab";
+import { ReportBlocksEditor, type Block } from "@/components/reports/ReportBlocksEditor";
 
 // ---- types mirroring the backend ----------------------------------------
 type Definition = {
@@ -47,6 +48,7 @@ type Definition = {
   report_code: string | null; area: string | null;
   equipment: string | null; owner_dept: string | null;
   template_html: string | null; template_mode: string | null;
+  template_blocks?: any[] | null;
   page_size: string | null; orientation: string | null;
   enabled: boolean;
   status?: string | null; active_revision_id?: number | null;
@@ -266,6 +268,9 @@ function Editor({
   const qc = useQueryClient();
   const [form, setForm] = useState<Definition>(def);
   const [rendering, setRendering] = useState(false);
+  const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
   // multi-select output formats for on-demand download (tick any combination)
   type Fmt = "pdf" | "html" | "json" | "xml";
   const [previewFormats, setPreviewFormats] = useState<Set<Fmt>>(new Set<Fmt>(["pdf"]));
@@ -285,7 +290,9 @@ function Editor({
       api.patch(`/report-config/definitions/${def.id}`, {
         name: form.name, description: form.description, category: form.category,
         report_type: form.report_type, template_html: form.template_html,
-        template_mode: "html", page_size: form.page_size, orientation: form.orientation,
+        template_mode: form.template_mode || "html",
+        template_blocks: form.template_blocks ?? null,
+        page_size: form.page_size, orientation: form.orientation,
         report_code: form.report_code, area: form.area,
         equipment: form.equipment, owner_dept: form.owner_dept,
         enabled: form.enabled,
@@ -353,9 +360,41 @@ function Editor({
     }
   };
 
+  // ---- live preview — renders the IN-PROGRESS template (no save/activate) ----
+  const doPreview = async () => {
+    setPreviewing(true); setPreviewErr(null);
+    const token = window.localStorage.getItem(TOKEN_KEY);
+    try {
+      const res = await fetch(`/api/report-config/definitions/${def.id}/preview`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          template_mode: form.template_mode || "html",
+          template_blocks: form.template_blocks ?? null,
+          template_html: form.template_html ?? "",
+          page_size: form.page_size, orientation: form.orientation,
+        }),
+      });
+      if (!res.ok) {
+        const t = await res.json().catch(() => ({} as any));
+        setPreviewErr(t.detail || `Preview failed (HTTP ${res.status}).`);
+        setPreviewHtml(null);
+      } else {
+        setPreviewHtml(await res.text());
+      }
+    } catch (e: any) {
+      setPreviewErr(e?.message || "Preview failed.");
+      setPreviewHtml(null);
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   const linkedTriggers = new Set(def.trigger_ids ?? []);
   const linkedDests = new Set(def.destination_ids ?? []);
-
   const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
     { id: "content", label: "Content", icon: <LayoutGrid className="h-3.5 w-3.5" /> },
     { id: "period", label: "Period", icon: <Calendar className="h-3.5 w-3.5" /> },
@@ -473,19 +512,72 @@ function Editor({
       {/* ---- CONTENT tab (template) ---- */}
       {tab === "content" && (
       <SectionCard
-        title="Template (HTML)"
-        subtitle="Jinja2. Use {{ report.name }}, {{ report.generated_at }}, and {% for t in tags_list %}{{ t.name }} {{ t.display }}{% endfor %}"
+        title="Template"
+        subtitle="Build the report visually with blocks, or hand-write a Jinja2 HTML template."
       >
-        <textarea
-          value={form.template_html ?? ""}
-          onChange={(e) => set("template_html", e.target.value)}
-          spellCheck={false}
-          className="w-full rounded-lg p-3 font-mono text-[12px]"
-          style={{ minHeight: 200, border: "0.5px solid var(--card-edge, #ddd)", backgroundColor: "var(--bg, #fff)" }}
-        />
-        <p className="mt-1 text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
-          Render uses this report’s saved tags (below). Save the template before rendering.
+        <div className="inline-flex rounded-lg overflow-hidden mb-3" style={{ border: "0.5px solid var(--separator)" }}>
+          {(["blocks", "html"] as const).map((m) => {
+            const on = (form.template_mode || "html") === m;
+            return (
+              <button key={m} type="button" onClick={() => set("template_mode", m)}
+                className="px-3 py-1.5 text-[12px] font-medium"
+                style={{
+                  backgroundColor: on ? "var(--ios-blue, #007aff)" : "var(--bg-elevated)",
+                  color: on ? "#fff" : "var(--text-secondary)",
+                }}>
+                {m === "blocks" ? "Visual blocks" : "HTML template"}
+              </button>
+            );
+          })}
+        </div>
+
+        {(form.template_mode || "html") === "blocks" ? (
+          <ReportBlocksEditor
+            value={(form.template_blocks ?? []) as Block[]}
+            onChange={(b) => set("template_blocks", b)}
+            allTags={allTags}
+          />
+        ) : (
+          <>
+            <textarea
+              value={form.template_html ?? ""}
+              onChange={(e) => set("template_html", e.target.value)}
+              spellCheck={false}
+              className="w-full rounded-lg p-3 font-mono text-[12px]"
+              style={{ minHeight: 200, border: "0.5px solid var(--card-edge, #ddd)", backgroundColor: "var(--bg, #fff)" }}
+            />
+            <p className="mt-1 text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+              Jinja2 — use {"{{ report.name }}"}, {"{{ report.generated_at }}"}, and {"{% for t in tags_list %}{{ t.name }} {{ t.display }}{% endfor %}"}.
+            </p>
+          </>
+        )}
+        <p className="mt-2 text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+          Render uses this report’s saved tags (Data tab). Save before rendering or downloading a preview.
         </p>
+
+        {/* ---- live preview: renders the current edits without saving ---- */}
+        <div className="mt-3 pt-3" style={{ borderTop: "0.5px solid var(--separator)" }}>
+          <div className="flex items-center gap-2 mb-2">
+            <Button variant="outline" size="sm" onClick={doPreview} disabled={previewing}>
+              {previewing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />}
+              <span className="ml-1">{previewHtml ? "Refresh preview" : "Preview"}</span>
+            </Button>
+            <span className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+              Live HTML of your current edits (no save needed). PDF is the final layout.
+            </span>
+          </div>
+          {previewErr && (
+            <div className="rounded-md px-3 py-2 text-[12px] mb-2"
+              style={{ backgroundColor: "var(--bg-grouped)", color: "var(--ios-red)" }}>
+              {previewErr}
+            </div>
+          )}
+          {previewHtml && (
+            <iframe title="Report preview" srcDoc={previewHtml}
+              style={{ width: "100%", height: 520, borderRadius: 8,
+                       border: "0.5px solid var(--separator)", backgroundColor: "#fff" }} />
+          )}
+        </div>
       </SectionCard>
       )}
 

@@ -250,7 +250,8 @@ def build_period_context(db: Session, bindings: Sequence[Mapping[str, Any]],
 # --------------------------------------------------------------------------- #
 def resolve_report_context(db: Session, report_id: int, tz_name: str,
                            ref: datetime,
-                           live_tag_ids: Sequence[int]) -> tuple[dict[str, Any], tuple[datetime, datetime] | None]:
+                           live_tag_ids: Sequence[int],
+                           force_live: bool = False) -> tuple[dict[str, Any], tuple[datetime, datetime] | None]:
     """Build the render context for a report, choosing the path by config.
 
     OPT-IN: if the report has an *enabled* report_period_rule, compute the data
@@ -264,8 +265,12 @@ def resolve_report_context(db: Session, report_id: int, tz_name: str,
     authoritative — the period rule and bindings come from the snapshot, not the
     live tables. Reports without an active revision take the live path below,
     byte-identical to before.
+
+    force_live=True ignores the active snapshot and always uses the LIVE period
+    rule + bindings. Used by the template preview so editors see their unsaved /
+    not-yet-activated changes rendered against current data.
     """
-    snap = active_config(db, report_id)
+    snap = None if force_live else active_config(db, report_id)
     if snap is not None:
         srule = snap.get("period_rule")
         sbind = snap.get("bindings") or []

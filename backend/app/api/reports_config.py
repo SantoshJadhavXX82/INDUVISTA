@@ -15,6 +15,7 @@ this schema and are built next.
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, Response
@@ -30,6 +31,7 @@ from app.utils.audit import audit, AuditEvent
 from app.config import settings
 from app.services.report_render import build_live_context, render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
+from app.services.report_blocks import compile_blocks, build_block_context
 from app.services.report_aggregate import (
     resolve_report_context, DATA_FUNCTIONS, QUALITY_RULES, MISSING_ACTIONS,
     BAD_ACTIONS, VALUE_FORMATS,
@@ -57,6 +59,8 @@ class DefinitionCreate(BaseModel):
     category: str = Field("periodic", pattern="^(event|periodic|on_demand)$")
     report_type: str | None = Field(None, max_length=32)
     template_html: str = ""
+    template_mode: str = Field("html", pattern="^(html|blocks)$")
+    template_blocks: list[dict[str, Any]] | None = None
     page_size: str = Field("A4", max_length=16)
     orientation: str = Field("portrait", pattern="^(portrait|landscape)$")
     report_code: str | None = Field(None, max_length=40)
@@ -72,6 +76,8 @@ class DefinitionUpdate(BaseModel):
     category: str | None = Field(None, pattern="^(event|periodic|on_demand)$")
     report_type: str | None = Field(None, max_length=32)
     template_html: str | None = None
+    template_mode: str | None = Field(None, pattern="^(html|blocks)$")
+    template_blocks: list[dict[str, Any]] | None = None
     page_size: str | None = Field(None, max_length=16)
     orientation: str | None = Field(None, pattern="^(portrait|landscape)$")
     report_code: str | None = Field(None, max_length=40)
@@ -88,6 +94,8 @@ class DefinitionResponse(BaseModel):
     category: str
     report_type: str | None
     template_html: str
+    template_mode: str = "html"
+    template_blocks: list[dict[str, Any]] | None = None
     page_size: str
     orientation: str
     report_code: str | None = None
@@ -265,16 +273,23 @@ def get_definition(def_id: int, db: Annotated[Session, Depends(get_session)]):
 def create_definition(body: DefinitionCreate, request: Request,
                       db: Annotated[Session, Depends(get_session)]):
     try:
+        params = body.model_dump()
+        params["template_blocks"] = (
+            json.dumps(params.get("template_blocks"))
+            if params.get("template_blocks") is not None else None
+        )
         new_id = db.execute(text("""
             INSERT INTO report_definitions
                 (name, description, category, report_type, template_html,
+                 template_mode, template_blocks,
                  page_size, orientation, report_code, area, equipment,
                  owner_dept, enabled)
             VALUES (:name, :description, :category, :report_type, :template_html,
+                    :template_mode, CAST(:template_blocks AS JSONB),
                     :page_size, :orientation, :report_code, :area, :equipment,
                     :owner_dept, :enabled)
             RETURNING id
-        """), body.model_dump()).scalar_one()
+        """), params).scalar_one()
         db.commit()
     except IntegrityError as e:
         db.rollback()
@@ -292,7 +307,16 @@ def update_definition(def_id: int, body: DefinitionUpdate, request: Request,
     fields = {k: v for k, v in body.model_dump(exclude_unset=True).items()}
     if not fields:
         return _def_row(db, def_id)
-    sets = ", ".join(f"{k} = :{k}" for k in fields)
+    if "template_blocks" in fields:
+        fields["template_blocks"] = (
+            json.dumps(fields["template_blocks"])
+            if fields["template_blocks"] is not None else None
+        )
+    sets = ", ".join(
+        ("template_blocks = CAST(:template_blocks AS JSONB)" if k == "template_blocks"
+         else f"{k} = :{k}")
+        for k in fields
+    )
     fields["id"] = def_id
     try:
         res = db.execute(text(
@@ -672,19 +696,34 @@ def render_definition(
     ctx["signoff"] = _hdr["revision"]
 
     # data formats (json/xml) need only the computed data; html/pdf need a template.
+    # A report authored in 'blocks' mode is compiled to HTML on the fly; 'html'
+    # mode renders the raw Jinja2 template as before.
+    mode = (row.get("template_mode") or "html")
+    blocks = row.get("template_blocks") or None
     needs_template = format in ("pdf", "html")
-    if needs_template and not (row["template_html"] or "").strip():
-        raise HTTPException(400, "This report has no template_html to render.")
+    if needs_template:
+        if mode == "blocks":
+            if not blocks:
+                raise HTTPException(400, "This report is in blocks mode but has no blocks to render.")
+        elif not (row["template_html"] or "").strip():
+            raise HTTPException(400, "This report has no template_html to render.")
+
+    template_str = row["template_html"]
+    if mode == "blocks" and blocks:
+        template_str = compile_blocks(blocks, row["page_size"], row["orientation"])
+        _bc = build_block_context(blocks, ctx.get("tags_list") or [])
+        ctx["tables"] = _bc["tables"]
+        ctx["charts"] = _bc["charts"]
 
     out_bytes: bytes = b""
     media = "application/pdf"
     ext = "pdf"
     try:
         if format == "pdf":
-            out_bytes = render_report(row["template_html"], ctx, row["page_size"], row["orientation"])
+            out_bytes = render_report(template_str, ctx, row["page_size"], row["orientation"])
             media, ext = "application/pdf", "pdf"
         elif format == "html":
-            html = render_html(row["template_html"], ctx, row["page_size"], row["orientation"])
+            html = render_html(template_str, ctx, row["page_size"], row["orientation"])
             out_bytes = html.encode("utf-8")
             media, ext = "text/html; charset=utf-8", "html"
         elif format == "json":
@@ -734,6 +773,67 @@ def render_definition(
     fname = f"{row['name'].replace(' ', '_')}_{snapshot_at.strftime('%Y%m%d_%H%M%S')}.{ext}"
     headers = {"Content-Disposition": f'attachment; filename="{fname}"'} if format != "json" else {}
     return Response(content=out_bytes, media_type=media, headers=headers)
+
+
+class PreviewBody(BaseModel):
+    template_mode: str = Field("html", pattern="^(html|blocks)$")
+    template_blocks: list[dict[str, Any]] | None = None
+    template_html: str = ""
+    page_size: str = Field("A4", max_length=16)
+    orientation: str = Field("portrait", pattern="^(portrait|landscape)$")
+    tag_ids: list[int] | None = None
+
+
+@router.post("/definitions/{def_id}/preview")
+def preview_definition(def_id: int, body: PreviewBody,
+                       db: Annotated[Session, Depends(get_session)]):
+    """Render IN-PROGRESS template edits to HTML without saving or activating.
+
+    Uses the report's LIVE period/bindings (force_live) so editors see their
+    current data configuration, then renders the template supplied in the
+    request body. Never writes the definition, snapshot, history, or audit log —
+    it is a pure read used by the Content tab's live preview.
+    """
+    meta = db.execute(text(
+        "SELECT name, category, report_type FROM report_definitions WHERE id = :id"),
+        {"id": def_id}).mappings().first()
+    if not meta:
+        raise HTTPException(404, f"Report definition {def_id} not found.")
+
+    tz_name = settings.app_timezone
+    ref = _dt.now(_ZoneInfo("UTC"))
+    tag_ids = list(body.tag_ids) if body.tag_ids else _saved_report_tag_ids(db, def_id)
+    try:
+        ctx, _window = resolve_report_context(db, def_id, tz_name, ref, tag_ids, force_live=True)
+    except ValueError as e:
+        raise HTTPException(400, f"Period cannot be resolved: {e}")
+
+    ctx["report"]["name"] = meta["name"]
+    ctx["report"]["category"] = meta["category"]
+    ctx["report"]["report_type"] = meta["report_type"]
+    _hdr = document_header(db, def_id)
+    ctx["report"].update(_hdr["identity"])
+    ctx["signoff"] = _hdr["revision"]
+
+    mode = body.template_mode or "html"
+    blocks = body.template_blocks or None
+    if mode == "blocks":
+        if not blocks:
+            raise HTTPException(400, "Nothing to preview — this report has no blocks yet.")
+        template_str = compile_blocks(blocks, body.page_size, body.orientation)
+        _bc = build_block_context(blocks, ctx.get("tags_list") or [])
+        ctx["tables"] = _bc["tables"]
+        ctx["charts"] = _bc["charts"]
+    else:
+        template_str = body.template_html or ""
+        if not template_str.strip():
+            raise HTTPException(400, "Nothing to preview — the template is empty.")
+
+    try:
+        html = render_html(template_str, ctx, body.page_size, body.orientation)
+    except Exception as e:
+        raise HTTPException(400, f"Preview render failed: {e}")
+    return Response(content=html, media_type="text/html; charset=utf-8")
 
 
 # ===========================================================================

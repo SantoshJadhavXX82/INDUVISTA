@@ -156,13 +156,23 @@ def _render_one(fmt: str, dm, ctx: dict[str, Any]) -> "tuple[bytes, str]":
     page = dm.get("page_size") or "A4"
     orient = dm.get("orientation") or "portrait"
     tmpl = (dm.get("template_html") or "")
+    # blocks mode: compile the block list to HTML and supply tables/charts,
+    # mirroring api/reports_config.render_definition so scheduled output matches.
+    mode = (dm.get("template_mode") or "html")
+    blocks = dm.get("template_blocks") or None
+    if mode == "blocks" and blocks:
+        from app.services.report_blocks import compile_blocks, build_block_context
+        tmpl = compile_blocks(blocks, page, orient)
+        _bc = build_block_context(blocks, ctx.get("tags_list") or [])
+        ctx["tables"] = _bc["tables"]
+        ctx["charts"] = _bc["charts"]
     if fmt == "pdf":
         if not tmpl.strip():
-            raise ValueError("pdf requested but report has no template_html")
+            raise ValueError("pdf requested but report has no template")
         return render_report(tmpl, ctx, page, orient), "pdf"
     if fmt == "html":
         if not tmpl.strip():
-            raise ValueError("html requested but report has no template_html")
+            raise ValueError("html requested but report has no template")
         return render_html(tmpl, ctx, page, orient).encode("utf-8"), "html"
     if fmt == "json":
         return to_json(build_report_data(ctx)), "json"
