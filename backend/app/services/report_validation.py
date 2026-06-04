@@ -23,7 +23,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.services.report_period import compute_window
+from app.services.report_period import resolve_window
 
 FAILED = "failed"
 WARNING = "warning"
@@ -77,7 +77,7 @@ def validate_report(db: Session, report_id: int, tz_name: str) -> dict[str, Any]
     ), {"r": report_id}).mappings().first()
     if rule:
         try:
-            compute_window(dict(rule), datetime.now(ZoneInfo("UTC")), tz_name)
+            resolve_window(db, dict(rule), datetime.now(ZoneInfo("UTC")), tz_name)
             add("period", PASSED, "Period rule resolves to a valid window.")
         except Exception as e:  # noqa: BLE001 — surface the reason to the user
             add("period", FAILED, f"Period rule cannot be resolved: {e}")

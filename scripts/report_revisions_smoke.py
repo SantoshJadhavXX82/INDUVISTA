@@ -7,7 +7,7 @@ Throwaway, self-cleaning. Proves:
   * snapshotting creates a draft revision (with config + validation)
   * activating sets the report active + records activated_by
   * a second activation supersedes the first and repoints active_revision_id
-  * a revision whose validation FAILS (shift period) cannot be activated (409)
+  * a revision whose validation FAILS (batch period) cannot be activated (409)
 
 Render/scheduler are NOT exercised — B3a is runtime-dormant by design.
 
@@ -129,12 +129,12 @@ def main() -> int:
         (ok if r1_after["status"] == "superseded" and d["active_revision_id"] == r2["id"] else bad)(
             "activating revision 2 supersedes 1 + repoints", f"r1={r1_after['status']} ptr={d['active_revision_id']}")
 
-        # validation gate: shift period -> draft -> activate must 409
+        # validation gate: batch period -> draft -> activate must 409
         api.req("PUT", f"{base}/definitions/{rid}/period-rule",
-                body={"period_type": "shift", "period_rule": "previous_completed"})
+                body={"period_type": "batch", "period_rule": "previous_completed"})
         r3 = api.req("POST", f"{base}/definitions/{rid}/revisions", body={"notes": "bad period"})
         (ok if r3.get("validation", {}).get("overall") == "failed" else bad)(
-            "draft with shift period validates failed", f"overall={r3.get('validation', {}).get('overall')}")
+            "draft with batch period validates failed", f"overall={r3.get('validation', {}).get('overall')}")
         try:
             api.req("POST", f"{base}/definitions/{rid}/revisions/{r3['id']}/activate")
             bad("activate failing revision is blocked", "expected 409, got success")

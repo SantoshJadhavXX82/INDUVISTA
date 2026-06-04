@@ -4,7 +4,7 @@ Phase B1 smoke — report validation engine, against a RUNNING stack.
 
 Throwaway, self-cleaning. Proves:
   * a bare report validates as WARNING (no tags / no destinations), not failed
-  * an unresolvable period (shift, not implemented) -> FAILED with a period issue
+  * an unresolvable period (batch, not implemented) -> FAILED with a period issue
   * clearing the period returns to WARNING
   * a PDF destination with no template -> FAILED with a layout issue
 
@@ -106,10 +106,10 @@ def main() -> int:
 
         # unresolvable period -> failed
         api.req("PUT", f"{base}/definitions/{rid}/period-rule",
-                body={"period_type": "shift", "period_rule": "previous_completed"})
+                body={"period_type": "batch", "period_rule": "previous_completed"})
         v = api.req("POST", f"{base}/definitions/{rid}/validate")
         (ok if v["overall"] == "failed" and has(v, "period", "failed") else bad)(
-            "shift period -> failed", f"overall={v['overall']}")
+            "batch period -> failed", f"overall={v['overall']}")
 
         # clear period -> back to warning
         api.req("DELETE", f"{base}/definitions/{rid}/period-rule")

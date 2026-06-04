@@ -31,7 +31,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.services.report_render import TagCtx, GOOD_ST, build_live_context  # GOOD_ST == 128
-from app.services.report_period import compute_window
+from app.services.report_period import compute_window, resolve_window
 from app.services.report_revisions import active_config
 
 SUSPECT_ST = 64
@@ -249,7 +249,7 @@ def resolve_report_context(db: Session, report_id: int, tz_name: str,
         srule = snap.get("period_rule")
         sbind = snap.get("bindings") or []
         if srule and srule.get("enabled"):
-            window = compute_window(dict(srule), ref, tz_name)
+            window = resolve_window(db, dict(srule), ref, tz_name)
             ctx = build_period_context(db, [dict(b) for b in sbind], window, tz_name)
             return ctx, window
         tag_ids = [b["tag_id"] for b in sbind if b.get("tag_id")]
@@ -261,7 +261,7 @@ def resolve_report_context(db: Session, report_id: int, tz_name: str,
     ), {"r": report_id}).mappings().first()
 
     if rule:
-        window = compute_window(dict(rule), ref, tz_name)
+        window = resolve_window(db, dict(rule), ref, tz_name)
         bindings = db.execute(text("""
             SELECT tag_id, position, alias, display_name, unit_id,
                    data_function, quality_rule

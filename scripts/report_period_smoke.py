@@ -35,10 +35,10 @@ def ist(y, m, d, hh, mm):
     return datetime(y, m, d, hh, mm, tzinfo=IST)
 
 
-def check(name, rule, ref, exp_start, exp_end):
+def check(name, rule, ref, exp_start, exp_end, shifts=None):
     global PASS, FAIL
     try:
-        s, e = compute_window(rule, ref, "Asia/Kolkata")
+        s, e = compute_window(rule, ref, "Asia/Kolkata", shifts=shifts)
         if s == exp_start and e == exp_end:
             PASS += 1
             print(f"  [PASS] {name}: {s.isoformat()} .. {e.isoformat()}")
@@ -51,10 +51,10 @@ def check(name, rule, ref, exp_start, exp_end):
         print(f"  [FAIL] {name}: raised {type(ex).__name__}: {ex}")
 
 
-def check_raises(name, rule, ref):
+def check_raises(name, rule, ref, shifts=None):
     global PASS, FAIL
     try:
-        compute_window(rule, ref, "Asia/Kolkata")
+        compute_window(rule, ref, "Asia/Kolkata", shifts=shifts)
         FAIL += 1
         print(f"  [FAIL] {name}: expected ValueError, none raised")
     except ValueError:
@@ -116,9 +116,34 @@ def main() -> int:
           ist(2026, 5, 27, 10, 5),
           U(2026, 5, 27, 2, 30), U(2026, 5, 27, 4, 30))
 
-    # 9. shift not implemented yet -> ValueError.
-    check_raises("shift not implemented",
-                 {"period_type": "shift", "period_rule": "previous_completed"},
+    # 9. shift — 3-shift plant (A 06:00, B 14:00, C 22:00). @10:05 the current
+    #    shift is A (06:00..14:00); the previous completed shift is the night
+    #    shift C (prev 22:00..06:00) that wraps past midnight.
+    _SH = ["06:00", "14:00", "22:00"]
+    check("shift/current @10:05 -> A 06-14",
+          {"period_type": "shift", "period_rule": "current"},
+          ist(2026, 5, 27, 10, 5),
+          U(2026, 5, 27, 0, 30), U(2026, 5, 27, 8, 30), shifts=_SH)
+    check("shift/previous @10:05 -> night C (wrap)",
+          {"period_type": "shift", "period_rule": "previous_completed"},
+          ist(2026, 5, 27, 10, 5),
+          U(2026, 5, 26, 16, 30), U(2026, 5, 27, 0, 30), shifts=_SH)
+    # 9b. wrap edge: @02:00 the current shift is still last night's C.
+    check("shift/current @02:00 -> night C (wrap)",
+          {"period_type": "shift", "period_rule": "current"},
+          ist(2026, 5, 27, 2, 0),
+          U(2026, 5, 26, 16, 30), U(2026, 5, 27, 0, 30), shifts=_SH)
+    check("shift/previous @02:00 -> B 14-22",
+          {"period_type": "shift", "period_rule": "previous_completed"},
+          ist(2026, 5, 27, 2, 0),
+          U(2026, 5, 26, 8, 30), U(2026, 5, 26, 16, 30), shifts=_SH)
+    # 9c. shift period without a schedule -> ValueError.
+    check_raises("shift with no schedule",
+                 {"period_type": "shift", "period_rule": "current"},
+                 ist(2026, 5, 27, 10, 5))
+    # 9d. batch is still deferred -> ValueError.
+    check_raises("batch not implemented",
+                 {"period_type": "batch", "period_rule": "previous_completed"},
                  ist(2026, 5, 27, 10, 5))
 
     # 10. unknown period_type -> ValueError.

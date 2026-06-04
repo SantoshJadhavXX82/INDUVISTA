@@ -22,8 +22,11 @@ All math is done in the PLANT timezone (so day/month boundaries and DST follow
 plant rules) and the result is returned as timezone-aware UTC, matching the
 project rule that timestamps are stored in UTC and periods use plant time.
 
-shift/batch are not implemented here — they need shift schedules / batch records
-and will arrive in a later phase; compute_window raises a clear ValueError.
+`shift` is implemented: callers pass the plant shift start times (sorted "HH:MM"
+strings) via the `shifts` argument and the window snaps to shift boundaries (the
+last shift wraps past midnight). `compute_window` itself stays pure — the DB read
+of the shift schedule lives in `load_shift_starts`/`resolve_window` below. `batch`
+is still deferred (needs batch-event records); compute_window raises for it.
 
 NOTE: the value sets below MUST stay in sync with the CHECK constraints in
 migration 0068_report_period_rule.
@@ -38,8 +41,8 @@ PERIOD_TYPES = ("hourly", "daily", "weekly", "monthly", "shift", "batch", "custo
 PERIOD_RULES = ("previous_completed", "current", "custom")
 MISSING_PERIOD_HANDLING = ("warn", "hold", "fail")
 
-# Implemented in this phase; shift/batch are deferred.
-_IMPLEMENTED = {"hourly", "daily", "weekly", "monthly", "custom"}
+# Implemented here; batch is still deferred (needs batch-event records).
+_IMPLEMENTED = {"hourly", "daily", "weekly", "monthly", "shift", "custom"}
 
 _UTC = ZoneInfo("UTC")
 
@@ -67,7 +70,28 @@ def _next_month_floor(mfloor: datetime) -> datetime:
     return _floor_month(mfloor + timedelta(days=32))
 
 
-def compute_window(rule: Mapping, ref: datetime, tz_name: str) -> tuple[datetime, datetime]:
+def _shift_boundaries(shifts: list[str], local: datetime, tz: ZoneInfo) -> list[datetime]:
+    """Sorted tz-aware shift-start datetimes spanning the day before/of/after `local`.
+
+    `shifts` are plant-local "HH:MM" start times. Three days of boundaries guarantee
+    that any `local` in the middle day has a defined current shift, a next boundary
+    (shift end) and a previous boundary (previous shift), including the night shift
+    that wraps past midnight.
+    """
+    starts = sorted({s for s in shifts if s})
+    bounds: list[datetime] = []
+    for off in (-1, 0, 1):
+        d = (local + timedelta(days=off)).date()
+        for hhmm in starts:
+            h, m = (int(x) for x in hhmm.split(":"))
+            bounds.append(datetime(d.year, d.month, d.day, h, m, tzinfo=tz))
+    bounds.sort()
+    return bounds
+
+
+def compute_window(
+    rule: Mapping, ref: datetime, tz_name: str, shifts: list[str] | None = None
+) -> tuple[datetime, datetime]:
     """Return (start_utc, end_utc) for the report's data window.
 
     `ref` is the reference instant (typically the trigger fire time). If it is
@@ -108,6 +132,28 @@ def compute_window(rule: Mapping, ref: datetime, tz_name: str) -> tuple[datetime
             raise ValueError("custom period end offset must be after start offset")
         return start.astimezone(_UTC), end.astimezone(_UTC)
 
+    # ---- shift: snap to configured shift boundaries (last shift wraps midnight).
+    if period_type == "shift":
+        if not shifts:
+            raise ValueError("shift period requires a configured shift schedule")
+        bounds = _shift_boundaries(list(shifts), local, tz)
+        cur_i = None
+        for i, b in enumerate(bounds):
+            if b <= local:
+                cur_i = i
+            else:
+                break
+        if cur_i is None or cur_i + 1 >= len(bounds):
+            raise ValueError("could not resolve current shift window around ref")
+        cur_start, cur_end = bounds[cur_i], bounds[cur_i + 1]
+        if period_rule == "current":
+            start, end = cur_start, cur_end
+        else:  # previous_completed
+            if cur_i - 1 < 0:
+                raise ValueError("could not resolve previous shift window around ref")
+            start, end = bounds[cur_i - 1], cur_start
+        return start.astimezone(_UTC), end.astimezone(_UTC)
+
     # ---- current period [cur_start, cur_end) — the in-progress window.
     if period_type == "hourly":
         cur_start = _floor_hour(local)
@@ -143,3 +189,45 @@ def compute_window(rule: Mapping, ref: datetime, tz_name: str) -> tuple[datetime
             start = cur_start - (cur_end - cur_start)
 
     return start.astimezone(_UTC), end.astimezone(_UTC)
+
+
+# ---------------------------------------------------------------------------
+# DB-aware helpers. compute_window stays pure; these read the shift schedule
+# from system_settings (mirrors api/settings.py 'shifts.config') so callers
+# can resolve a 'shift' period without knowing the storage details. Imports
+# are lazy so the pure window math above stays stdlib-only / offline-testable.
+# ---------------------------------------------------------------------------
+_DEFAULT_SHIFT_STARTS = ["06:00", "14:00", "22:00"]
+
+
+def load_shift_starts(db) -> list[str] | None:
+    """Return sorted plant shift start times ("HH:MM"), or None if shifts are
+    disabled / unconfigured. Falls back to the 3-shift default when the setting
+    is absent, matching api/settings.py's GET /settings/shifts behaviour."""
+    import json
+    from sqlalchemy import text
+
+    row = db.execute(
+        text("SELECT value FROM system_settings WHERE key = 'shifts.config'")
+    ).first()
+    if not row or not row[0]:
+        cfg = {"enabled": True, "shifts": [{"start": s} for s in _DEFAULT_SHIFT_STARTS]}
+    else:
+        try:
+            cfg = json.loads(row[0])
+        except Exception:
+            cfg = {"enabled": True, "shifts": [{"start": s} for s in _DEFAULT_SHIFT_STARTS]}
+    if not cfg.get("enabled"):
+        return None
+    starts = sorted(s["start"] for s in cfg.get("shifts", []) if s.get("start"))
+    return starts or None
+
+
+def resolve_window(db, rule: Mapping, ref: datetime, tz_name: str) -> tuple[datetime, datetime]:
+    """compute_window, but loads the shift schedule from the DB for 'shift'
+    periods. Use this anywhere a window is resolved against live config; the
+    pure compute_window is for offline/unit use where shifts are passed in."""
+    shifts = None
+    if (rule.get("period_type") or "").lower() == "shift":
+        shifts = load_shift_starts(db)
+    return compute_window(rule, ref, tz_name, shifts=shifts)
