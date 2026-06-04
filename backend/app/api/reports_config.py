@@ -1014,3 +1014,114 @@ def list_report_jobs(def_id: int, db: Annotated[Session, Depends(get_session)],
 def list_recent_jobs(db: Annotated[Session, Depends(get_session)],
                      limit: Annotated[int, Query(ge=1, le=500)] = 50):
     return list_jobs(db, None, limit)
+
+
+# ===========================================================================
+# Batch runs (override) — manual batch start/stop so the 'batch' period type
+# can be exercised today with simulated tags. Later a tag-threshold worker can
+# insert source='tag' runs; the period resolver (report_period.load_batch_window)
+# treats both the same. At most one batch is open at a time (DB-enforced).
+# ===========================================================================
+class BatchStart(BaseModel):
+    batch_no: str | None = Field(None, max_length=64)
+    note: str | None = None
+
+
+class BatchResponse(BaseModel):
+    id: int
+    batch_no: str | None
+    started_at: datetime
+    ended_at: datetime | None
+    source: str
+    note: str | None
+    created_by: str | None
+    created_at: datetime
+    status: str  # 'open' | 'closed'
+
+
+def _batch_row(r: Any) -> dict[str, Any]:
+    d = dict(r)
+    d["status"] = "open" if d.get("ended_at") is None else "closed"
+    return d
+
+
+@router.post("/batches/start", response_model=BatchResponse, status_code=201)
+def start_batch(body: BatchStart, request: Request,
+                db: Annotated[Session, Depends(get_session)],
+                user: CurrentUser = Depends(get_current_user)):
+    """Override: open a batch run now. 409 if a batch is already open."""
+    open_row = db.execute(text(
+        "SELECT id FROM report_batches WHERE ended_at IS NULL LIMIT 1"
+    )).first()
+    if open_row:
+        raise HTTPException(409, f"A batch is already open (id={open_row[0]}). "
+                                 "Stop it before starting another.")
+    try:
+        row = db.execute(text("""
+            INSERT INTO report_batches (batch_no, started_at, source, note, created_by)
+            VALUES (:bn, now(), 'manual', :note, :by)
+            RETURNING id, batch_no, started_at, ended_at, source, note, created_by, created_at
+        """), {"bn": body.batch_no, "note": body.note, "by": user.username}).mappings().first()
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise _integrity(e, "batch")
+    audit(AuditEvent(action="report.batch.start", target_type="report_batch",
+                     target_id=row["id"], summary=f"Started batch {row['batch_no'] or row['id']}"),
+          request)
+    return _batch_row(row)
+
+
+@router.post("/batches/stop", response_model=BatchResponse)
+def stop_batch(request: Request,
+               db: Annotated[Session, Depends(get_session)],
+               user: CurrentUser = Depends(get_current_user)):
+    """Override: close the currently open batch run. 404 if none is open."""
+    row = db.execute(text("""
+        UPDATE report_batches SET ended_at = now()
+        WHERE id = (SELECT id FROM report_batches WHERE ended_at IS NULL
+                    ORDER BY started_at DESC LIMIT 1)
+        RETURNING id, batch_no, started_at, ended_at, source, note, created_by, created_at
+    """)).mappings().first()
+    if not row:
+        raise HTTPException(404, "No open batch to stop.")
+    db.commit()
+    audit(AuditEvent(action="report.batch.stop", target_type="report_batch",
+                     target_id=row["id"], summary=f"Stopped batch {row['batch_no'] or row['id']}"),
+          request)
+    return _batch_row(row)
+
+
+@router.get("/batches/current", response_model=BatchResponse | None)
+def current_batch(db: Annotated[Session, Depends(get_session)]):
+    """The currently open batch run, or null if none is open."""
+    row = db.execute(text("""
+        SELECT id, batch_no, started_at, ended_at, source, note, created_by, created_at
+        FROM report_batches WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1
+    """)).mappings().first()
+    return _batch_row(row) if row else None
+
+
+@router.get("/batches", response_model=list[BatchResponse])
+def list_batches(db: Annotated[Session, Depends(get_session)],
+                 limit: Annotated[int, Query(ge=1, le=500)] = 50):
+    """Recent batch runs, newest first."""
+    rows = db.execute(text("""
+        SELECT id, batch_no, started_at, ended_at, source, note, created_by, created_at
+        FROM report_batches ORDER BY started_at DESC LIMIT :lim
+    """), {"lim": limit}).mappings().all()
+    return [_batch_row(r) for r in rows]
+
+
+@router.delete("/batches/{batch_id}", status_code=204)
+def delete_batch(batch_id: int, request: Request,
+                 db: Annotated[Session, Depends(get_session)],
+                 user: CurrentUser = Depends(get_current_user)):
+    """Delete a batch run (e.g. to remove a simulated/override run)."""
+    res = db.execute(text("DELETE FROM report_batches WHERE id = :id"), {"id": batch_id})
+    db.commit()
+    if res.rowcount == 0:
+        raise HTTPException(404, f"Batch {batch_id} not found.")
+    audit(AuditEvent(action="report.batch.delete", target_type="report_batch",
+                     target_id=batch_id, summary=f"Deleted batch {batch_id}"), request)
+    return Response(status_code=204)

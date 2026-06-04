@@ -5,8 +5,8 @@
  * When enabled, the report aggregates each binding over the computed window
  * (see the Data tab for per-tag functions). When disabled, the report renders
  * a live snapshot — the legacy behavior. Shift uses the plant shift schedule
- * (Settings → Shifts); the batch period type is omitted until batch records
- * exist (the backend cannot resolve it yet).
+ * (Settings → Shifts); Batch uses batch-run records delimited by the batch
+ * start/stop override (POST /report-config/batches/start|stop).
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -33,8 +33,8 @@ type PeriodRule = {
   enabled: boolean;
 };
 
-const PERIOD_TYPES = ["hourly", "daily", "weekly", "monthly", "shift", "custom"];
-const PERIOD_TYPE_LABELS = ["Hourly", "Daily", "Weekly", "Monthly", "Shift", "Custom (offsets)"];
+const PERIOD_TYPES = ["hourly", "daily", "weekly", "monthly", "shift", "batch", "custom"];
+const PERIOD_TYPE_LABELS = ["Hourly", "Daily", "Weekly", "Monthly", "Shift", "Batch", "Custom (offsets)"];
 const PERIOD_RULES = ["previous_completed", "current"];
 const PERIOD_RULE_LABELS = ["Previous completed period", "Current (in-progress) period"];
 const MISSING = ["warn", "hold", "fail"];
@@ -48,6 +48,11 @@ function numOr(v: string, fallback: number): number {
 function describe(pt: string, pr: string, boundary: number, cs: number, ce: number): string {
   if (pt === "custom") {
     return `Each render covers ${cs} to ${ce} minutes relative to the current clock hour.`;
+  }
+  if (pt === "batch") {
+    return pr === "current"
+      ? "Each render covers the currently open batch run (up to now). Use the batch start/stop override to delimit runs."
+      : "Each render covers the most recently completed batch run. Use the batch start/stop override to delimit runs.";
   }
   const rule = pr === "current" ? "the current, in-progress" : "the last completed";
   const unit = { hourly: "hour", daily: "day", weekly: "week", monthly: "month", shift: "shift" }[pt] ?? "period";

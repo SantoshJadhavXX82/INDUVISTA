@@ -24,9 +24,10 @@ project rule that timestamps are stored in UTC and periods use plant time.
 
 `shift` is implemented: callers pass the plant shift start times (sorted "HH:MM"
 strings) via the `shifts` argument and the window snaps to shift boundaries (the
-last shift wraps past midnight). `compute_window` itself stays pure — the DB read
-of the shift schedule lives in `load_shift_starts`/`resolve_window` below. `batch`
-is still deferred (needs batch-event records); compute_window raises for it.
+last shift wraps past midnight). `batch` is implemented too: resolve_window reads
+the report_batches table and passes the selected run's (start, end) via `batch`.
+compute_window itself stays pure — the DB reads live in load_shift_starts /
+load_batch_window / resolve_window below.
 
 NOTE: the value sets below MUST stay in sync with the CHECK constraints in
 migration 0068_report_period_rule.
@@ -41,8 +42,9 @@ PERIOD_TYPES = ("hourly", "daily", "weekly", "monthly", "shift", "batch", "custo
 PERIOD_RULES = ("previous_completed", "current", "custom")
 MISSING_PERIOD_HANDLING = ("warn", "hold", "fail")
 
-# Implemented here; batch is still deferred (needs batch-event records).
-_IMPLEMENTED = {"hourly", "daily", "weekly", "monthly", "shift", "custom"}
+# Implemented here. batch resolves from batch-run records via resolve_window
+# (compute_window itself receives the resolved batch window as a parameter).
+_IMPLEMENTED = {"hourly", "daily", "weekly", "monthly", "shift", "batch", "custom"}
 
 _UTC = ZoneInfo("UTC")
 
@@ -90,13 +92,19 @@ def _shift_boundaries(shifts: list[str], local: datetime, tz: ZoneInfo) -> list[
 
 
 def compute_window(
-    rule: Mapping, ref: datetime, tz_name: str, shifts: list[str] | None = None
+    rule: Mapping, ref: datetime, tz_name: str,
+    shifts: list[str] | None = None,
+    batch: tuple[datetime, datetime] | None = None,
 ) -> tuple[datetime, datetime]:
     """Return (start_utc, end_utc) for the report's data window.
 
     `ref` is the reference instant (typically the trigger fire time). If it is
     naive it is assumed to be UTC. The half-open window [start, end) is returned
     as timezone-aware UTC datetimes.
+
+    `shifts` (for period_type 'shift') and `batch` (for 'batch') are resolved by
+    the DB-aware resolve_window below and passed in here, keeping this function
+    pure. `batch` is the (started_at, ended_at) of the selected batch run.
     """
     period_type = (rule.get("period_type") or "").lower()
     period_rule = (rule.get("period_rule") or "previous_completed").lower()
@@ -131,6 +139,19 @@ def compute_window(
         if end <= start:
             raise ValueError("custom period end offset must be after start offset")
         return start.astimezone(_UTC), end.astimezone(_UTC)
+
+    # ---- batch: window comes straight from the selected batch run.
+    if period_type == "batch":
+        if not batch:
+            raise ValueError("batch period requires a batch run")
+        bs, be = batch
+        if bs.tzinfo is None:
+            bs = bs.replace(tzinfo=_UTC)
+        if be.tzinfo is None:
+            be = be.replace(tzinfo=_UTC)
+        if be <= bs:
+            raise ValueError("batch end must be after batch start")
+        return bs.astimezone(_UTC), be.astimezone(_UTC)
 
     # ---- shift: snap to configured shift boundaries (last shift wraps midnight).
     if period_type == "shift":
@@ -223,11 +244,45 @@ def load_shift_starts(db) -> list[str] | None:
     return starts or None
 
 
+def load_batch_window(db, period_rule: str, ref: datetime):
+    """Resolve the (started_at, ended_at) of the batch run a 'batch' period
+    should cover, or None if there is no matching run.
+
+      previous_completed (default) -> the most recently ENDED batch run
+      current                      -> the currently OPEN batch run, ending at `ref`
+
+    Batch runs come from the report_batches table (manual override today; a
+    tag-threshold worker can insert 'tag'-sourced runs later)."""
+    from sqlalchemy import text
+
+    pr = (period_rule or "previous_completed").lower()
+    if pr == "current":
+        row = db.execute(text(
+            "SELECT started_at, ended_at FROM report_batches "
+            "WHERE ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+        )).first()
+        if not row:
+            return None
+        return (row[0], row[1] or ref)
+    row = db.execute(text(
+        "SELECT started_at, ended_at FROM report_batches "
+        "WHERE ended_at IS NOT NULL ORDER BY ended_at DESC LIMIT 1"
+    )).first()
+    if not row:
+        return None
+    return (row[0], row[1])
+
+
 def resolve_window(db, rule: Mapping, ref: datetime, tz_name: str) -> tuple[datetime, datetime]:
-    """compute_window, but loads the shift schedule from the DB for 'shift'
-    periods. Use this anywhere a window is resolved against live config; the
-    pure compute_window is for offline/unit use where shifts are passed in."""
+    """compute_window, but loads DB-backed inputs: the shift schedule for
+    'shift' periods and the batch run for 'batch' periods. Use this anywhere a
+    window is resolved against live config; the pure compute_window is for
+    offline/unit use where shifts/batch are passed in."""
+    period_type = (rule.get("period_type") or "").lower()
     shifts = None
-    if (rule.get("period_type") or "").lower() == "shift":
+    batch = None
+    if period_type == "shift":
         shifts = load_shift_starts(db)
-    return compute_window(rule, ref, tz_name, shifts=shifts)
+    elif period_type == "batch":
+        batch = load_batch_window(db, rule.get("period_rule") or "previous_completed", ref)
+    return compute_window(rule, ref, tz_name, shifts=shifts, batch=batch)

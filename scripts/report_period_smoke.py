@@ -35,10 +35,10 @@ def ist(y, m, d, hh, mm):
     return datetime(y, m, d, hh, mm, tzinfo=IST)
 
 
-def check(name, rule, ref, exp_start, exp_end, shifts=None):
+def check(name, rule, ref, exp_start, exp_end, shifts=None, batch=None):
     global PASS, FAIL
     try:
-        s, e = compute_window(rule, ref, "Asia/Kolkata", shifts=shifts)
+        s, e = compute_window(rule, ref, "Asia/Kolkata", shifts=shifts, batch=batch)
         if s == exp_start and e == exp_end:
             PASS += 1
             print(f"  [PASS] {name}: {s.isoformat()} .. {e.isoformat()}")
@@ -141,8 +141,14 @@ def main() -> int:
     check_raises("shift with no schedule",
                  {"period_type": "shift", "period_rule": "current"},
                  ist(2026, 5, 27, 10, 5))
-    # 9d. batch is still deferred -> ValueError.
-    check_raises("batch not implemented",
+    # 9d. batch: window is passed through from the resolved run.
+    check("batch passthrough",
+          {"period_type": "batch", "period_rule": "previous_completed"},
+          ist(2026, 5, 27, 10, 5),
+          U(2026, 5, 27, 1, 0), U(2026, 5, 27, 3, 30),
+          batch=(U(2026, 5, 27, 1, 0), U(2026, 5, 27, 3, 30)))
+    # 9e. batch with no run supplied -> ValueError.
+    check_raises("batch with no run",
                  {"period_type": "batch", "period_rule": "previous_completed"},
                  ist(2026, 5, 27, 10, 5))
 
