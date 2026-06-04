@@ -25,6 +25,7 @@ const ROLE_ORDER: Role[] = ["viewer", "operator", "engineer", "approver", "admin
 export type AuthUser = {
   username: string;
   role: Role;
+  can_audit?: boolean;
 };
 
 type LoginResult = {
@@ -32,6 +33,7 @@ type LoginResult = {
   username: string;
   role: Role;
   must_change_password: boolean;
+  can_audit?: boolean;
 };
 
 type AuthContextValue = {
@@ -78,7 +80,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error(detail);
     }
     const data = (await res.json()) as LoginResult;
-    const u: AuthUser = { username: data.username, role: data.role };
+    const u: AuthUser = { username: data.username, role: data.role, can_audit: !!data.can_audit };
     window.localStorage.setItem(TOKEN_KEY, data.access_token);
     window.localStorage.setItem(USER_KEY, JSON.stringify(u));
     setToken(data.access_token);

@@ -143,7 +143,9 @@ def compute_window(
     # ---- batch: window comes straight from the selected batch run.
     if period_type == "batch":
         if not batch:
-            raise ValueError("batch period requires a batch run")
+            if period_rule == "current":
+                raise ValueError("no batch is currently open")
+            raise ValueError("no completed batch run found")
         bs, be = batch
         if bs.tzinfo is None:
             bs = bs.replace(tzinfo=_UTC)

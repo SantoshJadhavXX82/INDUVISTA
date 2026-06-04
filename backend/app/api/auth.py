@@ -40,12 +40,14 @@ class LoginResponse(BaseModel):
     username: str
     role: str
     must_change_password: bool
+    can_audit: bool = False
 
 
 class MeResponse(BaseModel):
     id: int
     username: str
     role: str
+    can_audit: bool = False
 
 
 class ChangePasswordRequest(BaseModel):
@@ -84,18 +86,23 @@ def login(
         except Exception:
             pass
 
-    token = issue_token(authed.id, authed.username, authed.role)
+    can_audit = bool(db.execute(
+        text("SELECT can_audit FROM users WHERE id = :id"), {"id": authed.id}
+    ).scalar())
+    token = issue_token(authed.id, authed.username, authed.role, can_audit=can_audit)
     return LoginResponse(
         access_token=token,
         username=authed.username,
         role=authed.role,
         must_change_password=authed.must_change_password,
+        can_audit=can_audit,
     )
 
 
 @router.get("/me", response_model=MeResponse)
 def me(user: Annotated[CurrentUser, Depends(get_current_user)]):
-    return MeResponse(id=user.id, username=user.username, role=user.role)
+    return MeResponse(id=user.id, username=user.username, role=user.role,
+                      can_audit=user.can_audit)
 
 
 @router.post("/change-password", status_code=status.HTTP_204_NO_CONTENT)

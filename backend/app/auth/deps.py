@@ -36,6 +36,7 @@ class CurrentUser:
     id: int
     username: str
     role: str
+    can_audit: bool = False
 
 
 _UNAUTH = HTTPException(
@@ -62,6 +63,7 @@ def get_current_user(
             id=int(payload["sub"]),
             username=payload["username"],
             role=payload["role"],
+            can_audit=bool(payload.get("can_audit", False)),
         )
     except (KeyError, ValueError, TypeError):
         raise _UNAUTH
@@ -85,3 +87,14 @@ def require_role(min_role: str | Role):
         return user
 
     return _dep
+
+
+def require_audit(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    """Admit users who may read the audit log: admins, or any user granted the
+    per-user `can_audit` capability (an 'auditor'). 403 otherwise."""
+    if role_at_least(user.role, Role.ADMIN.value) or user.can_audit:
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Requires audit access (admin role or auditor capability).",
+    )

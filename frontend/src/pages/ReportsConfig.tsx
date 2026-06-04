@@ -18,7 +18,7 @@ import { useSearchParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Plus, Trash2, Save, FileDown, Clock, FolderOutput, Tags as TagsIcon,
-  Loader2, FileText, CheckCircle2, AlertCircle, LayoutGrid, Settings as SettingsIcon, Settings2,
+  Loader2, FileText, CheckCircle2, AlertCircle, LayoutGrid, Settings as SettingsIcon, Settings2, Boxes,
   Calendar, History,
 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -35,6 +35,7 @@ import {
 // render as tabs inside this page (previously separate Configure nav pages).
 import ReportTriggers from "@/pages/ReportTriggers";
 import ReportDestinations from "@/pages/ReportDestinations";
+import { BatchControl } from "@/components/reports/BatchControl";
 import { ReportPeriodTab } from "@/components/reports/ReportPeriodTab";
 import { ReportDataTab } from "@/components/reports/ReportDataTab";
 import { ReportRevisionsTab } from "@/components/reports/ReportRevisionsTab";
@@ -58,7 +59,7 @@ const CATEGORIES = ["periodic", "event", "on_demand"];
 const PAGE_SIZES = ["A4", "Letter"];
 const ORIENTATIONS = ["portrait", "landscape"];
 
-type TopTab = "definitions" | "triggers" | "destinations";
+type TopTab = "definitions" | "triggers" | "destinations" | "batch";
 
 export default function ReportsConfig() {
   const qc = useQueryClient();
@@ -70,7 +71,7 @@ export default function ReportsConfig() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get("tab");
   const [topTab, setTopTab] = useState<TopTab>(
-    tabParam === "triggers" || tabParam === "destinations" ? tabParam : "definitions",
+    tabParam === "triggers" || tabParam === "destinations" || tabParam === "batch" ? tabParam : "definitions",
   );
   const switchTab = (t: TopTab) => {
     setTopTab(t);
@@ -153,6 +154,7 @@ export default function ReportsConfig() {
           { id: "definitions" as const, label: "Definitions", icon: <FileText className="h-3.5 w-3.5" /> },
           { id: "triggers" as const, label: "Triggers", icon: <Clock className="h-3.5 w-3.5" /> },
           { id: "destinations" as const, label: "Destinations", icon: <FolderOutput className="h-3.5 w-3.5" /> },
+          { id: "batch" as const, label: "Batch", icon: <Boxes className="h-3.5 w-3.5" /> },
         ]).map((t) => (
           <button
             key={t.id}
@@ -241,6 +243,7 @@ export default function ReportsConfig() {
 
       {topTab === "triggers" && <ReportTriggers embedded />}
       {topTab === "destinations" && <ReportDestinations embedded />}
+      {topTab === "batch" && <BatchControl />}
     </div>
   );
 }

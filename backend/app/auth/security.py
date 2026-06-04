@@ -43,13 +43,14 @@ def verify_password(raw: str, hashed: str) -> bool:
         return False
 
 
-def issue_token(user_id: int, username: str, role: str) -> str:
+def issue_token(user_id: int, username: str, role: str, can_audit: bool = False) -> str:
     """Mint a signed JWT for a successfully authenticated user."""
     now = _dt.datetime.now(_dt.timezone.utc)
     payload: dict[str, Any] = {
         "sub": str(user_id),
         "username": username,
         "role": role,
+        "can_audit": bool(can_audit),
         "iat": now,
         "exp": now + _dt.timedelta(minutes=settings.auth_token_ttl_min),
     }

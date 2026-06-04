@@ -18,6 +18,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink, useLocation } from "react-router";
+import { useAuth } from "@/lib/auth";
 import {
   Gauge, TrendingUp, BellRing, Bell, Tag as TagIcon, MoreHorizontal,
   HeartPulse, FileText, LineChart, Cpu, Sigma, Wrench, SlidersHorizontal,
@@ -205,6 +206,8 @@ function TabButton({
 function MoreSheet({
   activePath, onClose,
 }: { activePath: string; onClose: () => void }) {
+  const { hasRole, user } = useAuth();
+  const canAudit = hasRole("admin") || !!user?.can_audit;
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col justify-end"
@@ -266,7 +269,9 @@ function MoreSheet({
                   borderRadius: 12,
                 }}
               >
-                {sec.items.map((item, idx) => {
+                {sec.items
+                  .filter((item) => item.to !== "/audit-log" || canAudit)
+                  .map((item, idx) => {
                   const active = activePath.startsWith(item.to);
                   return (
                     <NavLink

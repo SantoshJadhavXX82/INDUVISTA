@@ -655,7 +655,13 @@ def render_definition(
     # Fall back to the report's saved tags when none are passed explicitly,
     # so scheduled + on-demand renders use the same tag set.
     effective_tag_ids = list(tag_ids) if tag_ids else _saved_report_tag_ids(db, def_id)
-    ctx, window = resolve_report_context(db, def_id, tz_name, snapshot_at, effective_tag_ids)
+    try:
+        ctx, window = resolve_report_context(db, def_id, tz_name, snapshot_at, effective_tag_ids)
+    except ValueError as e:
+        # Period can't be resolved (e.g. batch/current with no open batch,
+        # shift with no schedule, invalid custom offsets) — a client problem,
+        # not a server error.
+        raise HTTPException(400, f"Period cannot be resolved: {e}")
     # Let templates reference the report's own name/metadata.
     ctx["report"]["name"] = row["name"]
     ctx["report"]["category"] = row["category"]

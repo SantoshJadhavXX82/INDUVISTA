@@ -7,16 +7,17 @@ rows are written only by the audit() helper in business handlers.
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
 
+from app.auth import require_audit
 from app.db_audit import AuditSessionLocal
 
 
 router = APIRouter(tags=["audit"])
 
 
-@router.get("/api/audit-log")
+@router.get("/api/audit-log", dependencies=[Depends(require_audit)])
 def list_audit_log(
     action: str | None = Query(None, description="Filter by action prefix (e.g. 'calc.' or 'calc.delete')"),
     target_type: str | None = Query(None),
@@ -109,7 +110,7 @@ def list_audit_log(
     }
 
 
-@router.get("/api/audit-log/actions")
+@router.get("/api/audit-log/actions", dependencies=[Depends(require_audit)])
 def list_distinct_actions() -> list[str]:
     """Returns the distinct action codes seen so far. Used by the UI's
     action filter dropdown."""

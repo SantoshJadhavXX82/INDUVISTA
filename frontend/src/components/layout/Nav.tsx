@@ -67,6 +67,8 @@ type Leaf = {
   iconStyle?: React.CSSProperties;
   /** Phase 21 - only render for admin users. */
   adminOnly?: boolean;
+  /** Only render for users who can read the audit log (admin or auditor). */
+  auditOnly?: boolean;
 };
 
 type ExpandableGroup = {
@@ -116,7 +118,7 @@ function useEntries(alarmCount: number): Section[] {
       label: "Diagnose",
       children: [
         { kind: "leaf", to: "/diagnostics", label: "Health", icon: HeartPulse },
-        { kind: "leaf", to: "/audit-log",   label: "Audit",  icon: FileText, matchPrefix: "/audit-log" },
+        { kind: "leaf", to: "/audit-log",   label: "Audit",  icon: FileText, matchPrefix: "/audit-log", auditOnly: true },
         { kind: "leaf", to: "/data-gaps",   label: "Gaps",   icon: LineChart },
         { kind: "leaf", to: "/historian",   label: "Historian", icon: Database, matchPrefix: "/historian" },
       ],
@@ -181,8 +183,9 @@ function useEntries(alarmCount: number): Section[] {
 
 export default function Nav() {
   const location = useLocation();
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
   const isAdmin = hasRole("admin");
+  const canAudit = isAdmin || !!user?.can_audit;
 
   // Phase 18 fix — use the SAME query as the Alarms page so React Query
   // dedupes the fetch (one HTTP call shared by Alarms page + Dashboard +
@@ -203,7 +206,7 @@ export default function Nav() {
   return (
     <nav className="nav-autohide flex flex-col gap-3 p-2 flex-1 overflow-y-auto min-h-0">
       {entries.map((section, i) => (
-        <SectionBlock key={`s-${i}`} section={section} activePath={location.pathname} isAdmin={isAdmin} />
+        <SectionBlock key={`s-${i}`} section={section} activePath={location.pathname} isAdmin={isAdmin} canAudit={canAudit} />
       ))}
     </nav>
   );
@@ -211,8 +214,8 @@ export default function Nav() {
 
 
 function SectionBlock({
-  section, activePath, isAdmin,
-}: { section: Section; activePath: string; isAdmin: boolean }) {
+  section, activePath, isAdmin, canAudit,
+}: { section: Section; activePath: string; isAdmin: boolean; canAudit: boolean }) {
   return (
     <div>
       <div
@@ -223,7 +226,8 @@ function SectionBlock({
       </div>
       <div className="flex flex-col gap-0.5">
         {section.children
-          .filter((c) => c.kind !== "leaf" || !c.adminOnly || isAdmin)
+          .filter((c) => c.kind !== "leaf"
+            || ((!c.adminOnly || isAdmin) && (!c.auditOnly || canAudit)))
           .map((c) =>
             c.kind === "leaf"
               ? <LeafLink key={c.to} item={c} />

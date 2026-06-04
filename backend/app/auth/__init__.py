@@ -8,10 +8,10 @@ Public surface:
 """
 from app.auth.roles import Role, ROLE_ORDER, role_at_least
 from app.auth.security import hash_password, verify_password, issue_token, decode_token
-from app.auth.deps import get_current_user, require_role, CurrentUser
+from app.auth.deps import get_current_user, require_role, require_audit, CurrentUser
 
 __all__ = [
     "Role", "ROLE_ORDER", "role_at_least",
     "hash_password", "verify_password", "issue_token", "decode_token",
-    "get_current_user", "require_role", "CurrentUser",
+    "get_current_user", "require_role", "require_audit", "CurrentUser",
 ]

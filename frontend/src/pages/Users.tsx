@@ -35,6 +35,7 @@ type User = {
   email: string | null;
   is_enabled: boolean;
   must_change_password: boolean;
+  can_audit: boolean;
   last_login_at: string | null;
 };
 
@@ -79,6 +80,13 @@ export default function Users() {
         ? api.patch<User>(`/admin/users/${id}`, { is_enabled: true })
         : api.delete(`/admin/users/${id}`),
     onSuccess: (_d, v) => { qc.invalidateQueries({ queryKey: ["admin-users"] }); flash("ok", v.enable ? "User enabled." : "User disabled."); },
+    onError: (e: ApiError) => flash("err", e.detail),
+  });
+
+  const updateCanAudit = useMutation({
+    mutationFn: ({ id, can_audit }: { id: number; can_audit: boolean }) =>
+      api.patch<User>(`/admin/users/${id}`, { can_audit }),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["admin-users"] }); flash("ok", "Audit access updated (effective on next login)."); },
     onError: (e: ApiError) => flash("err", e.detail),
   });
 
@@ -137,6 +145,7 @@ export default function Users() {
                   <TableHead><span className="inline-flex items-center">Role<HelpTip entry={help.user.role} /></span></TableHead>
                   <TableHead>Provider</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Audit</TableHead>
                   <TableHead>Last login</TableHead>
                   <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
@@ -173,6 +182,17 @@ export default function Users() {
                       {u.must_change_password && u.is_enabled && (
                         <Badge variant="warning" className="ml-1 text-[10px]">must change pw</Badge>
                       )}
+                    </TableCell>
+                    <TableCell>
+                      <label className="inline-flex items-center gap-1.5 text-xs" style={{ color: "var(--text-secondary)" }} title="Read-only audit-log access. Takes effect on the user's next login.">
+                        <input
+                          type="checkbox"
+                          checked={u.can_audit}
+                          disabled={!u.is_enabled}
+                          onChange={(e) => updateCanAudit.mutate({ id: u.id, can_audit: e.target.checked })}
+                        />
+                        auditor
+                      </label>
                     </TableCell>
                     <TableCell className="text-xs tabular-nums" style={{ color: "var(--text-secondary)" }}>
                       {u.last_login_at ? u.last_login_at.replace("T", " ").slice(0, 19) : "—"}
@@ -258,6 +278,7 @@ function CreateUserModal({ onClose, onCreated, onError }: { onClose: () => void;
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
+  const [canAudit, setCanAudit] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function submit(e: React.FormEvent) {
@@ -268,6 +289,7 @@ function CreateUserModal({ onClose, onCreated, onError }: { onClose: () => void;
         username, role, auth_provider: provider,
         full_name: fullName || null, email: email || null,
         must_change_password: provider === "local",
+        can_audit: canAudit,
       };
       if (provider === "local") body.password = password;
       await api.post("/admin/users", body);
@@ -326,6 +348,10 @@ function CreateUserModal({ onClose, onCreated, onError }: { onClose: () => void;
             <Input id="em" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
           </div>
         </div>
+        <label className="flex items-center gap-2 text-sm pt-1" style={{ color: "var(--text-primary)" }}>
+          <input type="checkbox" checked={canAudit} onChange={(e) => setCanAudit(e.target.checked)} />
+          Auditor — can read the audit log (read-only audit access)
+        </label>
         <div className="flex gap-2 pt-2">
           <Button type="submit" disabled={busy}>{busy ? "Creating…" : "Create user"}</Button>
           <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>

@@ -195,12 +195,19 @@ def main() -> int:
                 pass
         made_batches.clear()
 
-        # --- no batch available -> validation FAILED on the period ---
+        # --- no batch available -> validation FAILED + render is a clean 400 ---
         set_period(api, rid, "current")
         v = api.req("POST", f"/api/report-config/definitions/{rid}/validate")
         lvl = period_check_level(v)
         (ok if lvl == "failed" else bad)("no open batch -> period validation failed",
                                          f"period level={lvl}")
+        try:
+            api.req("POST", f"/api/report-config/definitions/{rid}/render",
+                    params={"format": "json"})
+            bad("render with no open batch -> 400 (not 500)", "did not error")
+        except ApiError as e:
+            (ok if e.status == 400 else bad)("render with no open batch -> 400 (not 500)",
+                                             f"status={e.status}")
 
     finally:
         for bid in made_batches:

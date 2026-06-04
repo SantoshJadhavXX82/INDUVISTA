@@ -92,6 +92,21 @@ def main() -> int:
             v = vals[f]["value"]
             (ok if isinstance(v, (int, float)) else bad)(f"{f} returns a number", f"{f}={v}")
 
+        # carry-forward (sample-and-hold): a window entirely AFTER the last
+        # sample still yields the value-in-effect for 'latest', while window-
+        # bound functions (average) and first/last return nothing.
+        cf_start = row["mx"] + timedelta(minutes=1)
+        cf_end = row["mx"] + timedelta(hours=1)
+        lat_cf = aggregate_value(db, tag_id, "latest", cf_start, cf_end, "all")["value"]
+        avg_cf = aggregate_value(db, tag_id, "average", cf_start, cf_end, "all")["value"]
+        first_cf = aggregate_value(db, tag_id, "first", cf_start, cf_end, "all")["value"]
+        (ok if lat_cf is not None else bad)("latest carries forward into an empty window",
+                                            f"latest={lat_cf}")
+        (ok if avg_cf is None else bad)("average does NOT carry forward (empty -> none)",
+                                        f"avg={avg_cf}")
+        (ok if first_cf is None else bad)("first stays window-bound (empty -> none)",
+                                          f"first={first_cf}")
+
         avail = vals["availability"]["value"]
         (ok if (avail is not None and 0.0 <= avail <= 100.0) else bad)(
             "availability in [0,100]", f"availability={avail}")

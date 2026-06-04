@@ -37,6 +37,7 @@ class UserOut(BaseModel):
     email: str | None
     is_enabled: bool
     must_change_password: bool
+    can_audit: bool
     last_login_at: str | None
 
 
@@ -48,6 +49,7 @@ class UserCreate(BaseModel):
     full_name: str | None = None
     email: str | None = None
     must_change_password: bool = True
+    can_audit: bool = False
 
 
 class UserUpdate(BaseModel):
@@ -55,6 +57,7 @@ class UserUpdate(BaseModel):
     full_name: str | None = None
     email: str | None = None
     is_enabled: bool | None = None
+    can_audit: bool | None = None
 
 
 class ResetPasswordRequest(BaseModel):
@@ -73,7 +76,7 @@ def list_users(
 ):
     rows = db.execute(text("""
         SELECT id, username, auth_provider, role, full_name, email,
-               is_enabled, must_change_password,
+               is_enabled, must_change_password, can_audit,
                to_char(last_login_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS last_login_at
         FROM users ORDER BY username
     """)).mappings().all()
@@ -109,15 +112,16 @@ def create_user(
 
     row = db.execute(text("""
         INSERT INTO users (username, auth_provider, password_hash, role,
-                           full_name, email, must_change_password, created_by)
-        VALUES (:u, :p, :h, :r, :fn, :em, :mc, :cb)
+                           full_name, email, must_change_password, can_audit, created_by)
+        VALUES (:u, :p, :h, :r, :fn, :em, :mc, :ca, :cb)
         RETURNING id, username, auth_provider, role, full_name, email,
-                  is_enabled, must_change_password,
+                  is_enabled, must_change_password, can_audit,
                   to_char(last_login_at, 'YYYY-MM-DD"T"HH24:MI:SSOF') AS last_login_at
     """), {
         "u": body.username, "p": body.auth_provider, "h": pw_hash, "r": body.role,
         "fn": body.full_name, "em": body.email,
         "mc": body.must_change_password if body.auth_provider == "local" else False,
+        "ca": body.can_audit,
         "cb": admin.username,
     }).mappings().first()
     db.commit()
@@ -151,7 +155,8 @@ def update_user(
 
     sets, params = [], {"id": user_id}
     for col, val in (("role", body.role), ("full_name", body.full_name),
-                     ("email", body.email), ("is_enabled", body.is_enabled)):
+                     ("email", body.email), ("is_enabled", body.is_enabled),
+                     ("can_audit", body.can_audit)):
         if val is not None:
             sets.append(f"{col} = :{col}")
             params[col] = val
@@ -162,7 +167,7 @@ def update_user(
     row = db.execute(
         text(f"UPDATE users SET {', '.join(sets)} WHERE id = :id "
              "RETURNING id, username, auth_provider, role, full_name, email, "
-             "is_enabled, must_change_password, "
+             "is_enabled, must_change_password, can_audit, "
              "to_char(last_login_at, 'YYYY-MM-DD\"T\"HH24:MI:SSOF') AS last_login_at"),
         params,
     ).mappings().first()

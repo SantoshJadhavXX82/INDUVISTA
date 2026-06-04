@@ -112,6 +112,22 @@ def aggregate_value(db: Session, tag_id: int, func: str,
         """), p).first()
         if row is not None:
             value, text_value, sample_st = row[0], row[1], row[2]
+        elif func == "latest":
+            # Carry-forward (sample-and-hold): if the tag didn't log inside the
+            # window, report the value in effect at the window end — the most
+            # recent sample at/before `end`. This matches the live-snapshot
+            # 'latest' and the historian convention for on-change / slow-updating
+            # tags (e.g. lab/calorific values that change every few minutes),
+            # so a short period doesn't show Missing just because no new sample
+            # happened to land inside it. first/last stay window-bound.
+            cf = db.execute(text(f"""
+                SELECT value_double, value_text, st FROM tag_values
+                WHERE tag_id = :t AND time < :e
+                  AND value_double IS NOT NULL{stf}
+                ORDER BY time DESC LIMIT 1
+            """), p).first()
+            if cf is not None:
+                value, text_value, sample_st = cf[0], cf[1], cf[2]
     elif func == "delta":
         rows = db.execute(text(f"""
             (SELECT value_double FROM tag_values
