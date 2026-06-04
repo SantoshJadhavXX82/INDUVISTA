@@ -12,11 +12,15 @@ class Role(str, Enum):
     VIEWER = "viewer"
     OPERATOR = "operator"
     ENGINEER = "engineer"
+    APPROVER = "approver"
     ADMIN = "admin"
 
 
 # Least → most privilege. Index = privilege level.
-ROLE_ORDER: list[str] = [Role.VIEWER, Role.OPERATOR, Role.ENGINEER, Role.ADMIN]
+# APPROVER sits above ENGINEER (can do everything an engineer can) and below
+# ADMIN; it exists to gate report-revision activation (Phase B5).
+ROLE_ORDER: list[str] = [Role.VIEWER, Role.OPERATOR, Role.ENGINEER,
+                         Role.APPROVER, Role.ADMIN]
 
 
 def role_at_least(user_role: str, min_role: str) -> bool:

@@ -43,7 +43,7 @@ from app.services.report_revisions import (
     effective_definition,
 )
 from app.services.report_jobs import record_job, list_jobs
-from app.auth import get_current_user, CurrentUser
+from app.auth import get_current_user, CurrentUser, require_role, Role
 
 router = APIRouter(prefix="/api/report-config", tags=["report-config"])
 
@@ -975,11 +975,11 @@ def get_report_revision(def_id: int, rev_id: int,
 @router.post("/definitions/{def_id}/revisions/{rev_id}/activate")
 def activate_report_revision(def_id: int, rev_id: int, request: Request,
                              db: Annotated[Session, Depends(get_session)],
-                             user: CurrentUser = Depends(get_current_user)):
+                             user: CurrentUser = Depends(require_role(Role.APPROVER))):
     """Activate a draft revision (validation gate blocks hard failures only).
 
-    NOTE (Phase B5): activation should require an 'approver' role once that
-    exists; today it relies on the path-based engineer+ write gate.
+    Phase B5: activation requires the 'approver' role (or higher). Drafting and
+    editing remain at engineer+; only the act of making a revision live is gated.
     """
     rev, err = activate_revision(db, def_id, rev_id, user.username, settings.app_timezone)
     if err == "not_found":

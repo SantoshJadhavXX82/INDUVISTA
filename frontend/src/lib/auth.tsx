@@ -19,8 +19,8 @@ import {
 export const TOKEN_KEY = "induvista:token";
 export const USER_KEY = "induvista:user";
 
-export type Role = "viewer" | "operator" | "engineer" | "admin";
-const ROLE_ORDER: Role[] = ["viewer", "operator", "engineer", "admin"];
+export type Role = "viewer" | "operator" | "engineer" | "approver" | "admin";
+const ROLE_ORDER: Role[] = ["viewer", "operator", "engineer", "approver", "admin"];
 
 export type AuthUser = {
   username: string;

@@ -38,11 +38,12 @@ type User = {
   last_login_at: string | null;
 };
 
-const ROLES = ["viewer", "operator", "engineer", "admin"] as const;
+const ROLES = ["viewer", "operator", "engineer", "approver", "admin"] as const;
 const PROVIDERS = ["local", "ldap", "os"] as const;
 
 function roleBadgeVariant(role: string): "default" | "outline" | "success" | "warning" {
   if (role === "admin") return "warning";
+  if (role === "approver") return "warning";
   if (role === "engineer") return "success";
   return "outline";
 }
