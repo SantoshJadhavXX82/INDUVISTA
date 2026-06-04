@@ -34,6 +34,7 @@ from app.services.report_render import render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
 from app.services.report_aggregate import resolve_report_context
 from app.services.report_revisions import effective_definition
+from app.services.report_jobs import record_job
 from app.workers.report_schedule import due_instant, tag_condition_fires
 
 log = logging.getLogger("report_scheduler")
@@ -203,12 +204,22 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
         dests = [{"fmt": None, "default_fmts": "pdf", "dest_type": "folder",
                   "target": "/var/lib/induvista/reports", "name": "Local Archive (default)"}]
 
+    # Phase B4b: record this fire as one trigger-level job (status rolled up
+    # from the per-format report_records below).
+    started_at = datetime.now(tz)
+    active_rev_id = None
+    catastrophic = False
+    cat_err: Optional[str] = None
+
     try:
         # build the definition + context, render once, deliver to each dest.
         # Phase B3b: snapshot if the report has an active revision, else live.
         dm = effective_definition(db, report_id)
         if dm is None:
             raise RuntimeError(f"report {report_id} not found")
+        active_rev_id = db.execute(text(
+            "SELECT active_revision_id FROM report_definitions WHERE id = :rid"),
+            {"rid": report_id}).scalar()
         ctx, window = resolve_report_context(db, report_id, APP_TZ, snapshot_at, tag_ids)
         # Carry the computed window so _record persists it on every row.
         job["_period_start"] = window[0] if window else None
@@ -279,6 +290,8 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
 
     except Exception as e:
         log.exception("report '%s' render/deliver failed", report_name)
+        catastrophic = True
+        cat_err = str(e)[:500]
         db.execute(text("""
             INSERT INTO report_records
                 (report_id, report_name, category, trigger_id, trigger_kind,
@@ -288,6 +301,34 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
                "tid": job["trigger_id"], "tk": trigger_kind,
                "snap": snapshot_at, "ps": job.get("_period_start"),
                "pe": job.get("_period_end"), "err": str(e)[:500]})
+    finally:
+        # Roll up this fire's per-format records into one job row. Counts come
+        # from the report_records just written (same transaction), matched by
+        # (report_id, snapshot_at) which uniquely identifies this fire.
+        rows = db.execute(text(
+            "SELECT status, count(*) AS n FROM report_records "
+            "WHERE report_id = :rid AND snapshot_at = :snap GROUP BY status"
+        ), {"rid": report_id, "snap": snapshot_at}).mappings().all()
+        n_ok = sum(r["n"] for r in rows if r["status"] == "ok")
+        n_err = sum(r["n"] for r in rows if r["status"] == "error")
+        if n_ok and not n_err and not catastrophic:
+            job_status = "succeeded"
+        elif n_ok:
+            job_status = "partial"
+        else:
+            job_status = "failed"
+        fmt_rows = db.execute(text(
+            "SELECT DISTINCT fmt FROM report_records "
+            "WHERE report_id = :rid AND snapshot_at = :snap"
+        ), {"rid": report_id, "snap": snapshot_at}).all()
+        fmts = ",".join(sorted(f[0] for f in fmt_rows if f[0])) or None
+        record_job(db, report_id=report_id, report_name=report_name,
+                   trigger_kind=trigger_kind, revision_id=active_rev_id, formats=fmts,
+                   status=job_status, snapshot_at=snapshot_at,
+                   period_start=job.get("_period_start"),
+                   period_end=job.get("_period_end"),
+                   error=(cat_err if catastrophic else None),
+                   started_at=started_at, finished_at=datetime.now(tz))
 
 
 # ------------------------------------------------------------------------- loop

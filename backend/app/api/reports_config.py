@@ -42,6 +42,7 @@ from app.services.report_revisions import (
     create_draft, list_revisions, get_revision, activate_revision,
     effective_definition,
 )
+from app.services.report_jobs import record_job, list_jobs
 from app.auth import get_current_user, CurrentUser
 
 router = APIRouter(prefix="/api/report-config", tags=["report-config"])
@@ -646,6 +647,9 @@ def render_definition(
     row = effective_definition(db, def_id)
     if not row:
         raise HTTPException(404, f"Report definition {def_id} not found.")
+    active_rev_id = db.execute(text(
+        "SELECT active_revision_id FROM report_definitions WHERE id = :id"),
+        {"id": def_id}).scalar()
     tz_name = settings.app_timezone
     snapshot_at = _dt.now(_ZoneInfo("UTC"))
     # Fall back to the report's saved tags when none are passed explicitly,
@@ -698,6 +702,14 @@ def render_definition(
         "size": (len(out_bytes) if status == "ok" else None),
         "status": status, "err": err,
     })
+    record_job(db, report_id=def_id, report_name=row["name"], trigger_kind="on_demand",
+               revision_id=active_rev_id, formats=format,
+               status=("succeeded" if status == "ok" else "failed"),
+               snapshot_at=snapshot_at,
+               period_start=(window[0] if window else None),
+               period_end=(window[1] if window else None),
+               error=err, started_at=snapshot_at,
+               finished_at=_dt.now(_ZoneInfo("UTC")))
     db.commit()
 
     audit(AuditEvent(action="report.render", target_type="report_definition",
@@ -982,3 +994,19 @@ def activate_report_revision(def_id: int, rev_id: int, request: Request,
                      summary=f"Activated revision {rev['revision_no']} of report {def_id}"),
           request)
     return rev
+
+
+# ===========================================================================
+# Jobs (Phase B4a) — trigger-level run log. On-demand renders are recorded
+# here in addition to the per-format report_records; the scheduler joins in B4b.
+# ===========================================================================
+@router.get("/definitions/{def_id}/jobs")
+def list_report_jobs(def_id: int, db: Annotated[Session, Depends(get_session)],
+                     limit: Annotated[int, Query(ge=1, le=500)] = 50):
+    return list_jobs(db, def_id, limit)
+
+
+@router.get("/jobs")
+def list_recent_jobs(db: Annotated[Session, Depends(get_session)],
+                     limit: Annotated[int, Query(ge=1, le=500)] = 50):
+    return list_jobs(db, None, limit)
