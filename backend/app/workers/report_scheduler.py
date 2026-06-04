@@ -30,7 +30,10 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 from app.db import SessionLocal
-from app.services.report_render import build_live_context, render_report
+from app.services.report_render import render_report
+from app.services.report_formats import render_html, build_report_data, to_json, to_xml
+from app.services.report_aggregate import resolve_report_context
+from app.services.report_revisions import effective_definition
 from app.workers.report_schedule import due_instant, tag_condition_fires
 
 log = logging.getLogger("report_scheduler")
@@ -112,7 +115,7 @@ def _latest_value(db, tag_id: int) -> Optional[float]:
 
 def _destinations(db, report_id: int) -> list[dict[str, Any]]:
     rows = db.execute(text("""
-        SELECT dl.fmt, dest.dest_type, dest.target, dest.name
+        SELECT dl.fmt, dest.default_fmts, dest.dest_type, dest.target, dest.name
         FROM report_destination_links dl
         JOIN report_destinations dest ON dest.id = dl.destination_id
         WHERE dl.report_id = :rid AND dest.enabled = true
@@ -137,6 +140,56 @@ def _upsert_state(db, report_id: int, trigger_id: int,
            "lfa": last_fired_at, "lsv": last_seen_value})
 
 
+class _UnsupportedFormat(Exception):
+    """Raised for a format that has no serializer yet (e.g. csv)."""
+
+
+def _render_one(fmt: str, dm, ctx: dict[str, Any]) -> "tuple[bytes, str]":
+    """Render the report context to ONE output format → (bytes, ext).
+
+    Mirrors api/reports_config.render_definition's format dispatch so scheduled
+    and on-demand renders are byte-for-byte consistent. Raises _UnsupportedFormat
+    for formats with no serializer; raises a normal Exception for genuine render
+    failures (e.g. pdf/html requested with no template).
+    """
+    page = dm.get("page_size") or "A4"
+    orient = dm.get("orientation") or "portrait"
+    tmpl = (dm.get("template_html") or "")
+    if fmt == "pdf":
+        if not tmpl.strip():
+            raise ValueError("pdf requested but report has no template_html")
+        return render_report(tmpl, ctx, page, orient), "pdf"
+    if fmt == "html":
+        if not tmpl.strip():
+            raise ValueError("html requested but report has no template_html")
+        return render_html(tmpl, ctx, page, orient).encode("utf-8"), "html"
+    if fmt == "json":
+        return to_json(build_report_data(ctx)), "json"
+    if fmt == "xml":
+        return to_xml(build_report_data(ctx)), "xml"
+    raise _UnsupportedFormat(f"format '{fmt}' is not supported for scheduled delivery yet")
+
+
+def _record(db, job: dict[str, Any], trigger_kind: str, snapshot_at: datetime,
+            *, fmt: str, status: str,
+            file_path: Optional[str] = None, byte_size: Optional[int] = None,
+            error: Optional[str] = None) -> None:
+    """Insert one report_records row — one per delivered/attempted format."""
+    db.execute(text("""
+        INSERT INTO report_records
+            (report_id, report_name, category, trigger_id, trigger_kind,
+             snapshot_at, period_start, period_end, fmt, file_path, byte_size,
+             status, error)
+        VALUES (:rid, :rn, :cat, :tid, :tk, :snap, :ps, :pe, :fmt, :fp, :sz,
+                :st, :err)
+    """), {"rid": job["report_id"], "rn": job["report_name"],
+           "cat": job.get("category"), "tid": job.get("trigger_id"),
+           "tk": trigger_kind, "snap": snapshot_at,
+           "ps": job.get("_period_start"), "pe": job.get("_period_end"),
+           "fmt": fmt, "fp": file_path, "sz": byte_size, "st": status,
+           "err": error})
+
+
 # --------------------------------------------------------------- render+deliver
 def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
           trigger_kind: str) -> None:
@@ -147,75 +200,94 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
     dests = _destinations(db, report_id)
     if not dests:
         # Still render+record once to the default archive so misconfig is visible.
-        dests = [{"fmt": "pdf", "dest_type": "folder",
+        dests = [{"fmt": None, "default_fmts": "pdf", "dest_type": "folder",
                   "target": "/var/lib/induvista/reports", "name": "Local Archive (default)"}]
 
     try:
-        # build the definition + context, render once, deliver to each dest
-        defn = db.execute(text(
-            "SELECT name, category, report_type, template_html, template_blocks, "
-            "template_mode, page_size, orientation FROM report_definitions WHERE id = :rid"
-        ), {"rid": report_id}).fetchone()
-        ctx = build_live_context(db, tag_ids, APP_TZ)
-        # Templates reference the report's own metadata; build_live_context
-        # does not set these, so inject them (mirrors the on-demand endpoint).
-        dm = defn._mapping
+        # build the definition + context, render once, deliver to each dest.
+        # Phase B3b: snapshot if the report has an active revision, else live.
+        dm = effective_definition(db, report_id)
+        if dm is None:
+            raise RuntimeError(f"report {report_id} not found")
+        ctx, window = resolve_report_context(db, report_id, APP_TZ, snapshot_at, tag_ids)
+        # Carry the computed window so _record persists it on every row.
+        job["_period_start"] = window[0] if window else None
+        job["_period_end"] = window[1] if window else None
+        # Templates reference the report's own metadata; the context builders
+        # do not set these, so inject them (mirrors the on-demand endpoint).
         ctx["report"]["name"] = dm.get("name") or report_name
         ctx["report"]["category"] = dm.get("category")
         ctx["report"]["report_type"] = dm.get("report_type")
 
+        stamp = snapshot_at.strftime("%Y%m%d_%H%M%S")
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in report_name)
+        rendered: dict[str, tuple[bytes, str]] = {}   # fmt -> (bytes, ext), rendered once
+
         for d in dests:
-            fmt = (d.get("fmt") or "pdf").lower()
-            if fmt != "pdf":
-                log.info("report '%s': fmt '%s' not yet implemented; skipping dest '%s'",
-                         report_name, fmt, d.get("name"))
-                continue
-            pdf = render_report(
-                template_html=defn._mapping.get("template_html"),
-                context=ctx,
-                page_size=defn._mapping.get("page_size") or "A4",
-                orientation=defn._mapping.get("orientation") or "portrait",
-            )
-            out_dir = Path(d["target"]); out_dir.mkdir(parents=True, exist_ok=True)
-            stamp = snapshot_at.strftime("%Y%m%d_%H%M%S")
-            safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in report_name)
-            out_path = out_dir / f"{safe}_{stamp}.pdf"
+            # Effective format set for THIS destination: the per-report override
+            # (the link's fmt) wins; else the destination's own default set;
+            # else pdf. Tokens normalized (lowercase, no blanks).
+            override = (d.get("fmt") or "").strip()
+            default = (d.get("default_fmts") or "pdf").strip()
+            fmt_set = [f.strip().lower() for f in (override or default).split(",") if f.strip()] or ["pdf"]
 
-            if d["dest_type"] == "folder":
-                out_path.write_bytes(pdf)
-            elif d["dest_type"] == "network_drive":
-                out_path.write_bytes(pdf)  # mounted UNC -> same as folder
-            elif d["dest_type"] == "printer":
-                out_path.write_bytes(pdf)  # spool stub: write then (future) lp/IPP
-                log.info("report '%s': printer delivery stubbed (wrote %s)",
-                         report_name, out_path)
-            else:
-                log.warning("report '%s': unknown dest_type '%s'",
-                            report_name, d["dest_type"])
-                continue
+            for fmt in fmt_set:
+                # Render each format at most once across all destinations.
+                try:
+                    if fmt not in rendered:
+                        rendered[fmt] = _render_one(fmt, dm, ctx)
+                    payload, ext = rendered[fmt]
+                except _UnsupportedFormat as exc:
+                    # e.g. csv — no serializer yet. Log + skip without a record,
+                    # matching the on-demand endpoint (which also can't emit it).
+                    log.info("report '%s': %s; skipping for dest '%s'",
+                             report_name, exc, d.get("name"))
+                    continue
+                except Exception as exc:
+                    log.exception("report '%s': render %s failed", report_name, fmt)
+                    _record(db, job, trigger_kind, snapshot_at, fmt=fmt,
+                            status="error", error=str(exc)[:500])
+                    continue
 
-            db.execute(text("""
-                INSERT INTO report_records
-                    (report_id, report_name, category, trigger_id, trigger_kind,
-                     snapshot_at, fmt, file_path, byte_size, status)
-                VALUES (:rid, :rn, :cat, :tid, :tk, :snap, :fmt, :fp, :sz, 'ok')
-            """), {"rid": report_id, "rn": report_name, "cat": job.get("category"),
-                   "tid": job["trigger_id"], "tk": trigger_kind,
-                   "snap": snapshot_at, "fmt": fmt,
-                   "fp": str(out_path), "sz": len(pdf)})
-            log.info("report '%s' fired (%s) -> %s (%d bytes)",
-                     report_name, trigger_kind, out_path, len(pdf))
+                # Deliver with the format-correct file extension.
+                try:
+                    out_dir = Path(d["target"]); out_dir.mkdir(parents=True, exist_ok=True)
+                    out_path = out_dir / f"{safe}_{stamp}.{ext}"
+                    dtype = d.get("dest_type")
+                    if dtype in ("folder", "network_drive"):
+                        out_path.write_bytes(payload)
+                    elif dtype == "printer":
+                        out_path.write_bytes(payload)  # spool stub: write then (future) lp/IPP
+                        log.info("report '%s': printer delivery stubbed (wrote %s)",
+                                 report_name, out_path)
+                    else:
+                        log.warning("report '%s': unknown dest_type '%s'", report_name, dtype)
+                        _record(db, job, trigger_kind, snapshot_at, fmt=fmt,
+                                status="error", error=f"unknown dest_type '{dtype}'")
+                        continue
+                except Exception as exc:
+                    log.exception("report '%s': deliver %s to '%s' failed",
+                                  report_name, fmt, d.get("name"))
+                    _record(db, job, trigger_kind, snapshot_at, fmt=fmt,
+                            status="error", error=str(exc)[:500])
+                    continue
+
+                _record(db, job, trigger_kind, snapshot_at, fmt=fmt, status="ok",
+                        file_path=str(out_path), byte_size=len(payload))
+                log.info("report '%s' fired (%s) -> %s [%s] (%d bytes)",
+                         report_name, trigger_kind, out_path, fmt, len(payload))
 
     except Exception as e:
         log.exception("report '%s' render/deliver failed", report_name)
         db.execute(text("""
             INSERT INTO report_records
                 (report_id, report_name, category, trigger_id, trigger_kind,
-                 snapshot_at, fmt, status, error)
-            VALUES (:rid, :rn, :cat, :tid, :tk, :snap, 'pdf', 'error', :err)
+                 snapshot_at, period_start, period_end, fmt, status, error)
+            VALUES (:rid, :rn, :cat, :tid, :tk, :snap, :ps, :pe, 'pdf', 'error', :err)
         """), {"rid": report_id, "rn": report_name, "cat": job.get("category"),
                "tid": job["trigger_id"], "tk": trigger_kind,
-               "snap": snapshot_at, "err": str(e)[:500]})
+               "snap": snapshot_at, "ps": job.get("_period_start"),
+               "pe": job.get("_period_end"), "err": str(e)[:500]})
 
 
 # ------------------------------------------------------------------------- loop

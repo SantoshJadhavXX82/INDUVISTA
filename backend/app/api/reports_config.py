@@ -30,6 +30,19 @@ from app.utils.audit import audit, AuditEvent
 from app.config import settings
 from app.services.report_render import build_live_context, render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
+from app.services.report_aggregate import (
+    resolve_report_context, DATA_FUNCTIONS, QUALITY_RULES, MISSING_ACTIONS,
+    BAD_ACTIONS, VALUE_FORMATS,
+)
+from app.services.report_period import (
+    PERIOD_TYPES, PERIOD_RULES, MISSING_PERIOD_HANDLING,
+)
+from app.services.report_validation import validate_report
+from app.services.report_revisions import (
+    create_draft, list_revisions, get_revision, activate_revision,
+    effective_definition,
+)
+from app.auth import get_current_user, CurrentUser
 
 router = APIRouter(prefix="/api/report-config", tags=["report-config"])
 
@@ -45,6 +58,10 @@ class DefinitionCreate(BaseModel):
     template_html: str = ""
     page_size: str = Field("A4", max_length=16)
     orientation: str = Field("portrait", pattern="^(portrait|landscape)$")
+    report_code: str | None = Field(None, max_length=40)
+    area: str | None = Field(None, max_length=64)
+    equipment: str | None = Field(None, max_length=64)
+    owner_dept: str | None = Field(None, max_length=64)
     enabled: bool = True
 
 
@@ -56,6 +73,10 @@ class DefinitionUpdate(BaseModel):
     template_html: str | None = None
     page_size: str | None = Field(None, max_length=16)
     orientation: str | None = Field(None, pattern="^(portrait|landscape)$")
+    report_code: str | None = Field(None, max_length=40)
+    area: str | None = Field(None, max_length=64)
+    equipment: str | None = Field(None, max_length=64)
+    owner_dept: str | None = Field(None, max_length=64)
     enabled: bool | None = None
 
 
@@ -68,7 +89,13 @@ class DefinitionResponse(BaseModel):
     template_html: str
     page_size: str
     orientation: str
+    report_code: str | None = None
+    area: str | None = None
+    equipment: str | None = None
+    owner_dept: str | None = None
     enabled: bool
+    active_revision_id: int | None = None
+    status: str | None = None
     created_at: datetime
     updated_at: datetime
     trigger_ids: list[int] = []
@@ -207,8 +234,17 @@ def _def_row(db: Session, def_id: int) -> DefinitionResponse:
         "SELECT destination_id, fmt FROM report_destination_links WHERE report_id = :id"),
         {"id": def_id}).all()
     dids = [r[0] for r in drows]
-    dfmts = {r[0]: r[1] for r in drows}
-    return DefinitionResponse(**dict(row), trigger_ids=tids,
+    dfmts = {r[0]: (r[1] or "") for r in drows}   # NULL fmt = no override → ""
+    data = dict(row)
+    # Derived status (no stored column): a report is "active" once it has an
+    # activated revision and is enabled; "disabled" if activated but turned off;
+    # "draft" until first activation. The lifecycle that sets active_revision_id
+    # lives in the revision endpoints below (Phase B3a).
+    if data.get("active_revision_id"):
+        status = "active" if data.get("enabled") else "disabled"
+    else:
+        status = "draft"
+    return DefinitionResponse(**data, status=status, trigger_ids=tids,
                               destination_ids=dids, destination_fmts=dfmts)
 
 
@@ -231,9 +267,11 @@ def create_definition(body: DefinitionCreate, request: Request,
         new_id = db.execute(text("""
             INSERT INTO report_definitions
                 (name, description, category, report_type, template_html,
-                 page_size, orientation, enabled)
+                 page_size, orientation, report_code, area, equipment,
+                 owner_dept, enabled)
             VALUES (:name, :description, :category, :report_type, :template_html,
-                    :page_size, :orientation, :enabled)
+                    :page_size, :orientation, :report_code, :area, :equipment,
+                    :owner_dept, :enabled)
             RETURNING id
         """), body.model_dump()).scalar_one()
         db.commit()
@@ -475,15 +513,25 @@ def unlink_trigger(def_id: int, trig_id: int, request: Request,
 
 @router.put("/definitions/{def_id}/destinations/{dest_id}", status_code=204)
 def link_destination(def_id: int, dest_id: int, request: Request,
-                     db: Annotated[Session, Depends(get_session)], fmt: str = "pdf"):
-    if fmt not in ("pdf", "html", "json", "xml", "csv"):
-        raise HTTPException(400, "fmt must be one of: pdf, html, json, xml, csv.")
+                     db: Annotated[Session, Depends(get_session)], fmt: str | None = None):
+    # `fmt` is an OPTIONAL per-report override set, comma-separated (e.g.
+    # "pdf,html"). Empty or missing means "no override" → the destination's
+    # own default_fmts are used, and NULL is stored (see migration 0066).
+    # A non-empty value must be a comma-separated subset of the allowed
+    # formats; every token is validated individually.
+    allowed = ("pdf", "html", "json", "xml", "csv")
+    tokens = [t.strip().lower() for t in (fmt or "").split(",") if t.strip()]
+    bad = [t for t in tokens if t not in allowed]
+    if bad:
+        raise HTTPException(
+            400, "fmt must be a comma-separated subset of: pdf, html, json, xml, csv.")
+    fmt_val = ",".join(tokens) if tokens else None   # None = use destination default
     try:
         db.execute(text("""
             INSERT INTO report_destination_links (report_id, destination_id, fmt)
             VALUES (:r, :d, :f)
             ON CONFLICT (report_id, destination_id) DO UPDATE SET fmt = :f
-        """), {"r": def_id, "d": dest_id, "f": fmt})
+        """), {"r": def_id, "d": dest_id, "f": fmt_val})
         db.commit()
     except IntegrityError as e:
         db.rollback()
@@ -538,8 +586,17 @@ def set_report_tags(def_id: int, body: ReportTagsBody, request: Request,
     if not exists:
         raise HTTPException(404, f"Report definition {def_id} not found.")
     try:
-        db.execute(text("DELETE FROM report_tags WHERE report_id = :rid"),
-                   {"rid": def_id})
+        # Binding-aware: drop only tags no longer present (so the per-tag
+        # binding columns on rows that remain are preserved), then upsert
+        # positions. The richer binding config is set via PUT .../bindings.
+        if body.tag_ids:
+            db.execute(text(
+                "DELETE FROM report_tags "
+                "WHERE report_id = :rid AND NOT (tag_id = ANY(:keep))"
+            ), {"rid": def_id, "keep": list(body.tag_ids)})
+        else:
+            db.execute(text("DELETE FROM report_tags WHERE report_id = :rid"),
+                       {"rid": def_id})
         for pos, tid in enumerate(body.tag_ids):
             db.execute(text("""
                 INSERT INTO report_tags (report_id, tag_id, position)
@@ -584,9 +641,9 @@ def render_definition(
     format: Annotated[str, Query(pattern="^(pdf|html|json|xml)$")] = "pdf",
 ):
     """Render a report definition's template to PDF using current live values."""
-    row = db.execute(text(
-        "SELECT name, category, report_type, template_html, page_size, orientation "
-        "FROM report_definitions WHERE id = :id"), {"id": def_id}).mappings().first()
+    # Phase B3b: if the report has an active revision, render from its snapshot;
+    # otherwise from the live definition (unchanged).
+    row = effective_definition(db, def_id)
     if not row:
         raise HTTPException(404, f"Report definition {def_id} not found.")
     tz_name = settings.app_timezone
@@ -594,7 +651,7 @@ def render_definition(
     # Fall back to the report's saved tags when none are passed explicitly,
     # so scheduled + on-demand renders use the same tag set.
     effective_tag_ids = list(tag_ids) if tag_ids else _saved_report_tag_ids(db, def_id)
-    ctx = build_live_context(db, effective_tag_ids, tz_name)
+    ctx, window = resolve_report_context(db, def_id, tz_name, snapshot_at, effective_tag_ids)
     # Let templates reference the report's own name/metadata.
     ctx["report"]["name"] = row["name"]
     ctx["report"]["category"] = row["category"]
@@ -630,11 +687,14 @@ def render_definition(
     db.execute(text("""
         INSERT INTO report_records
             (report_id, report_name, category, trigger_kind, snapshot_at,
-             fmt, byte_size, status, error)
-        VALUES (:rid, :name, :cat, 'manual', :snap, :fmt, :size, :status, :err)
+             period_start, period_end, fmt, byte_size, status, error)
+        VALUES (:rid, :name, :cat, 'manual', :snap, :ps, :pe, :fmt, :size, :status, :err)
     """), {
         "rid": def_id, "name": row["name"], "cat": row["category"],
-        "snap": snapshot_at, "fmt": format,
+        "snap": snapshot_at,
+        "ps": (window[0] if window else None),
+        "pe": (window[1] if window else None),
+        "fmt": format,
         "size": (len(out_bytes) if status == "ok" else None),
         "status": status, "err": err,
     })
@@ -652,3 +712,273 @@ def render_definition(
     fname = f"{row['name'].replace(' ', '_')}_{snapshot_at.strftime('%Y%m%d_%H%M%S')}.{ext}"
     headers = {"Content-Disposition": f'attachment; filename="{fname}"'} if format != "json" else {}
     return Response(content=out_bytes, media_type=media, headers=headers)
+
+
+# ===========================================================================
+# Period rule (data window) — Phase A. Absence => legacy live-snapshot mode.
+# ===========================================================================
+class PeriodRuleBody(BaseModel):
+    period_type: str = Field(..., pattern="^(hourly|daily|weekly|monthly|shift|batch|custom)$")
+    period_rule: str = Field("previous_completed",
+                             pattern="^(previous_completed|current|custom)$")
+    boundary_offset_min: int = 0
+    custom_start_offset_min: int | None = None
+    custom_end_offset_min: int | None = None
+    allow_partial: bool = False
+    late_data_wait_sec: int = 0
+    grace_sec: int = 0
+    missing_period_handling: str = Field("warn", pattern="^(warn|hold|fail)$")
+    label_format: str = Field("yyyy-MM-dd HH:mm", max_length=32)
+    filename_format: str = Field("yyyyMMdd_HHmm", max_length=32)
+    enabled: bool = True
+
+
+def _require_definition(db: Session, def_id: int) -> None:
+    if not db.execute(text("SELECT 1 FROM report_definitions WHERE id = :id"),
+                      {"id": def_id}).first():
+        raise HTTPException(404, f"Report definition {def_id} not found.")
+
+
+@router.get("/definitions/{def_id}/period-rule")
+def get_period_rule(def_id: int, db: Annotated[Session, Depends(get_session)]):
+    """The report's data-window rule, or null if it uses live-snapshot mode."""
+    row = db.execute(text("SELECT * FROM report_period_rule WHERE report_id = :r"),
+                     {"r": def_id}).mappings().first()
+    return dict(row) if row else None
+
+
+@router.put("/definitions/{def_id}/period-rule", status_code=204)
+def set_period_rule(def_id: int, body: PeriodRuleBody, request: Request,
+                    db: Annotated[Session, Depends(get_session)]):
+    """Create/replace the report's data-window rule (enables period aggregation)."""
+    _require_definition(db, def_id)
+    if body.period_type == "custom" and (
+        body.custom_start_offset_min is None or body.custom_end_offset_min is None
+    ):
+        raise HTTPException(
+            422, "Custom period requires custom_start_offset_min and custom_end_offset_min.")
+    db.execute(text("""
+        INSERT INTO report_period_rule
+            (report_id, period_type, period_rule, boundary_offset_min,
+             custom_start_offset_min, custom_end_offset_min, allow_partial,
+             late_data_wait_sec, grace_sec, missing_period_handling,
+             label_format, filename_format, enabled, updated_at)
+        VALUES (:r, :pt, :pr, :bo, :cs, :ce, :ap, :lw, :gr, :mh, :lf, :ff, :en, now())
+        ON CONFLICT (report_id) DO UPDATE SET
+            period_type = EXCLUDED.period_type,
+            period_rule = EXCLUDED.period_rule,
+            boundary_offset_min = EXCLUDED.boundary_offset_min,
+            custom_start_offset_min = EXCLUDED.custom_start_offset_min,
+            custom_end_offset_min = EXCLUDED.custom_end_offset_min,
+            allow_partial = EXCLUDED.allow_partial,
+            late_data_wait_sec = EXCLUDED.late_data_wait_sec,
+            grace_sec = EXCLUDED.grace_sec,
+            missing_period_handling = EXCLUDED.missing_period_handling,
+            label_format = EXCLUDED.label_format,
+            filename_format = EXCLUDED.filename_format,
+            enabled = EXCLUDED.enabled,
+            updated_at = now()
+    """), {"r": def_id, "pt": body.period_type, "pr": body.period_rule,
+           "bo": body.boundary_offset_min, "cs": body.custom_start_offset_min,
+           "ce": body.custom_end_offset_min, "ap": body.allow_partial,
+           "lw": body.late_data_wait_sec, "gr": body.grace_sec,
+           "mh": body.missing_period_handling, "lf": body.label_format,
+           "ff": body.filename_format, "en": body.enabled})
+    db.commit()
+    audit(AuditEvent(action="report_def.set_period_rule",
+                     target_type="report_definition", target_id=def_id,
+                     summary=f"Set period rule ({body.period_type}/{body.period_rule}) "
+                             f"on report {def_id}"), request)
+
+
+@router.delete("/definitions/{def_id}/period-rule", status_code=204)
+def clear_period_rule(def_id: int, request: Request,
+                      db: Annotated[Session, Depends(get_session)]):
+    """Remove the data-window rule — report reverts to live-snapshot mode."""
+    db.execute(text("DELETE FROM report_period_rule WHERE report_id = :r"),
+               {"r": def_id})
+    db.commit()
+    audit(AuditEvent(action="report_def.clear_period_rule",
+                     target_type="report_definition", target_id=def_id,
+                     summary=f"Cleared period rule on report {def_id}"), request)
+
+
+# ===========================================================================
+# Data bindings — the rich per-tag config (function, quality rule, units, ...).
+# ===========================================================================
+class BindingItem(BaseModel):
+    tag_id: int
+    alias: str | None = Field(None, max_length=64)
+    display_name: str | None = Field(None, max_length=120)
+    unit_id: int | None = None
+    data_function: str = "latest"
+    quality_rule: str = "all"
+    missing_action: str = "blank"
+    bad_action: str = "blank"
+    decimal_places: int | None = None
+    value_format: str | None = None
+    low_limit: float | None = None
+    high_limit: float | None = None
+    group_name: str | None = Field(None, max_length=64)
+    required: bool = False
+
+
+class BindingsBody(BaseModel):
+    bindings: list[BindingItem] = Field(default_factory=list)
+
+
+@router.get("/definitions/{def_id}/bindings")
+def get_bindings(def_id: int, db: Annotated[Session, Depends(get_session)]):
+    """Full per-tag binding config for the report, in display order."""
+    rows = db.execute(text("""
+        SELECT rt.tag_id, t.name AS tag_name, rt.position, rt.alias, rt.display_name,
+               rt.unit_id, rt.data_function, rt.quality_rule, rt.missing_action,
+               rt.bad_action, rt.decimal_places, rt.value_format, rt.low_limit,
+               rt.high_limit, rt.group_name, rt.required
+        FROM report_tags rt
+        LEFT JOIN tags t ON t.id = rt.tag_id
+        WHERE rt.report_id = :r
+        ORDER BY rt.position, rt.tag_id
+    """), {"r": def_id}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.put("/definitions/{def_id}/bindings", status_code=204)
+def set_bindings(def_id: int, body: BindingsBody, request: Request,
+                 db: Annotated[Session, Depends(get_session)]):
+    """Replace the report's full binding set (ordered by the array order)."""
+    _require_definition(db, def_id)
+    # Validate enums against the engine's canonical sets (single source of truth).
+    for b in body.bindings:
+        if b.data_function not in DATA_FUNCTIONS:
+            raise HTTPException(422, f"Invalid data_function '{b.data_function}'.")
+        if b.quality_rule not in QUALITY_RULES:
+            raise HTTPException(422, f"Invalid quality_rule '{b.quality_rule}'.")
+        if b.missing_action not in MISSING_ACTIONS:
+            raise HTTPException(422, f"Invalid missing_action '{b.missing_action}'.")
+        if b.bad_action not in BAD_ACTIONS:
+            raise HTTPException(422, f"Invalid bad_action '{b.bad_action}'.")
+        if b.value_format is not None and b.value_format not in VALUE_FORMATS:
+            raise HTTPException(422, f"Invalid value_format '{b.value_format}'.")
+    try:
+        keep = [b.tag_id for b in body.bindings]
+        if keep:
+            db.execute(text(
+                "DELETE FROM report_tags "
+                "WHERE report_id = :r AND NOT (tag_id = ANY(:keep))"
+            ), {"r": def_id, "keep": keep})
+        else:
+            db.execute(text("DELETE FROM report_tags WHERE report_id = :r"),
+                       {"r": def_id})
+        for pos, b in enumerate(body.bindings):
+            db.execute(text("""
+                INSERT INTO report_tags
+                    (report_id, tag_id, position, alias, display_name, unit_id,
+                     data_function, quality_rule, missing_action, bad_action,
+                     decimal_places, value_format, low_limit, high_limit,
+                     group_name, required)
+                VALUES (:r, :t, :p, :al, :dn, :ui, :df, :qr, :ma, :ba, :dp, :vf,
+                        :ll, :hl, :gn, :rq)
+                ON CONFLICT (report_id, tag_id) DO UPDATE SET
+                    position = EXCLUDED.position, alias = EXCLUDED.alias,
+                    display_name = EXCLUDED.display_name, unit_id = EXCLUDED.unit_id,
+                    data_function = EXCLUDED.data_function,
+                    quality_rule = EXCLUDED.quality_rule,
+                    missing_action = EXCLUDED.missing_action,
+                    bad_action = EXCLUDED.bad_action,
+                    decimal_places = EXCLUDED.decimal_places,
+                    value_format = EXCLUDED.value_format,
+                    low_limit = EXCLUDED.low_limit, high_limit = EXCLUDED.high_limit,
+                    group_name = EXCLUDED.group_name, required = EXCLUDED.required
+            """), {"r": def_id, "t": b.tag_id, "p": pos, "al": b.alias,
+                   "dn": b.display_name, "ui": b.unit_id, "df": b.data_function,
+                   "qr": b.quality_rule, "ma": b.missing_action, "ba": b.bad_action,
+                   "dp": b.decimal_places, "vf": b.value_format, "ll": b.low_limit,
+                   "hl": b.high_limit, "gn": b.group_name, "rq": b.required})
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise _integrity(e, "report bindings")
+    audit(AuditEvent(action="report_def.set_bindings",
+                     target_type="report_definition", target_id=def_id,
+                     summary=f"Set {len(body.bindings)} binding(s) on report {def_id}"),
+          request)
+
+
+# ===========================================================================
+# Validation (Phase B1) — read-only readiness checks; the activation gate
+# (Phase B3) will consult this before allowing a report to go active.
+# ===========================================================================
+@router.post("/definitions/{def_id}/validate")
+def validate_definition(def_id: int, request: Request,
+                        db: Annotated[Session, Depends(get_session)]):
+    """Run configuration checks; return {overall, results[]} (passed/warning/failed/info)."""
+    res = validate_report(db, def_id, settings.app_timezone)
+    if res is None:
+        raise HTTPException(404, f"Report definition {def_id} not found.")
+    audit(AuditEvent(action="report.validate", target_type="report_definition",
+                     target_id=def_id,
+                     summary=f"Validated report {def_id}: {res['overall']}"), request)
+    return res
+
+
+# ===========================================================================
+# Revisions (Phase B3a) — immutable config snapshots + activation lifecycle.
+# Additive and runtime-dormant: render/scheduler still read the live config;
+# making the active revision authoritative is Phase B3b.
+# ===========================================================================
+class RevisionCreate(BaseModel):
+    notes: str | None = Field(None, max_length=500)
+
+
+@router.post("/definitions/{def_id}/revisions", status_code=201)
+def create_revision(def_id: int, body: RevisionCreate, request: Request,
+                    db: Annotated[Session, Depends(get_session)],
+                    user: CurrentUser = Depends(get_current_user)):
+    """Snapshot the report's current config into a new draft revision."""
+    rev = create_draft(db, def_id, user.username, body.notes, settings.app_timezone)
+    if rev is None:
+        raise HTTPException(404, f"Report definition {def_id} not found.")
+    audit(AuditEvent(action="report.revision.create", target_type="report_definition",
+                     target_id=def_id,
+                     summary=f"Drafted revision {rev['revision_no']} of report {def_id}"),
+          request)
+    return rev
+
+
+@router.get("/definitions/{def_id}/revisions")
+def list_report_revisions(def_id: int, db: Annotated[Session, Depends(get_session)]):
+    return list_revisions(db, def_id)
+
+
+@router.get("/definitions/{def_id}/revisions/{rev_id}")
+def get_report_revision(def_id: int, rev_id: int,
+                        db: Annotated[Session, Depends(get_session)]):
+    rev = get_revision(db, rev_id)
+    if rev is None or rev["report_id"] != def_id:
+        raise HTTPException(404, f"Revision {rev_id} not found for report {def_id}.")
+    return rev
+
+
+@router.post("/definitions/{def_id}/revisions/{rev_id}/activate")
+def activate_report_revision(def_id: int, rev_id: int, request: Request,
+                             db: Annotated[Session, Depends(get_session)],
+                             user: CurrentUser = Depends(get_current_user)):
+    """Activate a draft revision (validation gate blocks hard failures only).
+
+    NOTE (Phase B5): activation should require an 'approver' role once that
+    exists; today it relies on the path-based engineer+ write gate.
+    """
+    rev, err = activate_revision(db, def_id, rev_id, user.username, settings.app_timezone)
+    if err == "not_found":
+        raise HTTPException(404, f"Revision {rev_id} not found for report {def_id}.")
+    if err == "validation_failed":
+        raise HTTPException(409, "Revision cannot be activated: validation has hard failures. "
+                                 "Fix them and re-validate first.")
+    if err:
+        raise HTTPException(409, err)
+    audit(AuditEvent(action="report.revision.activate", target_type="report_definition",
+                     target_id=def_id,
+                     summary=f"Activated revision {rev['revision_no']} of report {def_id}"),
+          request)
+    return rev

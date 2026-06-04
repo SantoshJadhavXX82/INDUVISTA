@@ -11,7 +11,7 @@
  */
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Plus, Pencil, Trash2, Clock, Zap, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Plus, Pencil, Trash2, Clock, Zap, CheckCircle2, AlertCircle } from "lucide-react";
 import { api } from "@/lib/api";
 import { PageHeader } from "@/components/ui/page-header";
 import { SectionCard } from "@/components/ui/section-card";
@@ -21,7 +21,7 @@ import {
   NewTriggerModal, humanizeTrigger,
 } from "@/pages/triggers-shared";
 
-export default function ReportTriggers() {
+export default function ReportTriggers({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient();
   const [showNew, setShowNew] = useState(false);
   const [editing, setEditing] = useState<Trigger | null>(null);
@@ -90,17 +90,28 @@ export default function ReportTriggers() {
     </li>
   );
 
+  const newBtn = (
+    <Button onClick={() => setShowNew(true)}>
+      <Plus className="h-4 w-4" /><span className="ml-1.5">New trigger</span>
+    </Button>
+  );
+
   return (
-    <div className="p-4">
-      <PageHeader
-        title="Report Triggers"
-        subtitle="Manage the shared trigger library. Global triggers can be selected by any report."
-        actions={
-          <Button onClick={() => setShowNew(true)}>
-            <Plus className="h-4 w-4" /><span className="ml-1.5">New trigger</span>
-          </Button>
-        }
-      />
+    <div className={embedded ? "" : "p-4"}>
+      {embedded ? (
+        <div className="flex items-center justify-between mb-3 gap-3">
+          <p className="text-[12.5px]" style={{ color: "var(--ios-gray-1)" }}>
+            Manage the shared trigger library. Global triggers can be selected by any report.
+          </p>
+          {newBtn}
+        </div>
+      ) : (
+        <PageHeader
+          title="Report Triggers"
+          subtitle="Manage the shared trigger library. Global triggers can be selected by any report."
+          actions={newBtn}
+        />
+      )}
 
       {toast && (
         <div className="mb-3 flex items-center gap-2 rounded-lg px-3 py-2 text-[13px]"

@@ -44,8 +44,6 @@ import {
   HelpCircle, Info,
   type LucideIcon,
   FileCog,
-  AlarmClock,
-  FolderOutput,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
@@ -131,8 +129,6 @@ function useEntries(alarmCount: number): Section[] {
         { kind: "leaf", to: "/config/devices",  label: "Devices",          icon: Cpu,        matchPrefix: "/config/devices" },
         { kind: "leaf", to: "/config/blocks",   label: "Register blocks",  icon: ListTree,   matchPrefix: "/config/blocks" },
         { kind: "leaf", to: "/global/calc-blocks", label: "Calc tags",     icon: Sigma, matchPrefix: "/global/calc-blocks" },
-        { kind: "leaf", to: "/config/report-triggers", label: "Report Triggers", icon: AlarmClock, matchPrefix: "/config/report-triggers" },
-        { kind: "leaf", to: "/config/report-destinations", label: "Report Destinations", icon: FolderOutput, matchPrefix: "/config/report-destinations" },
         // Phase OPC-web.3 — OPC UA sources management. Sits in Configure
         // because it's a per-deployment data-source setup (like Networks
         // and Devices), not global reference data.

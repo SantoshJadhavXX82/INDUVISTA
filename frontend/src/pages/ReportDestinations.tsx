@@ -39,7 +39,7 @@ function typeIcon(t: string) {
   return <Folder className="h-4 w-4" style={{ color: "var(--ios-gray-1)" }} />;
 }
 
-export default function ReportDestinations() {
+export default function ReportDestinations({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient();
   const [showNew, setShowNew] = useState(false);
   const [editing, setEditing] = useState<Destination | null>(null);
@@ -98,17 +98,28 @@ export default function ReportDestinations() {
     </li>
   );
 
+  const newBtn = (
+    <Button onClick={() => setShowNew(true)}>
+      <Plus className="h-4 w-4" /><span className="ml-1.5">New destination</span>
+    </Button>
+  );
+
   return (
-    <div className="p-4">
-      <PageHeader
-        title="Report Destinations"
-        subtitle="Manage where reports are delivered. Global destinations can be selected by any report."
-        actions={
-          <Button onClick={() => setShowNew(true)}>
-            <Plus className="h-4 w-4" /><span className="ml-1.5">New destination</span>
-          </Button>
-        }
-      />
+    <div className={embedded ? "" : "p-4"}>
+      {embedded ? (
+        <div className="flex items-center justify-between mb-3 gap-3">
+          <p className="text-[12.5px]" style={{ color: "var(--ios-gray-1)" }}>
+            Manage where reports are delivered. Global destinations can be selected by any report.
+          </p>
+          {newBtn}
+        </div>
+      ) : (
+        <PageHeader
+          title="Report Destinations"
+          subtitle="Manage where reports are delivered. Global destinations can be selected by any report."
+          actions={newBtn}
+        />
+      )}
 
       {toast && (
         <div className="mb-3 flex items-center gap-2 rounded-lg px-3 py-2 text-[13px]"

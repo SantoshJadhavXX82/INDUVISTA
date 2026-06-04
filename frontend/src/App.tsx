@@ -15,8 +15,6 @@ import DataGaps from "@/pages/DataGaps";
 import Historian from "@/pages/Historian";
 import Reports from "@/pages/Reports";
 import Explorer from "@/pages/Explorer";
-import ReportTriggers from "@/pages/ReportTriggers";
-import ReportDestinations from "@/pages/ReportDestinations";
 import ReportsConfig from "@/pages/ReportsConfig";
 import About from "@/pages/About";
 import Help from "@/pages/Help";
@@ -86,8 +84,10 @@ function AuthedRoutes() {
         <Route path="/reports" element={<Reports />} />
         <Route path="/explorer" element={<Explorer />} />
         <Route path="/reports/config" element={<ReportsConfig />} />
-        <Route path="/config/report-triggers" element={<ReportTriggers />} />
-        <Route path="/config/report-destinations" element={<ReportDestinations />} />
+        {/* Triggers + Destinations were consolidated into Report Config tabs.
+            Keep the old paths working as redirects into the right tab. */}
+        <Route path="/config/report-triggers" element={<Navigate to="/reports/config?tab=triggers" replace />} />
+        <Route path="/config/report-destinations" element={<Navigate to="/reports/config?tab=destinations" replace />} />
         <Route path="/about" element={<About />} />
         <Route path="/help" element={<Help />} />
         {/* Phase 13.2 — Trend module (historical first, real-time in 13.3) */}

@@ -14,10 +14,12 @@
  * Button / Input) and uses the shared api client (bearer token handled there).
  */
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useSearchParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Trash2, Save, FileDown, X, Clock, FolderOutput, Tags as TagsIcon,
+  Plus, Trash2, Save, FileDown, Clock, FolderOutput, Tags as TagsIcon,
   Loader2, FileText, CheckCircle2, AlertCircle, LayoutGrid, Settings as SettingsIcon, Settings2,
+  Calendar, History,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { TOKEN_KEY } from "@/lib/auth";
@@ -29,28 +31,51 @@ import {
   type Trigger, type TagLite,
   humanizeTrigger, Field, Select,
 } from "@/pages/triggers-shared";
+// Report-config consolidation — the Triggers and Destinations libraries now
+// render as tabs inside this page (previously separate Configure nav pages).
+import ReportTriggers from "@/pages/ReportTriggers";
+import ReportDestinations from "@/pages/ReportDestinations";
+import { ReportPeriodTab } from "@/components/reports/ReportPeriodTab";
+import { ReportDataTab } from "@/components/reports/ReportDataTab";
+import { ReportRevisionsTab } from "@/components/reports/ReportRevisionsTab";
 
 // ---- types mirroring the backend ----------------------------------------
 type Definition = {
   id: number; name: string; description: string | null;
   category: string; report_type: string | null;
+  report_code: string | null; area: string | null;
+  equipment: string | null; owner_dept: string | null;
   template_html: string | null; template_mode: string | null;
   page_size: string | null; orientation: string | null;
   enabled: boolean;
+  status?: string | null; active_revision_id?: number | null;
   trigger_ids?: number[]; destination_ids?: number[];
   destination_fmts?: Record<number, string>;
 };
 type Destination = { id: number; name: string; dest_type: string; target: string; default_fmts?: string; owner_report_id?: number | null };
-type ReportTag = { tag_id: number; name: string | null; position: number };
 
 const CATEGORIES = ["periodic", "event", "on_demand"];
 const PAGE_SIZES = ["A4", "Letter"];
 const ORIENTATIONS = ["portrait", "landscape"];
 
+type TopTab = "definitions" | "triggers" | "destinations";
+
 export default function ReportsConfig() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
+
+  // Top-level tabs: Definitions / Triggers / Destinations. Synced to ?tab=
+  // so old /config/report-triggers redirects (and bookmarks) land correctly.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabParam = searchParams.get("tab");
+  const [topTab, setTopTab] = useState<TopTab>(
+    tabParam === "triggers" || tabParam === "destinations" ? tabParam : "definitions",
+  );
+  const switchTab = (t: TopTab) => {
+    setTopTab(t);
+    setSearchParams(t === "definitions" ? {} : { tab: t }, { replace: true });
+  };
 
   // ---- queries ----
   const defs = useQuery({
@@ -110,14 +135,42 @@ export default function ReportsConfig() {
         title="Report Configuration"
         subtitle="Define reports, their template, tags, schedule triggers, and delivery destinations"
         actions={
-          <Button onClick={() => createDef.mutate()} disabled={createDef.isPending}>
-            {createDef.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-            <span className="ml-1.5">New report</span>
-          </Button>
+          topTab === "definitions" ? (
+            <Button onClick={() => createDef.mutate()} disabled={createDef.isPending}>
+              {createDef.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              <span className="ml-1.5">New report</span>
+            </Button>
+          ) : null
         }
       />
 
-      {toast && (
+      {/* top-level segmented control */}
+      <div
+        className="inline-flex rounded-lg p-0.5 mb-4"
+        style={{ backgroundColor: "var(--bg,#f2f2f7)", border: "0.5px solid var(--card-edge,#ddd)" }}
+      >
+        {([
+          { id: "definitions" as const, label: "Definitions", icon: <FileText className="h-3.5 w-3.5" /> },
+          { id: "triggers" as const, label: "Triggers", icon: <Clock className="h-3.5 w-3.5" /> },
+          { id: "destinations" as const, label: "Destinations", icon: <FolderOutput className="h-3.5 w-3.5" /> },
+        ]).map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => switchTab(t.id)}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-md text-[13px] font-medium transition-colors"
+            style={
+              topTab === t.id
+                ? { backgroundColor: "var(--bg-elevated,#fff)", color: "var(--ios-blue,#007aff)", boxShadow: "var(--card-shadow)" }
+                : { color: "var(--ios-gray-1)" }
+            }
+          >
+            {t.icon}{t.label}
+          </button>
+        ))}
+      </div>
+
+      {topTab === "definitions" && toast && (
         <div
           className="mb-3 flex items-center gap-2 rounded-lg px-3 py-2 text-[13px]"
           style={{
@@ -130,6 +183,7 @@ export default function ReportsConfig() {
         </div>
       )}
 
+      {topTab === "definitions" && (
       <div className="grid gap-4" style={{ gridTemplateColumns: "300px 1fr" }}>
         {/* ---- master list ---- */}
         <SectionCard title="Reports" flush>
@@ -176,11 +230,17 @@ export default function ReportsConfig() {
             onSaved={() => { qc.invalidateQueries({ queryKey: ["report-defs"] }); flash("ok", "Saved."); }}
             onDeleted={() => { qc.invalidateQueries({ queryKey: ["report-defs"] }); setSelectedId(null); flash("ok", "Deleted."); }}
             onError={(m) => flash("err", m)}
+            onGotoTriggers={() => switchTab("triggers")}
+            onGotoDests={() => switchTab("destinations")}
           />
         ) : (
           <SectionCard><div className="p-6 text-[13px]" style={{ color: "var(--ios-gray-1)" }}>Select or create a report.</div></SectionCard>
         )}
       </div>
+      )}
+
+      {topTab === "triggers" && <ReportTriggers embedded />}
+      {topTab === "destinations" && <ReportDestinations embedded />}
     </div>
   );
 }
@@ -188,6 +248,7 @@ export default function ReportsConfig() {
 // ===========================================================================
 function Editor({
   def, triggers, destinations, allTags, onSaved, onDeleted, onError,
+  onGotoTriggers, onGotoDests,
 }: {
   def: Definition;
   triggers: Trigger[];
@@ -196,6 +257,8 @@ function Editor({
   onSaved: () => void;
   onDeleted: () => void;
   onError: (m: string) => void;
+  onGotoTriggers: () => void;
+  onGotoDests: () => void;
 }) {
   const qc = useQueryClient();
   const [form, setForm] = useState<Definition>(def);
@@ -210,14 +273,6 @@ function Editor({
       return n;
     });
 
-  // tags for this report
-  const tagsQ = useQuery({
-    queryKey: ["report-tags", def.id],
-    queryFn: () => api.get<ReportTag[]>(`/report-config/definitions/${def.id}/tags`),
-  });
-  const [tagIds, setTagIds] = useState<number[]>([]);
-  useEffect(() => { if (tagsQ.data) setTagIds(tagsQ.data.map((t) => t.tag_id)); }, [tagsQ.data]);
-
   const set = <K extends keyof Definition>(k: K, v: Definition[K]) =>
     setForm((f) => ({ ...f, [k]: v }));
 
@@ -228,17 +283,12 @@ function Editor({
         name: form.name, description: form.description, category: form.category,
         report_type: form.report_type, template_html: form.template_html,
         template_mode: "html", page_size: form.page_size, orientation: form.orientation,
+        report_code: form.report_code, area: form.area,
+        equipment: form.equipment, owner_dept: form.owner_dept,
         enabled: form.enabled,
       }),
     onSuccess: onSaved,
     onError: (e: any) => onError(e?.detail || "Save failed."),
-  });
-
-  // ---- save tags ----
-  const saveTags = useMutation({
-    mutationFn: () => api.put(`/report-config/definitions/${def.id}/tags`, { tag_ids: tagIds }),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["report-tags", def.id] }); onSaved(); },
-    onError: (e: any) => onError(e?.detail || "Saving tags failed."),
   });
 
   // ---- link/unlink trigger ----
@@ -259,7 +309,7 @@ function Editor({
   // per-report override set for a destination (empty = use the destination default)
   const destOverride = (did: number): string => def.destination_fmts?.[did] ?? "";
 
-  type Tab = "content" | "tags" | "triggers" | "destinations" | "settings";
+  type Tab = "content" | "period" | "data" | "triggers" | "destinations" | "settings" | "revisions";
   const [tab, setTab] = useState<Tab>("content");
 
   const del = useMutation({
@@ -302,19 +352,15 @@ function Editor({
 
   const linkedTriggers = new Set(def.trigger_ids ?? []);
   const linkedDests = new Set(def.destination_ids ?? []);
-  const tagById = useMemo(() => new Map(allTags.map((t) => [t.id, t.name])), [allTags]);
-  const [tagFilter, setTagFilter] = useState("");
-  const filteredTags = useMemo(() => {
-    const q = tagFilter.trim().toLowerCase();
-    return allTags.filter((t) => !tagIds.includes(t.id) && (!q || t.name.toLowerCase().includes(q))).slice(0, 50);
-  }, [allTags, tagIds, tagFilter]);
 
   const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
     { id: "content", label: "Content", icon: <LayoutGrid className="h-3.5 w-3.5" /> },
-    { id: "tags", label: "Tags", icon: <TagsIcon className="h-3.5 w-3.5" /> },
+    { id: "period", label: "Period", icon: <Calendar className="h-3.5 w-3.5" /> },
+    { id: "data", label: "Data", icon: <TagsIcon className="h-3.5 w-3.5" /> },
     { id: "triggers", label: "Triggers", icon: <Clock className="h-3.5 w-3.5" /> },
     { id: "destinations", label: "Destinations", icon: <FolderOutput className="h-3.5 w-3.5" /> },
     { id: "settings", label: "Settings", icon: <SettingsIcon className="h-3.5 w-3.5" /> },
+    { id: "revisions", label: "Revisions", icon: <History className="h-3.5 w-3.5" /> },
   ];
 
   return (
@@ -395,6 +441,18 @@ function Editor({
           <Field label="Description">
             <Input value={form.description ?? ""} onChange={(e) => set("description", e.target.value)} />
           </Field>
+          <Field label="Report code">
+            <Input value={form.report_code ?? ""} onChange={(e) => set("report_code", e.target.value)} placeholder="EXP_OIL_HR (unique)" />
+          </Field>
+          <Field label="Owner dept">
+            <Input value={form.owner_dept ?? ""} onChange={(e) => set("owner_dept", e.target.value)} placeholder="Operations / Metering …" />
+          </Field>
+          <Field label="Area / unit">
+            <Input value={form.area ?? ""} onChange={(e) => set("area", e.target.value)} />
+          </Field>
+          <Field label="Equipment">
+            <Input value={form.equipment ?? ""} onChange={(e) => set("equipment", e.target.value)} />
+          </Field>
           <Field label="Page size">
             <Select value={form.page_size ?? "A4"} options={PAGE_SIZES} onChange={(v) => set("page_size", v)} />
           </Field>
@@ -428,41 +486,19 @@ function Editor({
       </SectionCard>
       )}
 
-      {/* ---- TAGS tab ---- */}
-      {tab === "tags" && (
-      <SectionCard
-        title={<span className="flex items-center gap-1.5"><TagsIcon className="h-4 w-4" />Tags</span>}
-        subtitle="Which tags this report includes (used by scheduled and on-demand renders)"
-        action={
-          <Button size="sm" onClick={() => saveTags.mutate()} disabled={saveTags.isPending}>
-            {saveTags.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-            <span className="ml-1">Save tags</span>
-          </Button>
-        }
-      >
-        <div className="flex flex-wrap gap-1.5 mb-2">
-          {tagIds.length === 0 && <span className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>No tags yet.</span>}
-          {tagIds.map((id) => (
-            <span key={id} className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[12px]"
-              style={{ backgroundColor: "var(--ios-blue-soft, #e6f0fe)", color: "var(--ios-blue, #0040a0)" }}>
-              {tagById.get(id) ?? `tag ${id}`}
-              <button onClick={() => setTagIds((s) => s.filter((x) => x !== id))}><X className="h-3 w-3" /></button>
-            </span>
-          ))}
-        </div>
-        <Input placeholder="Search tags to add…" value={tagFilter} onChange={(e) => setTagFilter(e.target.value)} />
-        {tagFilter && (
-          <div className="mt-1 max-h-40 overflow-auto rounded-lg" style={{ border: "0.5px solid var(--card-edge, #ddd)" }}>
-            {filteredTags.map((t) => (
-              <button key={t.id} onClick={() => { setTagIds((s) => [...s, t.id]); setTagFilter(""); }}
-                className="block w-full text-left px-3 py-1.5 text-[12.5px] hover:bg-[var(--ios-blue-soft,#e6f0fe)]">
-                {t.name}
-              </button>
-            ))}
-            {filteredTags.length === 0 && <div className="px-3 py-2 text-[12px]" style={{ color: "var(--ios-gray-1)" }}>No matches.</div>}
-          </div>
-        )}
-      </SectionCard>
+      {/* ---- PERIOD tab (data window) ---- */}
+      {tab === "period" && (
+        <ReportPeriodTab defId={def.id} onSaved={onSaved} onError={onError} />
+      )}
+
+      {/* ---- DATA tab (tag bindings) ---- */}
+      {tab === "data" && (
+        <ReportDataTab defId={def.id} allTags={allTags} onSaved={onSaved} onError={onError} />
+      )}
+
+      {/* ---- REVISIONS tab (config snapshots + activation) ---- */}
+      {tab === "revisions" && (
+        <ReportRevisionsTab defId={def.id} onSaved={onSaved} onError={onError} />
       )}
 
 
@@ -472,11 +508,11 @@ function Editor({
         <SectionCard title={<span className="flex items-center gap-1.5"><Clock className="h-4 w-4" />Triggers</span>}
           subtitle="Select which global triggers fire this report"
           action={
-            <a href="/config/report-triggers"
+            <button type="button" onClick={onGotoTriggers}
               className="text-[12px] inline-flex items-center gap-1 px-3 py-1.5 rounded-lg"
               style={{ border: "0.5px solid var(--card-edge,#ddd)", color: "var(--ios-blue,#007aff)" }}>
               <Settings2 className="h-3.5 w-3.5" /> Manage triggers
-            </a>
+            </button>
           }>
           <ul className="flex flex-col gap-1.5">
             {triggers.map((t) => (
@@ -495,7 +531,7 @@ function Editor({
             ))}
             {triggers.length === 0 && (
               <span className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>
-                No triggers yet. Create them in <a href="/config/report-triggers" style={{ color: "var(--ios-blue,#007aff)" }}>Report Triggers</a>.
+                No triggers yet. Create them in <button type="button" onClick={onGotoTriggers} className="underline" style={{ color: "var(--ios-blue,#007aff)" }}>Report Triggers</button>.
               </span>
             )}
           </ul>
@@ -510,11 +546,11 @@ function Editor({
         <SectionCard title={<span className="flex items-center gap-1.5"><FolderOutput className="h-4 w-4" />Destinations</span>}
           subtitle="Select destinations; each uses its default formats unless you override"
           action={
-            <a href="/config/report-destinations"
+            <button type="button" onClick={onGotoDests}
               className="text-[12px] inline-flex items-center gap-1 px-3 py-1.5 rounded-lg"
               style={{ border: "0.5px solid var(--card-edge,#ddd)", color: "var(--ios-blue,#007aff)" }}>
               Manage destinations
-            </a>
+            </button>
           }>
           <ul className="flex flex-col gap-2">
             {destinations.map((d) => {
@@ -569,7 +605,7 @@ function Editor({
             })}
             {destinations.length === 0 && (
               <span className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>
-                No destinations yet. Create them in <a href="/config/report-destinations" style={{ color: "var(--ios-blue,#007aff)" }}>Report Destinations</a>.
+                No destinations yet. Create them in <button type="button" onClick={onGotoDests} className="underline" style={{ color: "var(--ios-blue,#007aff)" }}>Report Destinations</button>.
               </span>
             )}
           </ul>

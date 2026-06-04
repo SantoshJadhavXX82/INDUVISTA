@@ -79,3 +79,5 @@ scripts/lifecycle/evidence_full*.txt
 opc_web_*/
 
 test-results-ui/
+
+*.bak_*

@@ -262,6 +262,66 @@ def _compile_block(b: dict, idx: int) -> str:
         h = int(b.get("height_mm", 6))
         return f'<div style="height:{h}mm"></div>'
 
+    if t == "footer":
+        left = _esc(b.get("left", ""))
+        center = _esc(b.get("center", ""))
+        show_page = b.get("show_page", True)
+        right = '{{ "Page " ~ "" }}' if False else _esc(b.get("right", ""))
+        page_txt = '<span class="rpt-ft-page"></span>' if show_page else right
+        return (f'<div class="rpt-footer"><span>{left}</span>'
+                f'<span>{center}</span><span>{page_txt or right}</span></div>')
+
+    if t == "divider":
+        return '<hr class="rpt-divider"/>'
+
+    if t == "image":
+        # src may be a data URI / stored asset path provided in block config
+        src = _esc(b.get("src", ""))
+        cap = _esc(b.get("caption", ""))
+        w = b.get("width_mm")
+        style = f' style="width:{int(w)}mm"' if w else ""
+        img = f'<img class="rpt-img" src="{src}"{style}/>' if src else \
+              '<div class="rpt-img-ph">[ image ]</div>'
+        capdiv = f'<div class="rpt-img-cap">{cap}</div>' if cap else ""
+        return f'<div class="rpt-image">{img}{capdiv}</div>'
+
+    if t == "signature":
+        slots = b.get("slots") or [{"label": "Operator"}, {"label": "Supervisor"}]
+        cells = []
+        for s in slots:
+            lbl = _esc(s.get("label", ""))
+            cells.append(f'<div class="rpt-sig"><div class="rpt-sig-line"></div>'
+                         f'<div class="rpt-sig-lbl">{lbl} — name &amp; date</div></div>')
+        return f'<div class="rpt-sigs">{"".join(cells)}</div>'
+
+    if t == "note_callout":
+        kind = b.get("kind", "note")  # note | warning | info
+        txt = _esc(b.get("text", ""))
+        # allow {tag:Name} tokens like text blocks
+        txt = re.sub(r"\{tag:([^}]+)\}", lambda m: f'{{{{ tag("{m.group(1)}").display }}}}', txt)
+        icon = {"warning": "\u26a0", "info": "\u2139", "note": "\u270e"}.get(kind, "\u270e")
+        return f'<div class="rpt-note rpt-note-{kind}"><span class="rpt-note-ic">{icon}</span><span>{txt}</span></div>'
+
+    if t == "legend":
+        items = b.get("items") or [
+            {"color": "#1a7a3e", "label": "Good"},
+            {"color": "#b8730a", "label": "Uncertain"},
+            {"color": "#c0392b", "label": "Bad"},
+            {"color": "#bbb", "label": "No data"},
+        ]
+        cells = "".join(
+            f'<span class="rpt-leg-item"><span class="rpt-leg-dot" '
+            f'style="background:{_esc(it.get("color","#999"))}"></span>{_esc(it.get("label",""))}</span>'
+            for it in items)
+        return f'<div class="rpt-legend">{cells}</div>'
+
+    if t == "qr_code":
+        # data may be a URL; the SVG QR is rendered at context-build time into
+        # context["qr"][bid] (or a placeholder if the generator is unavailable).
+        cap = _esc(b.get("caption", "Scan for the live record"))
+        return (f'<div class="rpt-qr">{{{{ qr["{bid}"] | safe if qr is defined and "{bid}" in qr '
+                f'else \'<div class="rpt-qr-ph">QR</div>\' }}}}<div class="rpt-qr-cap">{cap}</div></div>')
+
     if t == "raw":  # advanced escape hatch — verbatim (trusted: engineer-authored)
         return b.get("html", "")
 
@@ -290,6 +350,29 @@ _BASE_CSS = """
   .rpt-col{border:1px solid #e2e6ea;border-radius:6px;padding:10px}
   .rpt-chart{margin:10px 0;max-width:100%}
   .rpt-chart svg{max-width:100%;height:auto}
+  .rpt-footer{display:flex;justify-content:space-between;border-top:.5px solid #ddd;padding-top:5px;margin-top:10px;font-size:9px;color:#888}
+  .rpt-footer .rpt-ft-page::after{content:"Page " counter(page) " of " counter(pages)}
+  .rpt-divider{border:0;border-top:1.5px solid #c8d3e0;margin:8px 0}
+  .rpt-image{text-align:center;margin:8px 0}
+  .rpt-img{max-width:100%;border-radius:4px}
+  .rpt-img-ph{border:1px dashed #c8d3e0;border-radius:6px;padding:20px;color:#9babc2;font-size:10px}
+  .rpt-img-cap{font-size:9px;color:#888;margin-top:3px}
+  .rpt-sigs{display:flex;gap:24px;margin:14px 0 4px}
+  .rpt-sig{flex:1}
+  .rpt-sig-line{border-top:1px solid #1c2530;margin-top:28px}
+  .rpt-sig-lbl{font-size:9px;color:#888;margin-top:3px}
+  .rpt-note{display:flex;gap:8px;align-items:flex-start;border-radius:6px;padding:8px 10px;margin:8px 0;font-size:10.5px}
+  .rpt-note-ic{font-size:13px;line-height:1}
+  .rpt-note-note{background:#eef4ff;border-left:3px solid #0040A0;color:#23406b}
+  .rpt-note-warning{background:#fff0e0;border-left:3px solid #e8a93b;color:#6b4a10}
+  .rpt-note-info{background:#e0f5f8;border-left:3px solid #0c8599;color:#0a4954}
+  .rpt-legend{display:flex;flex-wrap:wrap;gap:14px;margin:6px 0;font-size:10px;color:#555}
+  .rpt-leg-item{display:inline-flex;align-items:center;gap:5px}
+  .rpt-leg-dot{width:10px;height:10px;border-radius:2px;display:inline-block}
+  .rpt-qr{display:flex;align-items:center;gap:10px;margin:8px 0}
+  .rpt-qr svg,.rpt-qr-ph{width:72px;height:72px}
+  .rpt-qr-ph{border:2px solid #1c2530;border-radius:4px;display:grid;place-items:center;font-size:10px;font-family:monospace}
+  .rpt-qr-cap{font-size:10px;color:#888}
 </style>
 """
 

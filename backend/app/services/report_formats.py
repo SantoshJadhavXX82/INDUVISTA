@@ -89,6 +89,8 @@ def build_report_data(context: dict[str, Any]) -> dict[str, Any]:
             "report_type": report.get("report_type"),
             "generated_at": report.get("generated_at"),
             "timezone": report.get("timezone"),
+            "period_start": report.get("period_start"),
+            "period_end": report.get("period_end"),
         },
         "tags": [tag_row(t) for t in tags_list],
         "tag_count": len(tags_list),
@@ -112,7 +114,7 @@ def to_xml(data: dict[str, Any]) -> bytes:
     lines = ['<?xml version="1.0" encoding="UTF-8"?>']
     lines.append(f'<report schema="{esc(data.get("schema"))}">')
     lines.append("  <metadata>")
-    for k in ("name", "category", "report_type", "generated_at", "timezone"):
+    for k in ("name", "category", "report_type", "generated_at", "timezone", "period_start", "period_end"):
         lines.append(f"    <{k}>{esc(r.get(k))}</{k}>")
     lines.append("  </metadata>")
     lines.append(f'  <tags count="{esc(data.get("tag_count"))}">')
