@@ -26,6 +26,7 @@ from app.api import (
     groups,
     live,
     named_sets,
+    bi,
     register_blocks,
     reports,
     reports_config,
@@ -110,6 +111,7 @@ app.include_router(channels.router)
 app.include_router(devices.router)
 app.include_router(register_blocks.router)
 app.include_router(tags.router)
+app.include_router(bi.router)
 app.include_router(reports.router)
 app.include_router(reports_config.router)
 

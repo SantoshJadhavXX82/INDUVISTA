@@ -40,6 +40,7 @@ import {
   Settings,
   UserCog,
   FileBarChart,
+  PieChart,
   HelpCircle, Info,
   type LucideIcon,
   FileCog,
@@ -95,6 +96,7 @@ function useEntries(alarmCount: number): Section[] {
         { kind: "leaf", to: "/dashboard", label: "Dashboard", icon: Gauge },
         { kind: "leaf", to: "/trend",     label: "Trend",     icon: TrendingUp, matchPrefix: "/trend" },
         { kind: "leaf", to: "/reports",   label: "Reports",   icon: FileBarChart, matchPrefix: "/reports" },
+        { kind: "leaf", to: "/explorer",  label: "Explorer",  icon: PieChart, matchPrefix: "/explorer" },
         { kind: "leaf", to: "/reports/config", label: "Report Config", icon: FileCog, matchPrefix: "/reports/config" },
         {
           kind: "leaf", to: "/alarms", label: "Alarms",
@@ -239,6 +241,7 @@ function SectionBlock({
 
 const NAV_TILE_COLORS: Record<string, string> = {
   "/dashboard": "blue",
+  "/explorer": "purple",
   "/reports": "indigo",
   "/trend": "teal",
   "/alarms": "red",

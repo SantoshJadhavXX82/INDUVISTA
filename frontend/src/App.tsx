@@ -14,6 +14,7 @@ import RegisterBrowser from "@/pages/RegisterBrowser";
 import DataGaps from "@/pages/DataGaps";
 import Historian from "@/pages/Historian";
 import Reports from "@/pages/Reports";
+import Explorer from "@/pages/Explorer";
 import ReportTriggers from "@/pages/ReportTriggers";
 import ReportDestinations from "@/pages/ReportDestinations";
 import ReportsConfig from "@/pages/ReportsConfig";
@@ -83,6 +84,7 @@ function AuthedRoutes() {
         <Route path="/data-gaps" element={<DataGaps />} />
         <Route path="/historian" element={<Historian />} />
         <Route path="/reports" element={<Reports />} />
+        <Route path="/explorer" element={<Explorer />} />
         <Route path="/reports/config" element={<ReportsConfig />} />
         <Route path="/config/report-triggers" element={<ReportTriggers />} />
         <Route path="/config/report-destinations" element={<ReportDestinations />} />
