@@ -33,7 +33,7 @@ from app.db import SessionLocal
 from app.services.report_render import render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
 from app.services.report_aggregate import resolve_report_context
-from app.services.report_revisions import effective_definition
+from app.services.report_revisions import effective_definition, document_header
 from app.services.report_jobs import record_job
 from app.workers.report_schedule import due_instant, tag_condition_fires
 
@@ -229,6 +229,10 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
         ctx["report"]["name"] = dm.get("name") or report_name
         ctx["report"]["category"] = dm.get("category")
         ctx["report"]["report_type"] = dm.get("report_type")
+        # Phase C: document identity (B2 fields) + sign-off provenance.
+        _hdr = document_header(db, report_id)
+        ctx["report"].update(_hdr["identity"])
+        ctx["signoff"] = _hdr["revision"]
 
         stamp = snapshot_at.strftime("%Y%m%d_%H%M%S")
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in report_name)

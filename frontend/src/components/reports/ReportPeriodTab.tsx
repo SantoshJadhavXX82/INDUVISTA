@@ -4,8 +4,9 @@
  *
  * When enabled, the report aggregates each binding over the computed window
  * (see the Data tab for per-tag functions). When disabled, the report renders
- * a live snapshot — the legacy behavior. Shift/batch period types are omitted
- * until their schedules exist (the backend cannot resolve them yet).
+ * a live snapshot — the legacy behavior. Shift uses the plant shift schedule
+ * (Settings → Shifts); the batch period type is omitted until batch records
+ * exist (the backend cannot resolve it yet).
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -32,8 +33,8 @@ type PeriodRule = {
   enabled: boolean;
 };
 
-const PERIOD_TYPES = ["hourly", "daily", "weekly", "monthly", "custom"];
-const PERIOD_TYPE_LABELS = ["Hourly", "Daily", "Weekly", "Monthly", "Custom (offsets)"];
+const PERIOD_TYPES = ["hourly", "daily", "weekly", "monthly", "shift", "custom"];
+const PERIOD_TYPE_LABELS = ["Hourly", "Daily", "Weekly", "Monthly", "Shift", "Custom (offsets)"];
 const PERIOD_RULES = ["previous_completed", "current"];
 const PERIOD_RULE_LABELS = ["Previous completed period", "Current (in-progress) period"];
 const MISSING = ["warn", "hold", "fail"];
@@ -49,7 +50,7 @@ function describe(pt: string, pr: string, boundary: number, cs: number, ce: numb
     return `Each render covers ${cs} to ${ce} minutes relative to the current clock hour.`;
   }
   const rule = pr === "current" ? "the current, in-progress" : "the last completed";
-  const unit = { hourly: "hour", daily: "day", weekly: "week", monthly: "month" }[pt] ?? "period";
+  const unit = { hourly: "hour", daily: "day", weekly: "week", monthly: "month", shift: "shift" }[pt] ?? "period";
   const at = (pt === "daily" || pt === "weekly" || pt === "monthly") && boundary
     ? ` (boundary at +${boundary} min from midnight)`
     : "";

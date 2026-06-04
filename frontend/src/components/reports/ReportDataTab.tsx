@@ -37,8 +37,8 @@ type Row = {
   decimals: string; // text; "" => null
 };
 
-const FUNCS = ["latest", "first", "last", "average", "min", "max", "sum", "count", "delta", "availability"];
-const FUNC_LABELS = ["Latest", "First", "Last", "Average", "Min", "Max", "Total (sum)", "Count", "Delta (last−first)", "Availability %"];
+const FUNCS = ["latest", "first", "last", "average", "min", "max", "sum", "count", "delta", "availability", "missing_pct"];
+const FUNC_LABELS = ["Latest", "First", "Last", "Average", "Min", "Max", "Total (sum)", "Count", "Delta (last−first)", "Availability %", "Missing %"];
 const QUALITY = ["all", "good_only", "good_uncertain"];
 const QUALITY_LABELS = ["Include all", "Good only", "Good + uncertain"];
 

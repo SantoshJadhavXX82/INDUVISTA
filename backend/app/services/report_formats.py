@@ -20,6 +20,64 @@ from xml.sax.saxutils import escape as _xml_escape
 
 
 # --------------------------------------------------------------------------- #
+# Reusable document bands (Phase C). These render the report's identity header #
+# and the sign-off provenance as self-contained HTML (inline styles, so they   #
+# look right even when a template brings no CSS). They are exposed to Jinja2   #
+# templates as the globals header_block() / signoff_block() — opt-in, so       #
+# existing templates are unaffected. Values are escaped; structure is safe.    #
+# --------------------------------------------------------------------------- #
+def _band_value(v: Any):
+    from markupsafe import escape
+    return escape("\u2014" if v is None or v == "" else v)
+
+
+def render_header_band(report: dict[str, Any]) -> str:
+    name = _band_value((report or {}).get("name") or "Report")
+    ps, pe = (report or {}).get("period_start"), (report or {}).get("period_end")
+    period = f"{ps} \u2013 {pe}" if ps else None
+    rows = [
+        ("Report code", (report or {}).get("report_code")),
+        ("Area", (report or {}).get("area")),
+        ("Equipment", (report or {}).get("equipment")),
+        ("Department", (report or {}).get("owner_dept")),
+        ("Period", period),
+        ("Generated", (report or {}).get("generated_at")),
+    ]
+    cells = "".join(
+        f"<tr><th style=\"text-align:left;padding:2px 10px 2px 0;color:#5a6b7b;"
+        f"font-weight:600;white-space:nowrap;vertical-align:top\">{_band_value(k)}</th>"
+        f"<td style=\"padding:2px 0;vertical-align:top\">{_band_value(v)}</td></tr>"
+        for k, v in rows
+    )
+    return (
+        "<header class=\"iv-report-header\" style=\"border-bottom:2px solid #0040A0;"
+        "margin:0 0 12px;padding:0 0 8px\">"
+        f"<h1 style=\"margin:0 0 6px;font-size:18px;color:#0040A0\">{name}</h1>"
+        f"<table style=\"border-collapse:collapse;font-size:11px;color:#1c2530\">{cells}</table>"
+        "</header>"
+    )
+
+
+def render_signoff_band(signoff: dict[str, Any] | None) -> str:
+    base = ("padding:6px 10px;margin:12px 0 0;border-top:1px solid #ccc;"
+            "font-size:11px;color:#1c2530")
+    if not signoff:
+        return (f"<footer class=\"iv-signoff\" style=\"{base};color:#8a6d00;"
+                "background:#fff8e1\">Draft \u2014 not yet approved.</footer>")
+    rev = _band_value(signoff.get("revision_no"))
+    status = _band_value(signoff.get("status"))
+    prep_by, prep_at = _band_value(signoff.get("prepared_by")), _band_value(signoff.get("prepared_at"))
+    appr_by, appr_at = _band_value(signoff.get("approved_by")), _band_value(signoff.get("approved_at"))
+    return (
+        f"<footer class=\"iv-signoff\" style=\"{base}\">"
+        f"<strong>Revision {rev}</strong> ({status})"
+        f" &middot; Prepared by {prep_by} on {prep_at}"
+        f" &middot; Approved by {appr_by} on {appr_at}"
+        "</footer>"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # HTML — same Jinja2 render as PDF, but return the HTML string (no WeasyPrint). #
 # --------------------------------------------------------------------------- #
 def render_html(template_html: str, context: dict[str, Any],
@@ -35,6 +93,15 @@ def render_html(template_html: str, context: dict[str, Any],
         except (TypeError, ValueError):
             return "\u2014"
     env.filters["fmt"] = fmt
+
+    # Phase C: opt-in document bands. Templates can place {{ header_block() }}
+    # and {{ signoff_block() }} to render the standard identity header and
+    # sign-off footer; Markup keeps them from being re-escaped.
+    from markupsafe import Markup
+    _rep = context.get("report") or {}
+    _so = context.get("signoff")
+    env.globals["header_block"] = lambda: Markup(render_header_band(_rep))
+    env.globals["signoff_block"] = lambda: Markup(render_signoff_band(_so))
 
     body = env.from_string(template_html).render(**context)
 
@@ -91,7 +158,12 @@ def build_report_data(context: dict[str, Any]) -> dict[str, Any]:
             "timezone": report.get("timezone"),
             "period_start": report.get("period_start"),
             "period_end": report.get("period_end"),
+            "report_code": report.get("report_code"),
+            "area": report.get("area"),
+            "equipment": report.get("equipment"),
+            "owner_dept": report.get("owner_dept"),
         },
+        "signoff": context.get("signoff"),
         "tags": [tag_row(t) for t in tags_list],
         "tag_count": len(tags_list),
     }
@@ -114,9 +186,19 @@ def to_xml(data: dict[str, Any]) -> bytes:
     lines = ['<?xml version="1.0" encoding="UTF-8"?>']
     lines.append(f'<report schema="{esc(data.get("schema"))}">')
     lines.append("  <metadata>")
-    for k in ("name", "category", "report_type", "generated_at", "timezone", "period_start", "period_end"):
+    for k in ("name", "category", "report_type", "generated_at", "timezone",
+              "period_start", "period_end", "report_code", "area", "equipment", "owner_dept"):
         lines.append(f"    <{k}>{esc(r.get(k))}</{k}>")
     lines.append("  </metadata>")
+    so = data.get("signoff")
+    if so:
+        lines.append(f'  <signoff revision_no="{esc(so.get("revision_no"))}"'
+                     f' status="{esc(so.get("status"))}">')
+        for k in ("prepared_by", "prepared_at", "approved_by", "approved_at"):
+            lines.append(f"    <{k}>{esc(so.get(k))}</{k}>")
+        lines.append("  </signoff>")
+    else:
+        lines.append('  <signoff status="draft"/>')
     lines.append(f'  <tags count="{esc(data.get("tag_count"))}">')
     for t in data.get("tags", []):
         lines.append('    <tag'

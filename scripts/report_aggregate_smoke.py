@@ -76,7 +76,7 @@ def main() -> int:
 
         vals = {f: aggregate_value(db, tag_id, f, start, end, "all")
                 for f in ("latest", "first", "last", "average", "min", "max",
-                          "sum", "count", "delta", "availability")}
+                          "sum", "count", "delta", "availability", "missing_pct")}
 
         cnt = vals["count"]["value"]
         (ok if (cnt or 0) > 0 else bad)("count > 0", f"count={cnt}")
@@ -95,6 +95,17 @@ def main() -> int:
         avail = vals["availability"]["value"]
         (ok if (avail is not None and 0.0 <= avail <= 100.0) else bad)(
             "availability in [0,100]", f"availability={avail}")
+
+        miss = vals["missing_pct"]["value"]
+        (ok if (miss is not None and 0.0 <= miss <= 100.0) else bad)(
+            "missing_pct in [0,100]", f"missing_pct={miss}")
+        # missing_pct is the exact complement of availability when the window
+        # has samples (which it does here, since count > 0).
+        if avail is not None and miss is not None:
+            (ok if abs((avail + miss) - 100.0) < 1e-6 else bad)(
+                "availability + missing_pct == 100", f"{avail} + {miss}")
+        else:
+            bad("availability + missing_pct == 100", f"avail={avail} miss={miss}")
 
         # delta should equal last - first.
         d, fst, lst = vals["delta"]["value"], vals["first"]["value"], vals["last"]["value"]

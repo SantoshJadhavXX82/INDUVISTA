@@ -194,3 +194,54 @@ def effective_definition(db: Session, report_id: int) -> dict[str, Any] | None:
         "template_mode, page_size, orientation FROM report_definitions WHERE id = :id"
     ), {"id": report_id}).mappings().first()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Document header / sign-off (Phase C).
+# Surfaces the report's identity (B2 fields) and the provenance of its active
+# revision (who prepared/approved it, when) so the rendered output (HTML/PDF/
+# JSON/XML) can carry a proper document header and sign-off block. Identity is
+# read from the active snapshot's definition when present (so an activated
+# report shows the approved identity, not later live edits), else from the live
+# definition. revision is None when the report has no active revision (draft).
+# ---------------------------------------------------------------------------
+_IDENTITY_KEYS = ("report_code", "area", "equipment", "owner_dept")
+
+
+def document_header(db: Session, report_id: int) -> dict[str, Any]:
+    identity: dict[str, Any] = {k: None for k in _IDENTITY_KEYS}
+    revision: dict[str, Any] | None = None
+
+    snap = active_config(db, report_id)
+    if snap is not None:
+        defn = snap.get("definition") or {}
+        for k in _IDENTITY_KEYS:
+            identity[k] = defn.get(k)
+        rid = db.execute(text(
+            "SELECT active_revision_id FROM report_definitions WHERE id = :id"
+        ), {"id": report_id}).scalar()
+        rev = get_revision(db, rid) if rid else None
+        if rev:
+            revision = {
+                "revision_no": rev.get("revision_no"),
+                "status": rev.get("status"),
+                "prepared_by": rev.get("created_by"),
+                "prepared_at": rev.get("created_at"),
+                "approved_by": rev.get("activated_by"),
+                "approved_at": rev.get("activated_at"),
+            }
+    else:
+        row = _first(
+            db,
+            "SELECT report_code, area, equipment, owner_dept "
+            "FROM report_definitions WHERE id = :id",
+            id=report_id,
+        )
+        if row:
+            identity = {k: row.get(k) for k in _IDENTITY_KEYS}
+
+    return {
+        "identity": identity,
+        "revision": revision,
+        "status": "active" if revision else "draft",
+    }

@@ -38,7 +38,7 @@ SUSPECT_ST = 64
 
 DATA_FUNCTIONS = (
     "latest", "first", "last", "average", "min", "max",
-    "sum", "count", "delta", "availability",
+    "sum", "count", "delta", "availability", "missing_pct",
 )
 QUALITY_RULES = ("all", "good_only", "good_uncertain")
 MISSING_ACTIONS = ("blank", "warning", "fail", "estimate")
@@ -126,6 +126,11 @@ def aggregate_value(db: Session, tag_id: int, func: str,
             value = float(rows[1][0]) - float(rows[0][0])
     elif func == "availability":
         value = (100.0 * n_good / n_total) if n_total else None
+    elif func == "missing_pct":
+        # Data-completeness as the exact complement of availability: the
+        # percentage of the window's samples that are NOT Good (uncertain or
+        # bad). A window with no samples at all is treated as 100% missing.
+        value = (100.0 * (n_total - n_good) / n_total) if n_total else 100.0
     else:  # average / min / max / sum / count
         agg = _SCALAR_AGG[func]
         col = "value_double" if func != "count" else "value_double"

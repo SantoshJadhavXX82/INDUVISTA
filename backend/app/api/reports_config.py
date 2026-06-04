@@ -40,7 +40,7 @@ from app.services.report_period import (
 from app.services.report_validation import validate_report
 from app.services.report_revisions import (
     create_draft, list_revisions, get_revision, activate_revision,
-    effective_definition,
+    effective_definition, document_header,
 )
 from app.services.report_jobs import record_job, list_jobs
 from app.auth import get_current_user, CurrentUser, require_role, Role
@@ -660,6 +660,10 @@ def render_definition(
     ctx["report"]["name"] = row["name"]
     ctx["report"]["category"] = row["category"]
     ctx["report"]["report_type"] = row["report_type"]
+    # Phase C: document identity (B2 fields) + sign-off provenance.
+    _hdr = document_header(db, def_id)
+    ctx["report"].update(_hdr["identity"])
+    ctx["signoff"] = _hdr["revision"]
 
     # data formats (json/xml) need only the computed data; html/pdf need a template.
     needs_template = format in ("pdf", "html")
