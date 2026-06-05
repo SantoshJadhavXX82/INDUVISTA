@@ -123,6 +123,32 @@ services:
       CONFIG_ROOT: /app/config
       SIM_DEVICE: FLOWCOMP_001
 
+  fg_fc001:
+    build: ./simulators
+    container_name: svj_fg_fc001
+    restart: unless-stopped
+    profiles: ["sim"]
+    ports:
+      - "127.0.0.1:5021:5021"
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      CONFIG_ROOT: /app/config
+      SIM_DEVICE: FUEL_GAS_FC001
+
+  fg_fc002:
+    build: ./simulators
+    container_name: svj_fg_fc002
+    restart: unless-stopped
+    profiles: ["sim"]
+    ports:
+      - "127.0.0.1:5022:5022"
+    volumes:
+      - ./config:/app/config:ro
+    environment:
+      CONFIG_ROOT: /app/config
+      SIM_DEVICE: FUEL_GAS_FC002
+
   modbus_worker:
     build: ./backend
     container_name: svj_modbus_worker

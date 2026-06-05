@@ -30,6 +30,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text
 from app.db import SessionLocal
+from app.services.report_defaults import get_default_style
 from app.services.report_render import render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
 from app.services.report_aggregate import resolve_report_context
@@ -145,7 +146,7 @@ class _UnsupportedFormat(Exception):
     """Raised for a format that has no serializer yet (e.g. csv)."""
 
 
-def _render_one(fmt: str, dm, ctx: dict[str, Any]) -> "tuple[bytes, str]":
+def _render_one(fmt: str, dm, ctx: dict[str, Any], default_style: dict | None = None) -> "tuple[bytes, str]":
     """Render the report context to ONE output format → (bytes, ext).
 
     Mirrors api/reports_config.render_definition's format dispatch so scheduled
@@ -162,7 +163,7 @@ def _render_one(fmt: str, dm, ctx: dict[str, Any]) -> "tuple[bytes, str]":
     blocks = dm.get("template_blocks") or None
     if mode == "blocks" and blocks:
         from app.services.report_blocks import compile_blocks, build_block_context
-        tmpl = compile_blocks(blocks, page, orient)
+        tmpl = compile_blocks(blocks, page, orient, default_style)
         _bc = build_block_context(blocks, ctx.get("tags_list") or [])
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
@@ -260,7 +261,7 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
                 # Render each format at most once across all destinations.
                 try:
                     if fmt not in rendered:
-                        rendered[fmt] = _render_one(fmt, dm, ctx)
+                        rendered[fmt] = _render_one(fmt, dm, ctx, get_default_style(db))
                     payload, ext = rendered[fmt]
                 except _UnsupportedFormat as exc:
                     # e.g. csv — no serializer yet. Log + skip without a record,

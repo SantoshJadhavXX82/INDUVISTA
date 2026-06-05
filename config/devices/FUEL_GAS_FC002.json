@@ -1,0 +1,20 @@
+{
+  "name": "FUEL_GAS_FC002",
+  "description": "Fuel gas flow computer 002 (simulated)",
+  "channel": "MODBUS_NETWORK_01",
+  "template": "fuel_gas_fc",
+  "protocol": "modbus_tcp",
+  "host": "fg_fc002",
+  "port": 5022,
+  "unit_id": 1,
+  "duty_role": "primary",
+  "stale_after_sec": 30,
+  "scan_interval_ms": 1000,
+  "enabled": true,
+  "secondary_host": null,
+  "secondary_port": null,
+  "secondary_unit_id": null,
+  "redundant_device": null,
+  "sim_scale": 1.18,
+  "sim_phase_s": 35.0
+}

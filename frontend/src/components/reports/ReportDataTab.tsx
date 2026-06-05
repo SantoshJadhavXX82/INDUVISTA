@@ -11,12 +11,13 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Save, X } from "lucide-react";
+import { Loader2, Save, X, ListTree } from "lucide-react";
 import { api } from "@/lib/api";
 import { SectionCard } from "@/components/ui/section-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, type TagLite } from "@/pages/triggers-shared";
+import { TagTreePicker } from "@/components/reports/TagTreePicker";
 
 type Binding = {
   tag_id: number;
@@ -89,6 +90,17 @@ export function ReportDataTab({
     }]);
     setFilter("");
   };
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const addTags = (tags: { id: number; name: string }[]) => {
+    setRows((s) => {
+      const have = new Set(s.map((r) => r.tag_id));
+      const adds = tags.filter((t) => !have.has(t.id)).map((t) => ({
+        tag_id: t.id, tag_name: t.name, display_name: "",
+        data_function: "latest", quality_rule: "all", decimals: "",
+      }));
+      return [...s, ...adds];
+    });
+  };
 
   const save = useMutation({
     mutationFn: () => api.put(`/report-config/definitions/${defId}/bindings`, {
@@ -157,8 +169,13 @@ export function ReportDataTab({
         </div>
       )}
 
-      <Input className="mt-2" placeholder="Search tags to add…" value={filter}
-        onChange={(e) => setFilter(e.target.value)} />
+      <div className="mt-2 flex items-center gap-2">
+        <Button variant="outline" size="sm" onClick={() => setPickerOpen(true)}>
+          <ListTree className="h-3.5 w-3.5" /><span className="ml-1">Browse &amp; select tags…</span>
+        </Button>
+        <Input className="flex-1" placeholder="…or quick-search by name" value={filter}
+          onChange={(e) => setFilter(e.target.value)} />
+      </div>
       {filter && (
         <div className="mt-1 max-h-40 overflow-auto rounded-lg" style={{ border: "0.5px solid var(--card-edge,#ddd)" }}>
           {candidates.map((t) => (
@@ -172,6 +189,9 @@ export function ReportDataTab({
           )}
         </div>
       )}
+
+      <TagTreePicker open={pickerOpen} onClose={() => setPickerOpen(false)}
+        onConfirm={addTags} alreadyBound={bound} />
 
       <div className="mt-3 text-[12px]" style={{ color: "var(--ios-gray-1)" }}>
         Functions aggregate over the report's Period window. With no period set, the report

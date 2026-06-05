@@ -14,11 +14,14 @@
  */
 import { useState } from "react";
 import {
-  Plus, Trash2, ChevronUp, ChevronDown, Copy, GripVertical,
+  Plus, Trash2, ChevronUp, ChevronDown, Copy, ChevronRight,
+  Heading, PanelTop, PanelBottom, Palette, Type, Table, Gauge, Table2,
+  BarChart3, Columns, Minus, SeparatorHorizontal, Code, Square,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, Select, type TagLite } from "@/pages/triggers-shared";
+import { StreamTableEditor } from "@/components/reports/StreamTableEditor";
 
 export type Block = { id: string; type: string; [k: string]: any };
 type Column = { key: string; label: string; kind: "data" | "formula"; formula?: string; fmt?: string };
@@ -27,8 +30,12 @@ type Column = { key: string; label: string; kind: "data" | "formula"; formula?: 
 // chart rendering is pending TC-3; nested columns is a later polish).
 const PALETTE: { type: string; label: string; hint: string }[] = [
   { type: "header", label: "Header", hint: "Title + generated timestamp" },
+  { type: "page_header", label: "Page header", hint: "Repeats top of every page (3 slots)" },
+  { type: "page_footer", label: "Page footer", hint: "Repeats bottom of every page (3 slots)" },
+  { type: "report_style", label: "Report style override (optional)", hint: "Override the global default for THIS report; blank fields inherit global" },
   { type: "text", label: "Text", hint: "Paragraph; use {tag:Name} inline" },
   { type: "tag_table", label: "Tag table", hint: "One row per bound tag + calc columns" },
+  { type: "stream_table", label: "Stream table", hint: "Compare devices side-by-side (FC A / FC B)" },
   { type: "kpi_row", label: "KPI row", hint: "Big single-value tiles" },
   { type: "chart", label: "Chart", hint: "Rendering pending (TC-3)" },
   { type: "spacer", label: "Spacer", hint: "Vertical gap" },
@@ -46,6 +53,12 @@ function defaults(type: string): Block {
   const id = shortId(type);
   switch (type) {
     case "header": return { id, type, title_source: "report_name", custom_title: "", show_logo: false, show_generated: true };
+    case "page_header": return { id, type, left: "{report_title}", center: "", right: "{page_of}" };
+    case "page_footer": return { id, type, left: "Generated {generated_at}", center: "", right: "{timezone}" };
+    case "report_style": return { id, type,
+      theme: { font_family: "Segoe UI", font_size_pt: 10, text_color: "#111827",
+        heading_color: "#0B3A67", table_header_bg: "#0B3A67", table_header_fg: "#FFFFFF", alt_row: "#F8FAFC" },
+      time: { basis: "system", format: "%d-%b-%Y %H:%M", show_suffix: true } };
     case "text": return { id, type, content: "" };
     case "tag_table": return { id, type, columns: [
       { key: "name", label: "Tag", kind: "data" },
@@ -53,6 +66,9 @@ function defaults(type: string): Block {
       { key: "unit", label: "Unit", kind: "data" },
     ] as Column[] };
     case "kpi_row": return { id, type, items: [] };
+    case "stream_table": return { id, type, title: "", columns: [
+      { label: "FC A", device_id: null }, { label: "FC B", device_id: null },
+    ], sections: [{ name: "SECTION", rows: [] }] };
     case "chart": return { id, type, title: "" };
     case "spacer": return { id, type, height_mm: 6 };
     case "page_break": return { id, type };
@@ -61,13 +77,61 @@ function defaults(type: string): Block {
   }
 }
 
+const BLOCK_ICON: Record<string, { Icon: any; color: string }> = {
+  header: { Icon: Heading, color: "#2563EB" },
+  page_header: { Icon: PanelTop, color: "#0891B2" },
+  page_footer: { Icon: PanelBottom, color: "#0891B2" },
+  report_style: { Icon: Palette, color: "#7C3AED" },
+  text: { Icon: Type, color: "#64748B" },
+  tag_table: { Icon: Table, color: "#16A34A" },
+  kpi_row: { Icon: Gauge, color: "#EA580C" },
+  stream_table: { Icon: Table2, color: "#4F46E5" },
+  chart: { Icon: BarChart3, color: "#DB2777" },
+  columns: { Icon: Columns, color: "#0D9488" },
+  spacer: { Icon: Minus, color: "#94A3B8" },
+  page_break: { Icon: SeparatorHorizontal, color: "#D97706" },
+  raw: { Icon: Code, color: "#334155" },
+};
+
+function BlockIcon({ type, size = 14 }: { type: string; size?: number }) {
+  const e = BLOCK_ICON[type] ?? { Icon: Square, color: "#94A3B8" };
+  const I = e.Icon;
+  return (
+    <span className="inline-flex items-center justify-center rounded-md shrink-0"
+      style={{ width: size + 12, height: size + 12, background: e.color + "1F", color: e.color }}>
+      <I style={{ width: size, height: size }} />
+    </span>
+  );
+}
+
+function summarize(b: any): string {
+  switch (b.type) {
+    case "text": return (b.content || "").slice(0, 40) || "empty";
+    case "header": return b.title_source === "custom" ? (b.custom_title || "custom title") : "report name";
+    case "page_header":
+    case "page_footer": return [b.left, b.center, b.right].filter(Boolean).join(" · ") || "empty";
+    case "report_style": return "theme / time override";
+    case "stream_table": return `${(b.columns || []).length} cols · ${(b.sections || []).length} sections`;
+    case "tag_table": return `${(b.columns || []).length} columns`;
+    case "kpi_row": return `${(b.items || []).length} tiles`;
+    case "spacer": return `${b.height_mm ?? ""}mm`;
+    default: return b.type;
+  }
+}
+
 export function ReportBlocksEditor({
-  value, onChange, allTags,
-}: { value: Block[]; onChange: (b: Block[]) => void; allTags: TagLite[] }) {
+  value, onChange, allTags, page,
+}: { value: Block[]; onChange: (b: Block[]) => void; allTags: TagLite[]; page?: { size: string; orientation: string } }) {
   const blocks = Array.isArray(value) ? value : [];
   const [adding, setAdding] = useState(false);
+  const [advanced, setAdvanced] = useState(false);
+  const [open, setOpen] = useState<Record<string, boolean>>({});
+  const toggleOpen = (id: string) => setOpen((o) => ({ ...o, [id]: !o[id] }));
+  // Page geometry is a per-report property (Settings tab), not part of the
+  // theme cascade — the stream-table overflow check uses it directly.
+  const pageSettings = { size: page?.size ?? "A4", orientation: page?.orientation ?? "portrait" };
 
-  const add = (type: string) => { onChange([...blocks, defaults(type)]); setAdding(false); };
+  const add = (type: string) => { const nb = defaults(type); onChange([...blocks, nb]); setOpen((o) => ({ ...o, [nb.id]: true })); setAdding(false); };
   const update = (i: number, patch: Partial<Block>) =>
     onChange(blocks.map((b, j) => (j === i ? { ...b, ...patch } : b)));
   const remove = (i: number) => onChange(blocks.filter((_, j) => j !== i));
@@ -83,6 +147,36 @@ export function ReportBlocksEditor({
 
   return (
     <div className="space-y-2">
+      {/* Basic / Advanced + expand-all */}
+      <div className="flex items-center justify-between">
+        <div className="inline-flex rounded-lg p-0.5" style={{ border: "0.5px solid var(--separator)", backgroundColor: "var(--bg-grouped)" }}>
+          {([["basic", "Basic"], ["adv", "Advanced"]] as const).map(([k, label]) => {
+            const on = (k === "adv") === advanced;
+            return (
+              <button key={k} type="button" onClick={() => setAdvanced(k === "adv")}
+                className="px-3 py-1 rounded-md text-[12px] font-medium"
+                style={on ? { backgroundColor: "var(--bg-elevated)", color: "var(--ios-blue)" } : { color: "var(--ios-gray-1)" }}>
+                {label}
+              </button>
+            );
+          })}
+        </div>
+        {blocks.length > 0 && (
+          <button type="button" className="text-[11px]" style={{ color: "var(--ios-blue)" }}
+            onClick={() => {
+              const allOpen = blocks.every((b) => open[b.id]);
+              setOpen(Object.fromEntries(blocks.map((b) => [b.id, !allOpen])));
+            }}>
+            {blocks.every((b) => open[b.id]) ? "Collapse all" : "Expand all"}
+          </button>
+        )}
+      </div>
+      {!advanced && (
+        <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+          Basic mode hides per-block fonts/colors, banding and section styling. Switch to Advanced to fine-tune.
+        </p>
+      )}
+
       {blocks.length === 0 && (
         <div className="rounded-lg p-4 text-center text-[12px]"
           style={{ border: "1px dashed var(--separator)", color: "var(--ios-gray-1)" }}>
@@ -90,18 +184,25 @@ export function ReportBlocksEditor({
         </div>
       )}
 
-      {blocks.map((b, i) => (
+      {blocks.map((b, i) => {
+        const isOpen = !!open[b.id];
+        return (
         <div key={b.id} className="rounded-lg overflow-hidden"
           style={{ border: "0.5px solid var(--separator)", backgroundColor: "var(--bg-elevated)" }}>
-          {/* block header bar */}
-          <div className="flex items-center gap-2 px-3 py-2"
-            style={{ borderBottom: "0.5px solid var(--separator)", backgroundColor: "var(--bg-grouped)" }}>
-            <GripVertical className="h-3.5 w-3.5 opacity-40" />
+          {/* block header bar (click to expand/collapse) */}
+          <div className="flex items-center gap-2 px-3 py-2 cursor-pointer"
+            style={{ borderBottom: isOpen ? "0.5px solid var(--separator)" : "none", backgroundColor: "var(--bg-grouped)" }}
+            onClick={() => toggleOpen(b.id)}>
+            <ChevronRight className="h-3.5 w-3.5 opacity-50 transition-transform"
+              style={{ transform: isOpen ? "rotate(90deg)" : "none" }} />
+            <BlockIcon type={b.type} />
             <span className="text-[12px] font-semibold" style={{ color: "var(--text-primary)" }}>
               {PALETTE.find((p) => p.type === b.type)?.label ?? b.type}
             </span>
-            <code className="text-[10px] opacity-50">{b.id}</code>
-            <div className="ml-auto flex items-center gap-1">
+            {!isOpen && (
+              <span className="text-[11px] truncate" style={{ color: "var(--ios-gray-1)" }}>· {summarize(b)}</span>
+            )}
+            <div className="ml-auto flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
               <IconBtn title="Move up" disabled={i === 0} onClick={() => move(i, -1)}><ChevronUp className="h-3.5 w-3.5" /></IconBtn>
               <IconBtn title="Move down" disabled={i === blocks.length - 1} onClick={() => move(i, 1)}><ChevronDown className="h-3.5 w-3.5" /></IconBtn>
               <IconBtn title="Duplicate" onClick={() => duplicate(i)}><Copy className="h-3.5 w-3.5" /></IconBtn>
@@ -109,11 +210,21 @@ export function ReportBlocksEditor({
             </div>
           </div>
           {/* block body */}
+          {isOpen && (
           <div className="p-3">
-            <BlockBody block={b} onPatch={(p) => update(i, p)} allTags={allTags} />
+            <BlockBody block={b} onPatch={(p) => update(i, p)} allTags={allTags} page={pageSettings} advanced={advanced} />
+            {advanced && STYLEABLE.has(b.type) && (
+              <details className="mt-2 rounded-md" style={{ border: "0.5px solid var(--separator)" }}>
+                <summary className="cursor-pointer px-2 py-1 text-[11px] font-medium"
+                  style={{ color: "var(--ios-gray-1)" }}>Style (font, color, border)</summary>
+                <div className="p-2 pt-1"><StylePanel block={b} onPatch={(p) => update(i, p)} /></div>
+              </details>
+            )}
           </div>
+          )}
         </div>
-      ))}
+        );
+      })}
 
       {/* add-block palette */}
       {adding ? (
@@ -121,10 +232,13 @@ export function ReportBlocksEditor({
           style={{ border: "0.5px solid var(--separator)", gridTemplateColumns: "repeat(2, 1fr)" }}>
           {PALETTE.map((p) => (
             <button key={p.type} onClick={() => add(p.type)}
-              className="text-left rounded-md px-2.5 py-1.5 hover:opacity-80"
+              className="text-left rounded-md px-2.5 py-1.5 hover:opacity-80 flex items-center gap-2"
               style={{ border: "0.5px solid var(--separator)", backgroundColor: "var(--bg-elevated)" }}>
-              <div className="text-[12px] font-medium" style={{ color: "var(--text-primary)" }}>{p.label}</div>
-              <div className="text-[10px]" style={{ color: "var(--ios-gray-1)" }}>{p.hint}</div>
+              <BlockIcon type={p.type} />
+              <span className="min-w-0">
+                <div className="text-[12px] font-medium truncate" style={{ color: "var(--text-primary)" }}>{p.label}</div>
+                <div className="text-[10px] truncate" style={{ color: "var(--ios-gray-1)" }}>{p.hint}</div>
+              </span>
             </button>
           ))}
           <button onClick={() => setAdding(false)}
@@ -152,8 +266,8 @@ function IconBtn({
 }
 
 function BlockBody({
-  block, onPatch, allTags,
-}: { block: Block; onPatch: (p: Partial<Block>) => void; allTags: TagLite[] }) {
+  block, onPatch, allTags, page, advanced,
+}: { block: Block; onPatch: (p: Partial<Block>) => void; allTags: TagLite[]; page?: { size: string; orientation: string }; advanced?: boolean }) {
   const inputStyle = {
     backgroundColor: "var(--bg, #fff)",
     border: "0.5px solid var(--separator)",
@@ -186,6 +300,14 @@ function BlockBody({
     );
   }
 
+  if (block.type === "report_style") {
+    return <ReportStyleEditor block={block} onPatch={onPatch} advanced={advanced} />;
+  }
+
+  if (block.type === "page_header" || block.type === "page_footer") {
+    return <HeaderFooterEditor block={block} onPatch={onPatch} />;
+  }
+
   if (block.type === "text") {
     return (
       <Field label="Text — insert a tag value with {tag:TagName}">
@@ -197,7 +319,21 @@ function BlockBody({
   }
 
   if (block.type === "tag_table") {
-    return <ColumnsEditor columns={(block.columns ?? []) as Column[]} onChange={(cols) => onPatch({ columns: cols })} />;
+    return (
+      <>
+        <ColumnsEditor columns={(block.columns ?? []) as Column[]} onChange={(cols) => onPatch({ columns: cols })} />
+        {advanced && <BandingControls block={block} onPatch={onPatch} />}
+      </>
+    );
+  }
+
+  if (block.type === "stream_table") {
+    return (
+      <>
+        <StreamTableEditor block={block} onPatch={onPatch} page={page} advanced={advanced} />
+        {advanced && <BandingControls block={block} onPatch={onPatch} />}
+      </>
+    );
   }
 
   if (block.type === "kpi_row") {
@@ -241,6 +377,182 @@ function BlockBody({
   }
 
   return <p className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>Unknown block type.</p>;
+}
+
+const FONTS = ["Segoe UI", "Arial", "Calibri", "Times New Roman", "Verdana", "Tahoma", "Roboto", "Noto Sans", "Courier New"];
+const STYLEABLE = new Set(["text", "header", "stream_table", "kpi_row"]);
+
+function ColorField({ label, value, onChange }: { label: string; value?: string; onChange: (v: string) => void }) {
+  const v = value ?? "";
+  const hex = /^#[0-9a-fA-F]{6}$/.test(v) ? v : "#000000";
+  return (
+    <Field label={label}>
+      <div className="flex items-center gap-2">
+        <input type="color" value={hex} onChange={(e) => onChange(e.target.value)}
+          style={{ width: 30, height: 26, border: "0.5px solid var(--separator)", borderRadius: 4, padding: 0, background: "transparent" }} />
+        <Input value={v} placeholder="#RRGGBB (blank = inherit)" onChange={(e) => onChange(e.target.value)} />
+        {v && <button type="button" onClick={() => onChange("")} className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>clear</button>}
+      </div>
+    </Field>
+  );
+}
+
+export function ReportStyleEditor({ block, onPatch, scope = "report", advanced = true }:
+  { block: Block; onPatch: (p: Partial<Block>) => void; scope?: "global" | "report"; advanced?: boolean }) {
+  const th = block.theme ?? {};
+  const tm = block.time ?? {};
+  const isGlobal = scope === "global";
+  const inheritPh = isGlobal ? "same as body" : "inherit";
+  const setTheme = (k: string, v: any) => onPatch({ theme: { ...th, [k]: v } });
+  const setTime = (k: string, v: any) => onPatch({ time: { ...tm, [k]: v } });
+  return (
+    <div className="space-y-2">
+      {isGlobal && (
+        <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+          Page size &amp; orientation are set per report on its <b>Settings</b> tab — not here.
+        </p>
+      )}
+      <div className="text-[11px] font-semibold pt-1" style={{ color: "var(--ios-gray-1)" }}>TIME</div>
+      <Field label="Time basis (display; storage stays UTC)">
+        <Select value={tm.basis ?? "system"} options={["system", "utc"]}
+          labels={["System (Asia/Kolkata)", "UTC"]} onChange={(v) => setTime("basis", v)} />
+      </Field>
+      <Field label="Time format (strftime)">
+        <Input value={tm.format ?? ""} placeholder="%d-%b-%Y %H:%M" onChange={(e) => setTime("format", e.target.value)} />
+      </Field>
+      <label className="flex items-center gap-2 text-[12px]" style={{ color: "var(--text-primary)" }}>
+        <input type="checkbox" checked={!!tm.show_suffix} onChange={(e) => setTime("show_suffix", e.target.checked)} />
+        Show timezone suffix (e.g. IST / UTC)
+      </label>
+      <div className="text-[11px] font-semibold pt-1" style={{ color: "var(--ios-gray-1)" }}>THEME</div>
+      <Field label="Primary font">
+        <Select value={th.font_family ?? "Segoe UI"} options={FONTS} labels={FONTS} onChange={(v) => setTheme("font_family", v)} />
+      </Field>
+      <Field label="Base font size (pt)">
+        <Input type="number" value={String(th.font_size_pt ?? 10)} onChange={(e) => setTheme("font_size_pt", Number(e.target.value) || 10)} />
+      </Field>
+      <ColorField label="Body text" value={th.text_color} onChange={(v) => setTheme("text_color", v)} />
+      <ColorField label="Heading color" value={th.heading_color} onChange={(v) => setTheme("heading_color", v)} />
+      {advanced && (<>
+      <div className="text-[11px] font-semibold pt-1" style={{ color: "var(--ios-gray-1)" }}>SECTION HEADINGS</div>
+      <ColorField label="Section text color" value={th.section_color} onChange={(v) => setTheme("section_color", v)} />
+      <ColorField label="Section background (band)" value={th.section_bg} onChange={(v) => setTheme("section_bg", v)} />
+      <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <Field label="Section size (pt)">
+          <Input type="number" value={th.section_size_pt ? String(th.section_size_pt) : ""} placeholder={inheritPh}
+            onChange={(e) => setTheme("section_size_pt", e.target.value ? Number(e.target.value) : undefined)} />
+        </Field>
+        <label className="flex items-center gap-2 text-[12px] self-end" style={{ color: "var(--text-primary)" }}>
+          <input type="checkbox" checked={!!th.section_caps} onChange={(e) => setTheme("section_caps", e.target.checked || undefined)} /> UPPERCASE
+        </label>
+      </div>
+      <ColorField label="Table header background" value={th.table_header_bg} onChange={(v) => setTheme("table_header_bg", v)} />
+      <ColorField label="Table header text" value={th.table_header_fg} onChange={(v) => setTheme("table_header_fg", v)} />
+      <ColorField label="Alternate row" value={th.alt_row} onChange={(v) => setTheme("alt_row", v)} />
+      </>)}
+      <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+        {isGlobal
+          ? "These defaults apply to every report. A blank field uses the built-in base value (e.g. section size = body size)."
+          : "Overrides the global default for this report only. Leave a field blank to inherit the global default; delete this block to follow the global default entirely."}
+      </p>
+    </div>
+  );
+}
+
+function BandingControls({ block, onPatch }: { block: Block; onPatch: (p: Partial<Block>) => void }) {
+  return (
+    <div className="mt-3 rounded-md p-2" style={{ border: "0.5px solid var(--separator)" }}>
+      <div className="text-[11px] font-semibold mb-1" style={{ color: "var(--ios-gray-1)" }}>BANDING</div>
+      <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <label className="flex items-center gap-2 text-[12px] self-end" style={{ color: "var(--text-primary)" }}>
+          <input type="checkbox" checked={!!block.band_rows} onChange={(e) => onPatch({ band_rows: e.target.checked })} /> Banded rows
+        </label>
+        {block.band_rows
+          ? <ColorField label="Row band color" value={block.band_row_color} onChange={(v) => onPatch({ band_row_color: v || undefined })} />
+          : <div />}
+        <label className="flex items-center gap-2 text-[12px] self-end" style={{ color: "var(--text-primary)" }}>
+          <input type="checkbox" checked={!!block.band_cols} onChange={(e) => onPatch({ band_cols: e.target.checked })} /> Banded columns
+        </label>
+        {block.band_cols
+          ? <ColorField label="Column band color" value={block.band_col_color} onChange={(v) => onPatch({ band_col_color: v || undefined })} />
+          : <div />}
+      </div>
+      <p className="text-[11px] mt-1" style={{ color: "var(--ios-gray-1)" }}>
+        Shades alternate data rows / data columns for readability (PDF + HTML).
+      </p>
+    </div>
+  );
+}
+
+function StylePanel({ block, onPatch }: { block: Block; onPatch: (p: Partial<Block>) => void }) {
+  const st = block.style ?? {};
+  const font = st.font ?? {}, text = st.text ?? {}, border = st.border ?? {};
+  const setFont = (k: string, v: any) => onPatch({ style: { ...st, font: { ...font, [k]: v } } });
+  const setText = (k: string, v: any) => onPatch({ style: { ...st, text: { ...text, [k]: v } } });
+  const setBorder = (k: string, v: any) => onPatch({ style: { ...st, border: { ...border, [k]: v } } });
+  const setBg = (v: string) => onPatch({ style: { ...st, background: v ? { type: "solid", color: v } : undefined } });
+  return (
+    <div className="grid gap-2" style={{ gridTemplateColumns: "1fr 1fr" }}>
+      <Field label="Font"><Select value={font.family ?? ""} options={["", ...FONTS]} labels={["Inherit", ...FONTS]}
+        onChange={(v) => setFont("family", v || undefined)} /></Field>
+      <Field label="Size (pt)"><Input type="number" value={font.size_pt ? String(font.size_pt) : ""} placeholder="inherit"
+        onChange={(e) => setFont("size_pt", e.target.value ? Number(e.target.value) : undefined)} /></Field>
+      <Field label="Weight"><Select value={font.weight ?? ""} options={["", "regular", "bold"]} labels={["Inherit", "Regular", "Bold"]}
+        onChange={(v) => setFont("weight", v || undefined)} /></Field>
+      <Field label="Case"><Select value={font.case ?? "as_typed"} options={["as_typed", "uppercase", "lowercase", "capitalize"]}
+        labels={["As typed", "UPPER", "lower", "Capitalize"]} onChange={(v) => setFont("case", v)} /></Field>
+      <Field label="Align"><Select value={text.horizontal_align ?? ""} options={["", "left", "center", "right", "justify"]}
+        labels={["Inherit", "Left", "Center", "Right", "Justify"]} onChange={(v) => setText("horizontal_align", v || undefined)} /></Field>
+      <label className="flex items-center gap-2 text-[12px] self-end" style={{ color: "var(--text-primary)" }}>
+        <input type="checkbox" checked={!!font.italic} onChange={(e) => setFont("italic", e.target.checked || undefined)} /> Italic
+      </label>
+      <ColorField label="Text color" value={text.color} onChange={(v) => setText("color", v || undefined)} />
+      <ColorField label="Background" value={st.background?.color} onChange={setBg} />
+      <label className="flex items-center gap-2 text-[12px] self-end" style={{ color: "var(--text-primary)" }}>
+        <input type="checkbox" checked={!!border.enabled} onChange={(e) => setBorder("enabled", e.target.checked)} /> Border
+      </label>
+      {border.enabled && <ColorField label="Border color" value={border.color} onChange={(v) => setBorder("color", v || undefined)} />}
+    </div>
+  );
+}
+
+const HF_TOKENS = ["{page_of}", "{page}", "{pages}", "{report_title}", "{generated_at}", "{timezone}"];
+
+function HeaderFooterEditor({ block, onPatch }: { block: Block; onPatch: (p: Partial<Block>) => void }) {
+  const [target, setTarget] = useState<"left" | "center" | "right">("left");
+  const isHeader = block.type === "page_header";
+  const slots: ("left" | "center" | "right")[] = ["left", "center", "right"];
+  const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
+  return (
+    <div className="space-y-2">
+      {slots.map((s) => (
+        <Field key={s} label={`${cap(s)} ${isHeader ? "(header)" : "(footer)"}`}>
+          <Input value={block[s] ?? ""} placeholder={isHeader ? "" : s === "center" ? "e.g. {page_of}" : ""}
+            onChange={(e) => onPatch({ [s]: e.target.value })} />
+        </Field>
+      ))}
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <span className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>Insert token into</span>
+        <Select value={target} options={["left", "center", "right"]} labels={["Left", "Center", "Right"]}
+          onChange={(v) => setTarget(v as "left" | "center" | "right")} />
+      </div>
+      <div className="flex flex-wrap gap-1">
+        {HF_TOKENS.map((t) => (
+          <button key={t} type="button"
+            onClick={() => onPatch({ [target]: `${block[target] ?? ""}${t}` })}
+            className="rounded px-1.5 py-0.5 text-[11px]"
+            style={{ border: "0.5px solid var(--separator)", color: "var(--text-primary)" }}>
+            {t}
+          </button>
+        ))}
+      </div>
+      <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+        Repeats on every PDF page. <code>{"{page}"}</code>/<code>{"{pages}"}</code>/<code>{"{page_of}"}</code> are
+        live page numbers (PDF only); <code>{"{report_title}"}</code> <code>{"{generated_at}"}</code>{" "}
+        <code>{"{timezone}"}</code> fill from the report. Plain text is allowed.
+      </p>
+    </div>
+  );
 }
 
 function ColumnsEditor({ columns, onChange }: { columns: Column[]; onChange: (c: Column[]) => void }) {
@@ -297,7 +609,7 @@ function KpiItemsEditor({
 }: { items: any[]; onChange: (i: any[]) => void; allTags: TagLite[] }) {
   const update = (i: number, patch: any) => onChange(items.map((it, j) => (j === i ? { ...it, ...patch } : it)));
   const remove = (i: number) => onChange(items.filter((_, j) => j !== i));
-  const add = () => onChange([...items, { tag_id: allTags[0]?.id ?? 0, label: "" }]);
+  const add = () => onChange([...items, { tag_id: allTags[0]?.id ?? 0, label: "", unit: "", decimals: undefined }]);
   const tagOptions = allTags.map((t) => String(t.id));
   const tagLabels = allTags.map((t) => t.name);
 
@@ -308,13 +620,20 @@ function KpiItemsEditor({
       )}
       {items.map((it, i) => (
         <div key={i} className="rounded-md p-2 grid gap-2"
-          style={{ border: "0.5px solid var(--separator)", gridTemplateColumns: "1fr 1fr auto" }}>
+          style={{ border: "0.5px solid var(--separator)", gridTemplateColumns: "1.3fr 1.3fr 0.9fr 0.6fr auto" }}>
           <Field label="Tag">
             <Select value={String(it.tag_id ?? "")} options={tagOptions} labels={tagLabels}
               onChange={(v) => update(i, { tag_id: Number(v) })} />
           </Field>
           <Field label="Label">
             <Input value={it.label ?? ""} onChange={(e) => update(i, { label: e.target.value })} />
+          </Field>
+          <Field label="Unit">
+            <Input value={it.unit ?? ""} onChange={(e) => update(i, { unit: e.target.value })} />
+          </Field>
+          <Field label="Dec">
+            <Input type="number" value={it.decimals != null ? String(it.decimals) : ""} placeholder="auto"
+              onChange={(e) => update(i, { decimals: e.target.value !== "" ? Number(e.target.value) : undefined })} />
           </Field>
           <div className="flex items-end pb-1">
             <IconBtn title="Remove tile" onClick={() => remove(i)} danger><Trash2 className="h-3.5 w-3.5" /></IconBtn>

@@ -19,7 +19,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Plus, Trash2, Save, FileDown, Clock, FolderOutput, Tags as TagsIcon,
   Loader2, FileText, CheckCircle2, AlertCircle, LayoutGrid, Settings as SettingsIcon, Settings2, Boxes,
-  Calendar, History,
+  Calendar, History, Palette,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { TOKEN_KEY } from "@/lib/auth";
@@ -39,7 +39,7 @@ import { BatchControl } from "@/components/reports/BatchControl";
 import { ReportPeriodTab } from "@/components/reports/ReportPeriodTab";
 import { ReportDataTab } from "@/components/reports/ReportDataTab";
 import { ReportRevisionsTab } from "@/components/reports/ReportRevisionsTab";
-import { ReportBlocksEditor, type Block } from "@/components/reports/ReportBlocksEditor";
+import { ReportBlocksEditor, ReportStyleEditor, type Block } from "@/components/reports/ReportBlocksEditor";
 
 // ---- types mirroring the backend ----------------------------------------
 type Definition = {
@@ -58,10 +58,10 @@ type Definition = {
 type Destination = { id: number; name: string; dest_type: string; target: string; default_fmts?: string; owner_report_id?: number | null };
 
 const CATEGORIES = ["periodic", "event", "on_demand"];
-const PAGE_SIZES = ["A4", "Letter"];
+const PAGE_SIZES = ["A4", "A3", "Letter", "Legal"];
 const ORIENTATIONS = ["portrait", "landscape"];
 
-type TopTab = "definitions" | "triggers" | "destinations" | "batch";
+type TopTab = "definitions" | "triggers" | "destinations" | "batch" | "defaults";
 
 export default function ReportsConfig() {
   const qc = useQueryClient();
@@ -73,7 +73,7 @@ export default function ReportsConfig() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get("tab");
   const [topTab, setTopTab] = useState<TopTab>(
-    tabParam === "triggers" || tabParam === "destinations" || tabParam === "batch" ? tabParam : "definitions",
+    tabParam === "triggers" || tabParam === "destinations" || tabParam === "batch" || tabParam === "defaults" ? tabParam : "definitions",
   );
   const switchTab = (t: TopTab) => {
     setTopTab(t);
@@ -157,6 +157,7 @@ export default function ReportsConfig() {
           { id: "triggers" as const, label: "Triggers", icon: <Clock className="h-3.5 w-3.5" /> },
           { id: "destinations" as const, label: "Destinations", icon: <FolderOutput className="h-3.5 w-3.5" /> },
           { id: "batch" as const, label: "Batch", icon: <Boxes className="h-3.5 w-3.5" /> },
+          { id: "defaults" as const, label: "Defaults", icon: <Palette className="h-3.5 w-3.5" /> },
         ]).map((t) => (
           <button
             key={t.id}
@@ -246,6 +247,7 @@ export default function ReportsConfig() {
       {topTab === "triggers" && <ReportTriggers embedded />}
       {topTab === "destinations" && <ReportDestinations embedded />}
       {topTab === "batch" && <BatchControl />}
+      {topTab === "defaults" && <ReportDefaultsTab />}
     </div>
   );
 }
@@ -536,6 +538,7 @@ function Editor({
             value={(form.template_blocks ?? []) as Block[]}
             onChange={(b) => set("template_blocks", b)}
             allTags={allTags}
+            page={{ size: form.page_size ?? "A4", orientation: form.orientation ?? "portrait" }}
           />
         ) : (
           <>
@@ -713,3 +716,49 @@ function Editor({
 }
 
 // ---- small helpers --------------------------------------------------------
+
+// ---- Theme Manager: global report defaults --------------------------------
+function ReportDefaultsTab() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["report-default-style"], queryFn: () => api.get<any>("/report-config/default-style") });
+  const [draft, setDraft] = useState<any>(null);
+  const [msg, setMsg] = useState<string>("");
+  useEffect(() => {
+    if (!q.data) return;
+    const d = q.data || {};
+    setDraft({
+      type: "report_style",
+      theme: d.theme ?? {
+        font_family: "Segoe UI", font_size_pt: 10, text_color: "#111827",
+        heading_color: "#0B3A67", table_header_bg: "#0B3A67", table_header_fg: "#FFFFFF", alt_row: "#F8FAFC",
+      },
+      time: d.time ?? { basis: "system", format: "%d-%b-%Y %H:%M", show_suffix: true },
+    });
+  }, [q.data]);
+  const save = useMutation({
+    mutationFn: () => api.put("/report-config/default-style", { theme: draft.theme, time: draft.time }),
+    onSuccess: () => { setMsg("Saved. Reports without their own theme block now use these."); qc.invalidateQueries({ queryKey: ["report-default-style"] }); },
+    onError: (e: any) => setMsg(e?.message || "Save failed — admin role required."),
+  });
+  if (!draft) {
+    return <SectionCard title="Report defaults"><div className="p-4 text-[13px]" style={{ color: "var(--ios-gray-1)" }}>Loading…</div></SectionCard>;
+  }
+  return (
+    <div style={{ maxWidth: 560 }}>
+      <SectionCard title="Global report defaults — theme · time · page">
+        <div className="p-3 space-y-3">
+          <p className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>
+            Applied to every report. A report only needs its own “Report style &amp; theme” block to override specific values.
+          </p>
+          <ReportStyleEditor block={draft as Block} onPatch={(p) => setDraft({ ...draft, ...p })} scope="global" />
+          <div className="flex items-center gap-3 pt-1">
+            <Button onClick={() => save.mutate()} disabled={save.isPending}>
+              <Save className="h-3.5 w-3.5" /><span className="ml-1">{save.isPending ? "Saving…" : "Save defaults"}</span>
+            </Button>
+            {msg && <span className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>{msg}</span>}
+          </div>
+        </div>
+      </SectionCard>
+    </div>
+  );
+}

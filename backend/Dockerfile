@@ -18,6 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libffi-dev \
         shared-mime-info \
         fonts-dejavu-core \
+        fonts-liberation \
+        fonts-crosextra-carlito \
+        fonts-noto-core \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first so this layer is cached when only

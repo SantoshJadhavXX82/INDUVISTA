@@ -157,6 +157,15 @@ def compute_tag_table(columns: list[dict], rows_data: list[dict]) -> dict[str, A
         for c in agg_formula_cols:
             r[c["key"]] = _eval_agg_formula(c["formula"], aggregates, r, se)
 
+    # Guarantee every column key exists on every row. A formula that could not
+    # be evaluated (e.g. the tag has no value) leaves its key unset above; the
+    # compiled template references row["<key>"] under StrictUndefined, so a
+    # missing key would crash the whole render. Default such cells to None,
+    # which the cell template renders as "—".
+    for r in rows:
+        for c in columns:
+            r.setdefault(c["key"], None)
+
     return {"rows": rows, "aggregates": {f"{k[0]}:{k[1]}": v for k, v in aggregates.items()}}
 
 
@@ -185,12 +194,13 @@ def _compile_block(b: dict, idx: int) -> str:
     if t == "header":
         title = "{{ report.name }}" if b.get("title_source", "report_name") == "report_name" \
             else _esc(b.get("custom_title", ""))
-        parts = [f'<div class="rpt-header">']
+        parts = [f'<div class="rpt-header"{_inline_style(b)}>']
         if b.get("show_logo", True):
             parts.append('{% if report.logo is defined and report.logo %}<img class="rpt-logo" src="{{ report.logo }}"/>{% endif %}')
         parts.append(f"<h1>{title}</h1>")
         if b.get("show_generated", True):
-            parts.append('<div class="rpt-gen">Generated {{ report.generated_at }} · {{ report.timezone }}</div>')
+            parts.append('<div class="rpt-gen">Generated '
+                         '{{ report.generated_at | localtime(report.timezone, "%d-%b-%Y %H:%M", True) }}</div>')
         parts.append("</div>")
         return "\n".join(parts)
 
@@ -200,7 +210,7 @@ def _compile_block(b: dict, idx: int) -> str:
         def tagsub(m):
             return f'{{{{ tag("{m.group(1)}").display }}}}'
         content = re.sub(r"\{tag:([^}]+)\}", tagsub, _esc(content))
-        return f'<p class="rpt-text">{content}</p>'
+        return f'<p class="rpt-text"{_inline_style(b)}>{content}</p>'
 
     if t == "tag_table":
         # The table's resolved rows are precomputed into context["tables"][bid].
@@ -223,7 +233,8 @@ def _compile_block(b: dict, idx: int) -> str:
             cells.append(f'<td style="text-align:{align}"{cls}>{disp}</td>')
         rowtpl = "".join(cells)
         return (
-            f'<table class="rpt-table">'
+            f'{_band_css(bid, b, "table")}'
+            f'<table id="{bid}" class="rpt-table">'
             f"<thead><tr>{head}</tr></thead><tbody>"
             f'{{% for row in tables["{bid}"].rows %}}<tr>{rowtpl}</tr>{{% endfor %}}'
             f"</tbody></table>"
@@ -235,12 +246,18 @@ def _compile_block(b: dict, idx: int) -> str:
         for it in items:
             tid = it.get("tag_id")
             label = _esc(it.get("label", ""))
+            unit = _esc(it.get("unit", ""))
+            dec = it.get("decimals")
+            if dec is None or dec == "":
+                val = f'{{{{ tag({tid}).display }}}}'
+            else:
+                val = f'{{{{ tag({tid}).value | fmt({int(dec)}) }}}}'
+            unit_html = f'<span class="kpi-unit">{unit}</span>' if unit else ""
             cells.append(
-                f'<div class="rpt-kpi"><div class="kpi-val">'
-                f'{{{{ tag({tid}).display }}}}</div>'
+                f'<div class="rpt-kpi"><div class="kpi-val">{val}{unit_html}</div>'
                 f'<div class="kpi-lbl">{label}</div></div>'
             )
-        return f'<div class="rpt-kpis">{"".join(cells)}</div>'
+        return f'<div class="rpt-kpis"{_inline_style(b)}>{"".join(cells)}</div>'
 
     if t == "chart":
         # The SVG is rendered at context-build time into context["charts"][bid].
@@ -254,6 +271,54 @@ def _compile_block(b: dict, idx: int) -> str:
             sub = "\n".join(_compile_block(pb, j) for j, pb in enumerate(panel))
             inner.append(f'<div class="rpt-col">{sub}</div>')
         return f'<div class="rpt-cols" style="grid-template-columns:repeat({n},1fr)">{"".join(inner)}</div>'
+
+    if t == "stream_table":
+        # No-code multi-stream comparison table: rows = measurements, columns =
+        # devices/streams. Each cell carries a resolved tag_id (or null → em-dash);
+        # decimals null → use the tag's own display. Built/edited visually in the UI.
+        cols = b.get("columns", []) or []
+        secs = b.get("sections", []) or []
+        ncol = len(cols)
+        span = 2 + ncol
+        band_rows = bool(b.get("band_rows"))
+        band_cols = bool(b.get("band_cols"))
+        out = []
+        if b.get("title"):
+            out.append(f'<div class="rpt-text" style="font-weight:700">{_esc(b.get("title"))}</div>')
+        out.append(_band_css(bid, b, "stream"))
+        out.append('<table id="%s" class="rpt-stream"%s>' % (bid, _inline_style(b)))
+        out.append('<tr class="rpt-stream-head"><td></td><td></td>'
+                   + "".join(f'<td>{_esc(c.get("label", ""))}</td>' for c in cols)
+                   + "</tr>")
+        for s in secs:
+            name = s.get("name", "")
+            if name:
+                out.append('<tr><td colspan="%d" class="rpt-stream-sect"%s>%s</td></tr>'
+                           % (span, _inline_style(s), _esc(name)))
+            dr = 0  # reset zebra parity per section: first data row unshaded
+            for r in s.get("rows", []):
+                dec = r.get("decimals")
+                cells = r.get("cells", []) or []
+                tds = []
+                for i in range(ncol):
+                    cid = cells[i] if i < len(cells) else None
+                    numcls = "num cband" if (band_cols and i % 2 == 1) else "num"
+                    if cid in (None, ""):
+                        tds.append('<td class="%s">&mdash;</td>' % numcls)
+                    elif dec is None or dec == "":
+                        tds.append('<td class="%s">{{ tag(%d).display }}</td>' % (numcls, int(cid)))
+                    else:
+                        tds.append('<td class="%s">{{ tag(%d).value | fmt(%d) }}</td>'
+                                   % (numcls, int(cid), int(dec)))
+                rowcls = ' class="rpt-band"' if (band_rows and dr % 2 == 1) else ""
+                out.append('<tr%s><td>%s</td><td class="rpt-unit">%s</td>%s</tr>'
+                           % (rowcls, _esc(r.get("label", "")), _esc(r.get("unit", "")), "".join(tds)))
+                dr += 1
+        out.append("</table>")
+        return "\n".join(out)
+
+    if t in ("page_header", "page_footer", "report_style"):
+        return ""  # handled in compile_blocks (margin boxes / theme / time basis)
 
     if t == "page_break":
         return '<div style="page-break-after:always"></div>'
@@ -285,22 +350,299 @@ _BASE_CSS = """
   .rpt-kpis{display:flex;gap:12px;margin:10px 0}
   .rpt-kpi{flex:1;border:1px solid #e2e6ea;border-radius:8px;padding:10px;text-align:center}
   .kpi-val{font-size:20px;font-weight:700;color:#0040A0}
+  .kpi-unit{font-size:11px;font-weight:600;color:#6b7785;margin-left:3px}
   .kpi-lbl{font-size:10px;color:#6b7785;margin-top:2px}
   .rpt-cols{display:grid;gap:12px;margin:8px 0}
   .rpt-col{border:1px solid #e2e6ea;border-radius:6px;padding:10px}
-  .rpt-chart{margin:10px 0;max-width:100%}
-  .rpt-chart svg{max-width:100%;height:auto}
+  .rpt-chart{margin:10px 0;max-width:100%}  .rpt-chart svg{max-width:100%;height:auto}
+  .rpt-stream{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0}
+  .rpt-stream td{padding:2px 6px;vertical-align:top}
+  .rpt-stream .rpt-stream-head td{text-decoration:underline;text-align:right}
+  .rpt-stream .rpt-stream-sect{text-decoration:underline;padding-top:10px}
+  .rpt-stream .rpt-unit{color:#555}
+  .rpt-stream .num{text-align:right;font-variant-numeric:tabular-nums}
 </style>
 """
 
 
-def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str = "portrait") -> str:
-    """Compile an ordered block list into a Jinja2 HTML template string."""
-    page = (f"<style>@page {{ size: {page_size} {orientation}; margin: 14mm; "
-            f'@bottom-center {{ content:"Page " counter(page) " of " counter(pages); '
-            f"font-size:9px; color:#999 }} }}</style>")
-    body = "\n".join(_compile_block(b, i) for i, b in enumerate(blocks or []))
-    return page + _BASE_CSS + body
+# ---------------------------------------------------------------------------
+# Page header / footer (Phase A).
+# A `page_header` / `page_footer` block has three slot strings: left, center,
+# right. Each slot is plain text that may contain tokens. These are lifted out
+# of the body flow and compiled into WeasyPrint @page margin boxes so they
+# repeat on every printed page. Dynamic per-page tokens ({page}/{pages}) become
+# CSS counters; static-per-render tokens ({report_title}/{generated_at}/
+# {timezone}) become Jinja expressions (rendered before WeasyPrint, escaped for
+# CSS via the `cssq` filter). Unknown {tokens} are treated as literal text.
+# ---------------------------------------------------------------------------
+_SLOT_TOKENS = {
+    "page": "counter(page)",
+    "pages": "counter(pages)",
+    "page_of": '"Page " counter(page) " of " counter(pages)',
+    "report_title": '{{ (report.name if report.name is defined else "") | cssq }}',
+    "generated_at": '{{ (report.generated_at if report.generated_at is defined else "") | cssq }}',
+    "timezone": '{{ (report.timezone if report.timezone is defined else "") | cssq }}',
+}
+_SLOT_TOKEN_RE = re.compile(r"\{([a-z_]+)\}")
+_HDR_POS = {"left": "@top-left", "center": "@top-center", "right": "@top-right"}
+_FTR_POS = {"left": "@bottom-left", "center": "@bottom-center", "right": "@bottom-right"}
+
+
+def _css_literal(text: str) -> str:
+    """Quote arbitrary text as a CSS string value (compile-time literals)."""
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _gen_at_expr(time: dict | None) -> str:
+    """Jinja expr for a localized, CSS-escaped generated timestamp per time basis."""
+    time = time or {}
+    basis = time.get("basis") or "system"
+    fmt = time.get("format") or "%d-%b-%Y %H:%M"
+    suffix = "True" if time.get("show_suffix") else "False"
+    if basis == "utc":
+        tzarg = '"UTC"'
+    elif basis in ("system", ""):
+        tzarg = "report.timezone"
+    else:
+        tzarg = '"%s"' % basis
+    return ('{{ (report.generated_at if report.generated_at is defined else "") '
+            '| localtime(%s, "%s", %s) | cssq }}' % (tzarg, fmt, suffix))
+
+
+def _compile_slot(slot: str | None, time: dict | None = None) -> str | None:
+    """Turn one slot string into a CSS `content` value, or None if empty."""
+    slot = (slot or "").strip()
+    if not slot:
+        return None
+    tokmap = dict(_SLOT_TOKENS)
+    tokmap["generated_at"] = _gen_at_expr(time)
+    pieces: list[str] = []
+    pos = 0
+    for m in _SLOT_TOKEN_RE.finditer(slot):
+        if m.start() > pos:
+            pieces.append(_css_literal(slot[pos:m.start()]))
+        tok = m.group(1)
+        pieces.append(tokmap.get(tok, _css_literal(m.group(0))))
+        pos = m.end()
+    if pos < len(slot):
+        pieces.append(_css_literal(slot[pos:]))
+    return " ".join(p for p in pieces if p) or None
+
+
+def _margin_boxes(block: dict | None, posmap: dict[str, str], time: dict | None = None) -> list[str]:
+    out: list[str] = []
+    for slot, pos in posmap.items():
+        content = _compile_slot((block or {}).get(slot), time) if block else None
+        if content:
+            out.append("%s { content: %s; font-size:9px; color:#666 }" % (pos, content))
+    return out
+
+
+def _page_style(page_size: str, orientation: str,
+                header: dict | None, footer: dict | None, time: dict | None = None) -> str:
+    boxes: list[str] = []
+    boxes += _margin_boxes(header, _HDR_POS, time)
+    if footer:
+        boxes += _margin_boxes(footer, _FTR_POS, time)
+    else:
+        # Backward-compatible default: reports without a footer block still get
+        # an automatic centred page counter.
+        boxes.append('@bottom-center { content:"Page " counter(page) " of " '
+                     'counter(pages); font-size:9px; color:#999 }')
+    inner = " ".join(boxes)
+    return ("<style>@page { size: %s %s; margin: 16mm 14mm; %s }</style>"
+            % (page_size, orientation, inner))
+
+
+# --- Per-object + theme styling (Font/Color spec §3-§7, §11, §15) ------------
+# Font choices map to fallback stacks: the exact font renders when installed in
+# the PDF (WeasyPrint) container, otherwise a close substitute is used so the
+# report still reads correctly (serif/mono/sans intent preserved).
+_FONT_STACKS = {
+    "Segoe UI": "'Segoe UI','Noto Sans','DejaVu Sans',sans-serif",
+    "Arial": "Arial,'Liberation Sans','DejaVu Sans',sans-serif",
+    "Calibri": "Calibri,Carlito,'DejaVu Sans',sans-serif",
+    "Verdana": "Verdana,'DejaVu Sans',sans-serif",
+    "Tahoma": "Tahoma,'DejaVu Sans',sans-serif",
+    "Roboto": "Roboto,'Noto Sans','DejaVu Sans',sans-serif",
+    "Noto Sans": "'Noto Sans','DejaVu Sans',sans-serif",
+    "Times New Roman": "'Times New Roman','Liberation Serif','DejaVu Serif',serif",
+    "Courier New": "'Courier New','Liberation Mono','DejaVu Sans Mono',monospace",
+}
+
+
+def _font_stack(family: str) -> str:
+    return _FONT_STACKS.get(family, family)
+
+
+def _band_css(bid: str, b: dict, kind: str) -> str:
+    """Scoped banding CSS for one table.
+
+    kind="stream": flat <tr> table — band via the .rpt-band (data rows) and
+    .cband (data cols) classes added at compile time. We must NOT use
+    tbody/nth-child here: the HTML parser wraps the bare <tr>s in an implicit
+    <tbody>, so nth-child would shade section headings and the header row too.
+
+    kind="table": tag_table has an explicit thead/tbody, so nth-child(even)
+    cleanly targets only the data rows/columns.
+    """
+    rules: list[str] = []
+    rc = b.get("band_row_color") or "#F3F6FA"
+    cc = b.get("band_col_color") or "#EEF4FB"
+    if kind == "stream":
+        if b.get("band_rows"):
+            rules.append("#%s tr.rpt-band>td{background:%s}" % (bid, rc))
+        if b.get("band_cols"):
+            rules.append("#%s td.cband{background:%s}" % (bid, cc))
+    else:  # tag_table
+        if b.get("band_rows"):
+            rules.append("#%s tbody tr:nth-child(even) td{background:%s}" % (bid, rc))
+        if b.get("band_cols"):
+            rules.append("#%s thead th:nth-child(even),#%s tbody td:nth-child(even){background:%s}" % (bid, bid, cc))
+    return ("<style>%s</style>" % "".join(rules).replace('"', "")) if rules else ""
+
+
+_FONT_WEIGHTS = {"light": "300", "regular": "400", "normal": "400",
+                 "medium": "500", "semibold": "600", "bold": "700"}
+_CASE_MAP = {"uppercase": "uppercase", "lowercase": "lowercase",
+             "capitalize": "capitalize", "title case": "capitalize",
+             "title_case": "capitalize", "sentence case": "none",
+             "as_typed": "none", "none": "none"}
+
+
+def _inline_style(b: dict) -> str:
+    """Build an inline ` style="..."` from a block's §15 style object (subset)."""
+    s = b.get("style")
+    if not isinstance(s, dict) or not s:
+        return ""
+    css: list[str] = []
+    f = s.get("font") or {}
+    if f.get("family"):
+        css.append("font-family:%s" % _font_stack(f["family"]))
+    if f.get("size_pt"):
+        css.append("font-size:%spt" % f["size_pt"])
+    if f.get("weight"):
+        css.append("font-weight:%s" % _FONT_WEIGHTS.get(str(f["weight"]).lower(), f["weight"]))
+    if f.get("italic"):
+        css.append("font-style:italic")
+    if f.get("underline"):
+        css.append("text-decoration:underline")
+    if f.get("case") and _CASE_MAP.get(str(f["case"]), "none") != "none":
+        css.append("text-transform:%s" % _CASE_MAP[str(f["case"])])
+    tx = s.get("text") or {}
+    if tx.get("color"):
+        css.append("color:%s" % tx["color"])
+    if tx.get("horizontal_align"):
+        css.append("text-align:%s" % tx["horizontal_align"])
+    if tx.get("line_height"):
+        css.append("line-height:%s" % tx["line_height"])
+    bg = s.get("background") or {}
+    if bg.get("color") and bg.get("type", "solid") != "none":
+        css.append("background:%s" % bg["color"])
+    bd = s.get("border") or {}
+    if bd.get("enabled") and bd.get("color"):
+        css.append("border:%spt %s %s" % (bd.get("width_pt", 0.5), bd.get("style", "solid"), bd["color"]))
+    pad = s.get("padding_mm") or {}
+    if pad:
+        css.append("padding:%smm %smm %smm %smm" % (
+            pad.get("top", 0), pad.get("right", 0), pad.get("bottom", 0), pad.get("left", 0)))
+    if not css:
+        return ""
+    return ' style="%s"' % ";".join(css).replace('"', "")
+
+
+def _theme_css(rs: dict | None) -> str:
+    """Report-level theme → CSS overriding the base styles."""
+    th = (rs or {}).get("theme") or {}
+    if not isinstance(th, dict) or not th:
+        return ""
+    rules: list[str] = []
+    body: list[str] = []
+    if th.get("font_family"):
+        body.append("font-family:%s" % _font_stack(th["font_family"]))
+    if th.get("font_size_pt"):
+        body.append("font-size:%spt" % th["font_size_pt"])
+    if th.get("text_color"):
+        body.append("color:%s" % th["text_color"])
+    if body:
+        rules.append("body{%s}" % ";".join(body))
+    if th.get("heading_color"):
+        rules.append(".rpt-header h1{color:%s}" % th["heading_color"])
+    # Section headings inside stream tables. Colour falls back to heading_color;
+    # background/size/caps are optional section-specific controls.
+    sect: list[str] = []
+    sc = th.get("section_color") or th.get("heading_color")
+    if sc:
+        sect.append("color:%s" % sc)
+    if th.get("section_bg"):
+        sect.append("background:%s" % th["section_bg"])
+        sect.append("padding:3px 6px")
+    if th.get("section_size_pt"):
+        sect.append("font-size:%spt" % th["section_size_pt"])
+    if th.get("section_caps"):
+        sect.append("text-transform:uppercase")
+    if sect:
+        rules.append(".rpt-stream .rpt-stream-sect{%s}" % ";".join(sect))
+    thb: list[str] = []
+    if th.get("table_header_bg"):
+        thb.append("background:%s" % th["table_header_bg"])
+    if th.get("table_header_fg"):
+        thb.append("color:%s" % th["table_header_fg"])
+    if thb:
+        rules.append(".rpt-table th{%s}" % ";".join(thb))
+    if th.get("alt_row"):
+        rules.append(".rpt-table tbody tr:nth-child(even) td{background:%s}" % th["alt_row"])
+    css = "".join(rules).replace('"', "")
+    return ("<style>%s</style>" % css) if css else ""
+
+
+def _merge_style(default_style: dict | None, block: dict | None) -> dict | None:
+    """Cascade the global default style under a per-report report_style block.
+
+    A per-report value overrides the global default *only when it is actually
+    set* — empty strings / None are treated as "inherit", so clearing a field
+    on a report falls back to the global default rather than blanking it.
+    Booleans/0 are kept (so unticking e.g. UPPERCASE is a real override).
+    theme/time/page each merge key-by-key.
+    """
+    ds = default_style or {}
+    b = block or {}
+    if not ds and not b:
+        return None
+
+    def _set(d):
+        return {k: v for k, v in (d or {}).items() if v not in (None, "")}
+
+    out: dict = {"type": "report_style"}
+    for k in ("theme", "time", "page"):
+        merged = {**(ds.get(k) or {}), **_set(b.get(k))}
+        if merged:
+            out[k] = merged
+    return out
+
+
+def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str = "portrait",
+                   default_style: dict | None = None) -> str:
+    """Compile an ordered block list into a Jinja2 HTML template string.
+
+    page_header / page_footer / report_style blocks are pulled out of the flow:
+    header/footer become @page margin boxes; report_style sets the time basis
+    (for {generated_at}) and the report theme CSS. All other blocks compile
+    into the body in order, each honoring its own optional `style` object.
+    """
+    blocks = blocks or []
+    header = next((b for b in blocks if b.get("type") == "page_header"), None)
+    footer = next((b for b in blocks if b.get("type") == "page_footer"), None)
+    style = next((b for b in blocks if b.get("type") == "report_style"), None)
+    if default_style:
+        style = _merge_style(default_style, style)
+    flow = [b for b in blocks if b.get("type") not in ("page_header", "page_footer", "report_style")]
+    # Page size/orientation come from the report definition (Settings tab), not
+    # the theme cascade — keeps a single source of truth for page geometry.
+    page = _page_style(page_size, orientation, header, footer, (style or {}).get("time"))
+    theme = _theme_css(style)
+    body = "\n".join(_compile_block(b, i) for i, b in enumerate(flow))
+    return page + _BASE_CSS + theme + body
 
 
 # ---------------------------------------------------------------------------
@@ -339,10 +681,17 @@ def build_block_context(blocks: list[dict], tags_list: list) -> dict[str, Any]:
             bid = b.get("id", f"b{i}")
             t = b.get("type")
             if t == "tag_table":
+                cols = b.get("columns", [])
                 try:
-                    tables[bid] = compute_tag_table(b.get("columns", []), rows_data)
+                    tables[bid] = compute_tag_table(cols, rows_data)
                 except Exception:
-                    tables[bid] = {"rows": rows_data, "aggregates": {}}
+                    safe_rows = []
+                    for r in rows_data:
+                        rr = dict(r)
+                        for c in cols:
+                            rr.setdefault(c.get("key"), None)
+                        safe_rows.append(rr)
+                    tables[bid] = {"rows": safe_rows, "aggregates": {}}
             elif t == "chart":
                 charts[bid] = _CHART_PLACEHOLDER
             elif t == "columns":

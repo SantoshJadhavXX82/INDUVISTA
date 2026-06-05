@@ -48,15 +48,39 @@ class TagCtx:
     quality_good: bool = False
     age_seconds: float | None = None
     description: str | None = None
+    named_set_id: int | None = None
+    states: dict | None = None          # {raw_value:int -> display_text:str}
 
-    # Convenience for templates: formatted value or text or em-dash.
+    # Convenience for templates: enum label, else formatted value or text or em-dash.
     @property
     def display(self) -> str:
+        if self.states and self.value is not None:
+            key = int(round(self.value))
+            if key in self.states:
+                return self.states[key]
         if self.value is not None:
             return f"{self.value:g}"
         if self.text is not None:
             return self.text
         return "—"
+
+
+def load_named_set_states(db: Session, named_set_ids) -> dict[int, dict[int, str]]:
+    """Return {named_set_id: {raw_value: display_text}} for the given sets.
+
+    Used to translate enumerated tag values (e.g. 1 -> "ONLINE") to text in
+    reports, mirroring how the tag list and dashboards display them.
+    """
+    out: dict[int, dict[int, str]] = {}
+    ids = list({n for n in (named_set_ids or []) if n})
+    if not ids:
+        return out
+    rows = db.execute(text(
+        "SELECT named_set_id, raw_value, display_text FROM named_set_values "
+        "WHERE named_set_id = ANY(:ids)"), {"ids": ids}).mappings().all()
+    for r in rows:
+        out.setdefault(r["named_set_id"], {})[int(r["raw_value"])] = r["display_text"]
+    return out
 
 
 def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[str, Any]:
@@ -66,7 +90,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
 
     if tag_ids:
         rows = db.execute(text("""
-            SELECT t.id, t.name, t.description,
+            SELECT t.id, t.name, t.description, t.named_set_id,
                    COALESCE(eu.code, t.engineering_unit) AS unit,
                    lv.value_double, lv.value_text, lv.st,
                    CASE WHEN lv.time IS NULL THEN NULL
@@ -78,6 +102,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
         """), {"ids": tag_ids}).mappings().all()
 
         by_id = {r["id"]: r for r in rows}
+        states_by_set = load_named_set_states(db, [r["named_set_id"] for r in rows])
         # Preserve the caller's requested order.
         for tid in tag_ids:
             r = by_id.get(tid)
@@ -90,6 +115,8 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
                     value=r["value_double"], text=r["value_text"], unit=r["unit"],
                     quality=st, quality_good=(st is not None and st >= GOOD_ST),
                     age_seconds=r["age_seconds"],
+                    named_set_id=r["named_set_id"],
+                    states=states_by_set.get(r["named_set_id"]),
                 )
             ordered.append(ctx)
             tags_by_key[ctx.name] = ctx
@@ -137,6 +164,27 @@ def render_report(
         except (TypeError, ValueError):
             return "—"
     env.filters["fmt"] = fmt
+
+    from markupsafe import Markup as _Markup
+    def cssq(value):
+        s = "" if value is None else str(value)
+        return _Markup('"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"')
+    env.filters["cssq"] = cssq
+    def localtime(value, tz="UTC", fmt="%d-%b-%Y %H:%M", suffix=False):
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        if value in (None, ""):
+            return ""
+        try:
+            d = _dt.fromisoformat(str(value))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=_ZI("UTC"))
+            loc = d.astimezone(_ZI(tz or "UTC"))
+            out = loc.strftime(fmt)
+            return out + (" " + (loc.tzname() or tz) if suffix else "")
+        except Exception:
+            return str(value)
+    env.filters["localtime"] = localtime
 
     template = env.from_string(template_html)
     body = template.render(**context)

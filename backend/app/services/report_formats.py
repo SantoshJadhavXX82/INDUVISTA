@@ -94,6 +94,27 @@ def render_html(template_html: str, context: dict[str, Any],
             return "\u2014"
     env.filters["fmt"] = fmt
 
+    from markupsafe import Markup as _Markup
+    def cssq(value):
+        s = "" if value is None else str(value)
+        return _Markup('"' + s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"')
+    env.filters["cssq"] = cssq
+    def localtime(value, tz="UTC", fmt="%d-%b-%Y %H:%M", suffix=False):
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
+        if value in (None, ""):
+            return ""
+        try:
+            d = _dt.fromisoformat(str(value))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=_ZI("UTC"))
+            loc = d.astimezone(_ZI(tz or "UTC"))
+            out = loc.strftime(fmt)
+            return out + (" " + (loc.tzname() or tz) if suffix else "")
+        except Exception:
+            return str(value)
+    env.filters["localtime"] = localtime
+
     # Phase C: opt-in document bands. Templates can place {{ header_block() }}
     # and {{ signoff_block() }} to render the standard identity header and
     # sign-off footer; Markup keeps them from being re-escaped.

@@ -44,6 +44,24 @@ DI_SIZE = 256
 UPDATE_INTERVAL = 1.0          # seconds between dynamic value refreshes
 SAMPLE_LOG_INTERVAL = 10.0     # seconds between visible activity logs
 
+# Per-device variation (set in the device JSON): sim_scale multiplies throughput
+# quantities so a second flow computer reads a different magnitude; sim_phase_s
+# shifts the time base so every dynamic (sine/random/ramp) tag reads a different
+# instantaneous value. Bounded quantities (composition mol%, pressure, temp,
+# density, CV) are left unscaled so they stay physically valid — they differ
+# between devices only via the phase shift.
+THROUGHPUT_UNITS = {"m3", "m3/h", "kg", "kg/h", "GJ", "GJ/h"}
+
+
+def _scaled(val, tag: dict, scale: float):
+    if scale == 1.0 or val is None or tag.get("no_scale"):
+        return val
+    if tag.get("data_type") == "bool" or not isinstance(val, (int, float)):
+        return val
+    if tag.get("engineering_unit") in THROUGHPUT_UNITS:
+        return val * scale
+    return val
+
 
 def _byte_swap_reg(reg: int) -> int:
     """Swap the two bytes of a 16-bit register value."""
@@ -159,10 +177,12 @@ def build_context(config: dict) -> ModbusServerContext:
     slave = ModbusSlaveContext(di=di, co=co, hr=hr, ir=ir, zero_mode=True)
 
     seeded = 0
+    scale = config["device"].get("sim_scale", 1.0)
     for tag in config["tags"]:
         initial = tag["sim"].get("initial")
         if initial is None:
             continue
+        initial = _scaled(initial, tag, scale)
         try:
             regs = encode_value(initial, tag["data_type"], tag["byte_order"])
         except (struct.error, KeyError, ValueError) as e:
@@ -196,10 +216,12 @@ async def update_loop(context: ModbusServerContext, config: dict, start_t: float
     last_values: dict[str, float] = {}
     unit_id = config["device"]["unit_id"]
     slave = context[unit_id]
+    scale = config["device"].get("sim_scale", 1.0)
+    phase = config["device"].get("sim_phase_s", 0.0)
 
     while True:
         await asyncio.sleep(UPDATE_INTERVAL)
-        t = time.monotonic() - start_t
+        t = time.monotonic() - start_t + phase
         for tag in config["tags"]:
             if tag["sim"].get("mode", "static") == "static":
                 continue
@@ -214,7 +236,7 @@ async def update_loop(context: ModbusServerContext, config: dict, start_t: float
                 last_values[tag["name"]] = float(val)
 
             try:
-                regs = encode_value(val, tag["data_type"], tag["byte_order"])
+                regs = encode_value(_scaled(val, tag, scale), tag["data_type"], tag["byte_order"])
             except Exception as e:
                 log.warning("encode_value failed for %s: %s", tag["name"], e)
                 continue
@@ -296,6 +318,8 @@ async def main():
             # configured host (which is what *clients* should connect to).
             "modbus_host": "0.0.0.0",
             "modbus_port": device["port"],
+            "sim_scale": device.get("sim_scale", 1.0),
+            "sim_phase_s": device.get("sim_phase_s", 0.0),
         },
         "register_blocks": template["register_blocks"],
         "tags": template["tags"],

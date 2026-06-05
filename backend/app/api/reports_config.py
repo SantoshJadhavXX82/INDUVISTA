@@ -46,6 +46,7 @@ from app.services.report_revisions import (
 )
 from app.services.report_jobs import record_job, list_jobs
 from app.auth import get_current_user, CurrentUser, require_role, Role
+from app.services.report_defaults import get_default_style, set_default_style
 
 router = APIRouter(prefix="/api/report-config", tags=["report-config"])
 
@@ -262,6 +263,31 @@ def list_definitions(db: Annotated[Session, Depends(get_session)]):
     rows = db.execute(text(
         "SELECT id FROM report_definitions ORDER BY name")).all()
     return [_def_row(db, r[0]) for r in rows]
+
+
+# --- Theme Manager: global default report style --------------------------------
+class DefaultStyleBody(BaseModel):
+    theme: dict | None = None
+    time: dict | None = None
+    page: dict | None = None
+
+
+@router.get("/default-style")
+def read_default_style(db: Annotated[Session, Depends(get_session)],
+                       user: CurrentUser = Depends(get_current_user)):
+    """The system-wide default report style. Reports inherit this unless they
+    add a report_style block that overrides specific keys."""
+    return get_default_style(db)
+
+
+@router.put("/default-style")
+def write_default_style(body: DefaultStyleBody,
+                        db: Annotated[Session, Depends(get_session)],
+                        user: CurrentUser = Depends(require_role(Role.ADMIN))):
+    payload = {k: v for k, v in
+               {"theme": body.theme, "time": body.time, "page": body.page}.items()
+               if v is not None}
+    return set_default_style(db, payload)
 
 
 @router.get("/definitions/{def_id}", response_model=DefinitionResponse)
@@ -710,7 +736,7 @@ def render_definition(
 
     template_str = row["template_html"]
     if mode == "blocks" and blocks:
-        template_str = compile_blocks(blocks, row["page_size"], row["orientation"])
+        template_str = compile_blocks(blocks, row["page_size"], row["orientation"], get_default_style(db))
         _bc = build_block_context(blocks, ctx.get("tags_list") or [])
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
@@ -820,7 +846,7 @@ def preview_definition(def_id: int, body: PreviewBody,
     if mode == "blocks":
         if not blocks:
             raise HTTPException(400, "Nothing to preview — this report has no blocks yet.")
-        template_str = compile_blocks(blocks, body.page_size, body.orientation)
+        template_str = compile_blocks(blocks, body.page_size, body.orientation, get_default_style(db))
         _bc = build_block_context(blocks, ctx.get("tags_list") or [])
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]

@@ -78,6 +78,9 @@ scripts/lifecycle/evidence_full*.txt
 # OPC web working snapshots (scratch duplicates)
 opc_web_*/
 
+# Generated report preview HTML (output of smoke scripts; the .py generators are tracked)
+*.preview.html
+
 test-results-ui/
 
 *.bak_*

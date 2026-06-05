@@ -140,34 +140,56 @@ def _upsert_register_blocks(conn, device_id: int, blocks: list[dict]) -> dict[st
 
 
 def _upsert_tag(conn, device_id: int, block_id_for_tag: int | None, tag: dict):
+    # Resolve the tag's free-text engineering_unit against the engineering_units
+    # master (case-insensitive, code preferred over label). A match moves the
+    # value onto the engineering_unit_id FK and clears the text; a non-match keeps
+    # the text and leaves the FK NULL. This mirrors migration 0005's backfill and
+    # is required by ck_tags_engineering_unit_exclusive, which forbids a row from
+    # carrying BOTH the FK and non-empty text. Doing the resolution here — in the
+    # INSERT *and* the ON CONFLICT UPDATE — keeps re-seeds idempotent: without it,
+    # re-running the seeder over a tag whose FK was already backfilled would write
+    # the text back alongside the existing FK and violate the constraint (which is
+    # exactly what broke FLOWCOMP_001's S1_PressureTx_mA on re-seed).
     conn.execute(text("""
         INSERT INTO tags (
             device_id, register_block_id, name, description,
             data_type, byte_order, function_code,
             address, register_count,
-            engineering_unit, scale, "offset",
+            engineering_unit, engineering_unit_id, scale, "offset",
             min_value, max_value
         )
-        VALUES (
+        SELECT
             :device_id, :block_id, :name, :description,
             :data_type, :byte_order, :fc,
             :address, :register_count,
-            :engineering_unit, :scale, :offset,
+            CASE WHEN eu.id IS NOT NULL THEN NULL
+                 ELSE NULLIF(CAST(:engineering_unit AS text), '') END,
+            eu.id, :scale, :offset,
             :min_value, :max_value
-        )
+        FROM (SELECT 1) AS _one
+        LEFT JOIN LATERAL (
+            SELECT id FROM engineering_units
+            WHERE :engineering_unit IS NOT NULL
+              AND CAST(:engineering_unit AS text) <> ''
+              AND (lower(code)  = lower(CAST(:engineering_unit AS text))
+                OR lower(label) = lower(CAST(:engineering_unit AS text)))
+            ORDER BY (lower(code) = lower(CAST(:engineering_unit AS text))) DESC
+            LIMIT 1
+        ) eu ON TRUE
         ON CONFLICT (device_id, name) DO UPDATE SET
-            register_block_id = EXCLUDED.register_block_id,
-            description       = EXCLUDED.description,
-            data_type         = EXCLUDED.data_type,
-            byte_order        = EXCLUDED.byte_order,
-            function_code     = EXCLUDED.function_code,
-            address           = EXCLUDED.address,
-            register_count    = EXCLUDED.register_count,
-            engineering_unit  = EXCLUDED.engineering_unit,
-            scale             = EXCLUDED.scale,
-            "offset"          = EXCLUDED."offset",
-            min_value         = EXCLUDED.min_value,
-            max_value         = EXCLUDED.max_value
+            register_block_id   = EXCLUDED.register_block_id,
+            description         = EXCLUDED.description,
+            data_type           = EXCLUDED.data_type,
+            byte_order          = EXCLUDED.byte_order,
+            function_code       = EXCLUDED.function_code,
+            address             = EXCLUDED.address,
+            register_count      = EXCLUDED.register_count,
+            engineering_unit    = EXCLUDED.engineering_unit,
+            engineering_unit_id = EXCLUDED.engineering_unit_id,
+            scale               = EXCLUDED.scale,
+            "offset"            = EXCLUDED."offset",
+            min_value           = EXCLUDED.min_value,
+            max_value           = EXCLUDED.max_value
     """), {
         "device_id": device_id,
         "block_id": block_id_for_tag,

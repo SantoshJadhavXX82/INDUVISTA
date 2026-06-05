@@ -30,7 +30,7 @@ from typing import Any, Mapping, Sequence
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.services.report_render import TagCtx, GOOD_ST, build_live_context  # GOOD_ST == 128
+from app.services.report_render import TagCtx, GOOD_ST, build_live_context, load_named_set_states  # GOOD_ST == 128
 from app.services.report_period import compute_window, resolve_window
 from app.services.report_revisions import active_config
 
@@ -182,13 +182,14 @@ def build_period_context(db: Session, bindings: Sequence[Mapping[str, Any]],
     meta: dict[int, Mapping[str, Any]] = {}
     if tag_ids:
         rows = db.execute(text("""
-            SELECT t.id, t.name, t.description,
+            SELECT t.id, t.name, t.description, t.named_set_id,
                    COALESCE(eu.code, t.engineering_unit) AS unit
             FROM tags t
             LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
             WHERE t.id = ANY(:ids) AND t.deleted_at IS NULL
         """), {"ids": tag_ids}).mappings().all()
         meta = {r["id"]: r for r in rows}
+    states_by_set = load_named_set_states(db, [m["named_set_id"] for m in meta.values()])
 
     unit_ids = [b["unit_id"] for b in bindings if b.get("unit_id")]
     unit_codes: dict[int, str] = {}
@@ -217,6 +218,8 @@ def build_period_context(db: Session, bindings: Sequence[Mapping[str, Any]],
             id=tid, name=name, value=agg["value"], text=agg["text"], unit=unit,
             quality=st, quality_good=(st is not None and st >= GOOD_ST),
             age_seconds=None, description=(m["description"] if m else None),
+            named_set_id=(m["named_set_id"] if m else None),
+            states=(states_by_set.get(m["named_set_id"]) if m else None),
         )
         ordered.append(ctx)
         tags_by_key[ctx.name] = ctx
