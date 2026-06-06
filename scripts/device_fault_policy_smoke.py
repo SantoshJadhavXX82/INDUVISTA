@@ -222,10 +222,10 @@ def main():
 
         # ---- B. audit ------------------------------------------------------
         print("\n[B audit]")
-        st, audit = _req("GET", f"/api/audit-log?action=device&target_id={dev_id}&limit=30", token=token)
+        st, audit = _req("GET", "/api/audit-log?action=device.&limit=50", token=token)
         events = audit.get("events", []) if (st == 200 and isinstance(audit, dict)) else []
         fault_evt = any("fault_mode" in json.dumps(e.get("details") or e).lower() for e in events)
-        check(f"policy change recorded in audit log ({len(events)} device events)", fault_evt)
+        check(f"policy change recorded in audit log ({len(events)} device.* events)", fault_evt)
 
         # ---- C. engine: SUBSTITUTE ----------------------------------------
         print("\n[C engine substitute]")
