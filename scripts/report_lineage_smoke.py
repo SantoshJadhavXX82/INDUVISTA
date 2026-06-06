@@ -74,12 +74,17 @@ def pick_device_and_tag(token):
 
 
 def pick_computed_tag(token):
-    """Find a computed/Station tag (carries a derivation), or None if none exist."""
+    """Find an aggregation/Station tag (carries a derivation), or None.
+
+    Prefers STATION devices, whose SUM_OF / WEIGHTED_AVG blocks have a
+    resolvable input chain; other computed blocks may store inputs differently.
+    """
     st, devs = _req("GET", "/api/devices", token=token)
     if st != 200:
         return None
     comp = [d for d in devs if (d.get("protocol") == "computed"
                                 or "STATION" in (d.get("name") or "").upper())]
+    comp.sort(key=lambda d: 0 if "STATION" in (d.get("name") or "").upper() else 1)
     for d in comp:
         st, tags = _req("GET", f"/api/tags?device_id={d['id']}&limit=1000", token=token)
         if st == 200 and tags:
