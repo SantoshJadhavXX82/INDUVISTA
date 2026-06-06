@@ -70,6 +70,14 @@ ST_TRANSPORT_UNSUPPORTED = 20
 # "single transient blip" from "device is consistently down".
 ST_RETRY_EXHAUSTED = 24
 
+# Phase 2c — device fault policy. Held = last good value reused on read
+# failure (uncertain band, so quality-aware totals can exclude it). Substituted
+# = a device-configured fill value injected on failure (bad band). The render
+# layer keys the Held/Substituted markers off st_reason ('HOLD_LAST' /
+# 'SUBSTITUTED'); the numeric band keeps any st-only consumer sane.
+ST_HOLD_LAST = 72
+ST_SUBSTITUTED = 28
+
 # ---- Modbus exception code → reason string ---------------------------------
 MODBUS_EXCEPTION_NAMES: dict[int, str] = {
     1:  "ILLEGAL_FUNCTION",

@@ -77,11 +77,13 @@ from app.modbus.status import (
     MODBUS_EXCEPTION_NAMES,
     ST_COMM_TIMEOUT,
     ST_DECODE_FAIL,
+    ST_HOLD_LAST,
     ST_MODBUS_EXCEPTION,
     ST_MODBUS_IO_ERROR,
     ST_RANGE_WARN,
     ST_READ_OK,
     ST_RETRY_EXHAUSTED,
+    ST_SUBSTITUTED,
     ST_TRANSPORT_UNSUPPORTED,
 )
 
@@ -127,6 +129,8 @@ def load_polling_config() -> list[dict]:
                        d.scan_interval_ms,
                        d.request_timeout_ms, d.retry_count,
                        d.reconnect_initial_ms, d.reconnect_max_ms,
+                       d.fault_mode, d.substitute_value,
+                       d.hold_mode, d.max_hold_sec,
                        d.channel_id,
                        c.transport AS channel_transport,
                        c.enabled   AS channel_enabled
@@ -397,6 +401,12 @@ class DeviceWorker:
         # Phase 5b state — consecutive failures for status reporting.
         self._consecutive_failures = 0
 
+        # Phase 2c — device fault policy. Last good (value, text, monotonic ts)
+        # per tag, and the last applied fault state per tag for edge-triggered
+        # audit logging (so we log a transition once, not every cycle).
+        self._last_good: dict[int, tuple[float | None, str | None, float]] = {}
+        self._fault_state: dict[int, str] = {}
+
         # Phase 8.5 — response time tracking.
         # Each block-cycle pushes its latency into _cycle_latencies; once a
         # status flush happens, we compute avg/max from this window and clear.
@@ -518,6 +528,75 @@ class DeviceWorker:
         while not self._stop and time.monotonic() < end:
             await asyncio.sleep(min(0.5, end - time.monotonic()))
 
+    # ---------- device fault policy (Phase 2c) ------------------------------
+    def _apply_fault_policy(self, samples: list) -> list:
+        """Apply the owning device's read-failure policy to a poll's samples.
+
+        Good reads (ST_READ_OK / ST_RANGE_WARN) are recorded as last-good and
+        passed through untouched. On a failed read the device's `fault_mode`
+        decides the emitted value + quality:
+
+          missing    -> untouched (default; never fabricates data)
+          hold_last  -> reuse last good value, flagged Held (ST_HOLD_LAST,
+                        st_reason='HOLD_LAST'); decays to the real failure once
+                        max_hold_sec is exceeded when hold_mode='max_age'
+          substitute -> emit substitute_value, flagged Substituted
+                        (ST_SUBSTITUTED, st_reason='SUBSTITUTED')
+
+        Held/Substituted carry a non-good st so the report colours them and
+        quality-aware totals can exclude them. Returns the (mutated) samples.
+        """
+        now = time.monotonic()
+        # Record last-good every cycle regardless of mode, so switching a device
+        # to hold_last later (hot-reload) has history to hold without a restart.
+        for s in samples:
+            if s.st >= ST_READ_OK or s.st == ST_RANGE_WARN:
+                self._last_good[s.tag_id] = (s.value_double, s.value_text, now)
+                if self._fault_state.get(s.tag_id) not in (None, "ok"):
+                    self._fault_state[s.tag_id] = "ok"
+
+        mode = (self.device.get("fault_mode") or "missing")
+        if mode == "missing":
+            return samples
+
+        sub_val = self.device.get("substitute_value")
+        hold_mode = (self.device.get("hold_mode") or "indefinite")
+        max_hold = self.device.get("max_hold_sec")
+        for s in samples:
+            if s.st >= ST_READ_OK or s.st == ST_RANGE_WARN:
+                continue  # good read — leave it
+            if mode == "substitute":
+                s.value_double = 0.0 if sub_val is None else float(sub_val)
+                s.value_text = None
+                s.st = ST_SUBSTITUTED
+                s.st_reason = "SUBSTITUTED"
+                self._note_fault(s.tag_id, "substituted")
+            elif mode == "hold_last":
+                lg = self._last_good.get(s.tag_id)
+                if lg is None:
+                    continue  # nothing good to hold yet -> stays missing/bad
+                lg_val, lg_txt, lg_ts = lg
+                if hold_mode == "max_age" and max_hold and (now - lg_ts) > max_hold:
+                    self._note_fault(s.tag_id, "expired")  # let the failure stand
+                    continue
+                s.value_double = lg_val
+                s.value_text = lg_txt
+                s.st = ST_HOLD_LAST
+                s.st_reason = "HOLD_LAST"
+                self._note_fault(s.tag_id, "held")
+        return samples
+
+    def _note_fault(self, tag_id: int, state: str) -> None:
+        """Edge-triggered logging: announce a tag entering held/substituted
+        once per transition rather than on every failed cycle."""
+        prev = self._fault_state.get(tag_id)
+        self._fault_state[tag_id] = state
+        if prev != state and state in ("held", "substituted"):
+            log.warning(
+                "fault-policy: tag %s on device '%s' -> %s",
+                tag_id, self.device.get("name"), state.upper(),
+            )
+
     # ---------- per-block schedule loop -------------------------------------
     async def _block_loop(self, block: dict):
         """One async loop per block, ticking at the block's scan interval.
@@ -537,6 +616,7 @@ class DeviceWorker:
             try:
                 samples = await self._poll_block_with_retry(block)
                 if samples:
+                    samples = self._apply_fault_policy(samples)
                     # Phase 22 — logging policy: history-log only the samples
                     # that pass the per-tag policy; the rest still update the
                     # live value via write_latest_only so dashboards/alarms
