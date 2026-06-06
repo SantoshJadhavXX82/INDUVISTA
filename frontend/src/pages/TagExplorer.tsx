@@ -468,7 +468,7 @@ export default function TagExplorer() {
           {tags.data ? `${filtered.length} of ${tags.data.length}` : "Loading…"}
         </span>
 
-        <Button size="sm" variant="outline" onClick={() => exportTags(filtered)}>
+        <Button size="sm" variant="outline" onClick={() => exportTags(filtered, deviceProtocolMap)}>
           <Download className="h-4 w-4 mr-1.5" />
           Export CSV
         </Button>
@@ -2849,7 +2849,7 @@ function NewTagPanel({
   );
 }
 
-function exportTags(tags: LiveTag[]): void {
+function exportTags(tags: LiveTag[], deviceProtocolMap: Map<number, string | null>): void {
   const filename = `induvista-tags-${tagFilenameStamp()}.csv`;
   exportCsv<LiveTag>(tags, [
     { header: "name", value: (t) => t.tag_name },
