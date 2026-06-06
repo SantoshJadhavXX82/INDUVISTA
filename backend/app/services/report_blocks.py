@@ -169,6 +169,45 @@ def compute_tag_table(columns: list[dict], rows_data: list[dict]) -> dict[str, A
     return {"rows": rows, "aggregates": {f"{k[0]}:{k[1]}": v for k, v in aggregates.items()}}
 
 
+def collect_block_tag_ids(blocks) -> list[int]:
+    """Return every tag id referenced anywhere in a template's blocks.
+
+    Walks the block tree and picks up tag ids wherever they live: stream-table
+    `cells`, KPI `items[].tag_id`, tag_table / chart `tag_id`/`tag`, and nested
+    `columns` panels. Order-preserving and de-duplicated. Used to auto-bind
+    referenced tags into the report's Data tab (report_tags) so the renderer's
+    context includes them. Tag *names* (string refs in text blocks) are ignored
+    here — only integer ids, which is what bindings key on. Booleans (e.g.
+    quality.enabled) are explicitly excluded since bool is an int subclass.
+    """
+    out: list[int] = []
+    seen: set[int] = set()
+
+    def add(v):
+        if isinstance(v, int) and not isinstance(v, bool) and v not in seen:
+            seen.add(v)
+            out.append(v)
+
+    def walk(node):
+        if isinstance(node, dict):
+            add(node.get("tag_id"))
+            add(node.get("tag"))
+            cells = node.get("cells")
+            if isinstance(cells, list):
+                for c in cells:
+                    add(c)
+            for k, v in node.items():
+                if k in ("tag_id", "tag", "cells"):
+                    continue
+                walk(v)
+        elif isinstance(node, list):
+            for x in node:
+                walk(x)
+
+    walk(blocks or [])
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Block -> Jinja2 HTML compiler
 # ---------------------------------------------------------------------------

@@ -31,7 +31,7 @@ from app.utils.audit import audit, AuditEvent
 from app.config import settings
 from app.services.report_render import build_live_context, render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
-from app.services.report_blocks import compile_blocks, build_block_context
+from app.services.report_blocks import compile_blocks, build_block_context, collect_block_tag_ids
 from app.services.report_aggregate import (
     resolve_report_context, DATA_FUNCTIONS, QUALITY_RULES, MISSING_ACTIONS,
     BAD_ACTIONS, VALUE_FORMATS,
@@ -320,6 +320,10 @@ def create_definition(body: DefinitionCreate, request: Request,
     except IntegrityError as e:
         db.rollback()
         raise _integrity(e, "report definition")
+    # Auto-bind any tags referenced in the blocks into the Data tab so they
+    # resolve at render time (keeps the Data tab a complete tag manifest).
+    if _ensure_report_tags(db, new_id, collect_block_tag_ids(body.template_blocks or [])):
+        db.commit()
     audit(AuditEvent(action="report_def.create", target_type="report_definition",
                      target_id=new_id, target_label=body.name,
                      summary=f"Created report '{body.name}' ({body.category})",
@@ -357,6 +361,10 @@ def update_definition(def_id: int, body: DefinitionUpdate, request: Request,
     audit(AuditEvent(action="report_def.update", target_type="report_definition",
                      target_id=def_id, summary=f"Updated report definition {def_id}",
                      details=fields), request)
+    # Auto-bind newly referenced tags when the blocks were part of this update.
+    if "template_blocks" in body.model_dump(exclude_unset=True) and body.template_blocks:
+        if _ensure_report_tags(db, def_id, collect_block_tag_ids(body.template_blocks)):
+            db.commit()
     return _def_row(db, def_id)
 
 
@@ -683,6 +691,42 @@ def _saved_report_tag_ids(db, def_id: int) -> list[int]:
     return [r[0] for r in rows]
 
 
+def _ensure_report_tags(db, def_id: int, tag_ids: list[int]) -> int:
+    """Auto-bind block-referenced tags that are missing from the Data tab.
+
+    Adds rows to report_tags with the server defaults (data_function='latest',
+    quality_rule='all'). Never removes or alters existing bindings, and skips
+    ids that aren't real, non-deleted tags so a save can't fail on a stale id.
+    Returns the number of bindings added. Caller commits.
+    """
+    if not tag_ids:
+        return 0
+    valid = {r[0] for r in db.execute(
+        text("SELECT id FROM tags WHERE id = ANY(:ids) AND deleted_at IS NULL"),
+        {"ids": list(set(tag_ids))}).fetchall()}
+    existing = {r[0] for r in db.execute(
+        text("SELECT tag_id FROM report_tags WHERE report_id = :r"),
+        {"r": def_id}).fetchall()}
+    seen: set[int] = set()
+    missing: list[int] = []
+    for t in tag_ids:
+        if t in valid and t not in existing and t not in seen:
+            seen.add(t)
+            missing.append(t)
+    if not missing:
+        return 0
+    pos = int(db.execute(text(
+        "SELECT COALESCE(MAX(position), -1) FROM report_tags WHERE report_id = :r"),
+        {"r": def_id}).scalar() or -1)
+    for t in missing:
+        pos += 1
+        db.execute(text("""
+            INSERT INTO report_tags (report_id, tag_id, position)
+            VALUES (:r, :t, :p) ON CONFLICT (report_id, tag_id) DO NOTHING
+        """), {"r": def_id, "t": t, "p": pos})
+    return len(missing)
+
+
 @router.post("/definitions/{def_id}/render")
 def render_definition(
     def_id: int,
@@ -829,6 +873,12 @@ def preview_definition(def_id: int, body: PreviewBody,
     tz_name = settings.app_timezone
     ref = _dt.now(_ZoneInfo("UTC"))
     tag_ids = list(body.tag_ids) if body.tag_ids else _saved_report_tag_ids(db, def_id)
+    # Resolve tags referenced in the (possibly unsaved) blocks too, so editors
+    # see live data for cells they just added before binding them in the Data tab.
+    if body.template_blocks:
+        for tid in collect_block_tag_ids(body.template_blocks):
+            if tid not in tag_ids:
+                tag_ids.append(tid)
     try:
         ctx, _window = resolve_report_context(db, def_id, tz_name, ref, tag_ids, force_live=True)
     except ValueError as e:
