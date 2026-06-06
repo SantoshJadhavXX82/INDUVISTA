@@ -96,6 +96,89 @@ def qwrap(ctx, formatted):
     )
 
 
+# RS-Lineage — per-value provenance. Origin is the latest_tag_values.source.
+_ORIGIN_LABEL = {
+    "modbus": "Modbus", "opc_ua": "OPC UA", "mqtt": "MQTT",
+    "computed": "Computed", "calc": "Computed",
+    "csv": "CSV import", "manual": "Manual entry",
+    "store_forward": "Store-and-forward",
+}
+_QUALITY_WORD = {None: "Good", "bad": "Bad", "uncertain": "Uncertain",
+                 "stale": "Stale", "missing": "Missing"}
+
+
+def _age_phrase(age: float | None) -> str:
+    if age is None:
+        return "unknown"
+    a = int(age)
+    if a < 90:
+        return f"{a}s ago"
+    if a < 5400:
+        return f"{a // 60}m ago"
+    if a < 172800:
+        return f"{a // 3600}h ago"
+    return f"{a // 86400}d ago"
+
+
+def provenance_title(ctx, deriv: str | None = None) -> str:
+    """Build the human-readable audit string shown on hover (RS-Lineage).
+
+    Lines: source tag (#id) · value+unit · quality (state + st) · captured age ·
+    origin. `deriv` (optional) carries a computed/Station derivation summary.
+    """
+    name = getattr(ctx, "name", "") or "(unknown)"
+    tid = getattr(ctx, "id", None)
+    val = getattr(ctx, "value", None)
+    txt = getattr(ctx, "text", None)
+    unit = getattr(ctx, "unit", None)
+    st = getattr(ctx, "quality", None)
+    src = getattr(ctx, "source", None)
+    state = quality_state(ctx)
+    if val is not None:
+        shown = f"{val:g}" + (f" {unit}" if unit else "")
+    elif txt:
+        shown = str(txt)
+    else:
+        shown = "—"
+    qual = _QUALITY_WORD.get(state, "Good")
+    lines = [
+        f"Source: {name}" + (f" (#{tid})" if tid is not None else ""),
+        f"Value: {shown}",
+        f"Quality: {qual}" + (f" (st {st})" if st is not None else ""),
+        f"Captured: {_age_phrase(getattr(ctx, 'age_seconds', None))}",
+        f"Origin: {_ORIGIN_LABEL.get(src, src or 'unknown')}",
+    ]
+    if deriv:
+        lines.append(f"Derivation: {deriv}")
+    return "\n".join(lines)
+
+
+def vwrap(ctx, formatted, lineage=False, quality=True, deriv=None):
+    """Unified value wrapper for quality markers + lineage tooltips.
+
+    - quality=True  : non-good values get a color class + text marker.
+    - lineage=True  : every value gets a provenance hover tooltip (title).
+    Good values with neither feature active pass through unchanged, so output
+    is byte-identical when both are off. Returns Markup (autoescape-safe).
+    """
+    from markupsafe import Markup, escape
+    safe = escape("" if formatted is None else str(formatted))
+    state = quality_state(ctx) if quality else None
+    if not lineage and not state:
+        return Markup(safe)
+    classes = []
+    if lineage:
+        classes.append("rpt-prov")
+    if state:
+        classes.append(f"rpt-q-{state}")
+    title = provenance_title(ctx, deriv) if lineage else QUALITY_MARK[state][1]
+    inner = safe
+    if state:
+        glyph, _ = QUALITY_MARK[state]
+        inner = f'{safe}<sup class="rpt-qm">{glyph}</sup>'
+    return Markup(f'<span class="{" ".join(classes)}" title="{escape(title)}">{inner}</span>')
+
+
 @dataclass
 class TagCtx:
     id: int | None = None
@@ -107,6 +190,7 @@ class TagCtx:
     quality_good: bool = False
     age_seconds: float | None = None
     description: str | None = None
+    source: str | None = None           # origin: modbus / opc_ua / computed / manual / csv ...
     named_set_id: int | None = None
     states: dict | None = None          # {raw_value:int -> display_text:str}
 
@@ -151,7 +235,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
         rows = db.execute(text("""
             SELECT t.id, t.name, t.description, t.named_set_id,
                    COALESCE(eu.code, t.engineering_unit) AS unit,
-                   lv.value_double, lv.value_text, lv.st,
+                   lv.value_double, lv.value_text, lv.st, lv.source,
                    CASE WHEN lv.time IS NULL THEN NULL
                         ELSE EXTRACT(EPOCH FROM (NOW() - lv.time))::float END AS age_seconds
             FROM tags t
@@ -173,7 +257,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
                     id=r["id"], name=r["name"], description=r["description"],
                     value=r["value_double"], text=r["value_text"], unit=r["unit"],
                     quality=st, quality_good=(st is not None and st >= GOOD_ST),
-                    age_seconds=r["age_seconds"],
+                    age_seconds=r["age_seconds"], source=r["source"],
                     named_set_id=r["named_set_id"],
                     states=states_by_set.get(r["named_set_id"]),
                 )
@@ -247,6 +331,8 @@ def render_report(
 
     # Fmt Phase 2 — quality markers (color + text marker).
     env.globals["qwrap"] = qwrap
+    # RS-Lineage — provenance tooltips + quality, unified.
+    env.globals["vwrap"] = vwrap
 
     template = env.from_string(template_html)
     body = template.render(**context)

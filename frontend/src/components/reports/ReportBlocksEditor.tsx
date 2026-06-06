@@ -449,12 +449,18 @@ export function ReportStyleEditor({ block, onPatch, scope = "report", advanced =
       <ColorField label="Table header background" value={th.table_header_bg} onChange={(v) => setTheme("table_header_bg", v)} />
       <ColorField label="Table header text" value={th.table_header_fg} onChange={(v) => setTheme("table_header_fg", v)} />
       <ColorField label="Alternate row" value={th.alt_row} onChange={(v) => setTheme("alt_row", v)} />
-      <div className="text-[11px] font-semibold pt-1" style={{ color: "var(--ios-gray-1)" }}>DATA QUALITY</div>
+      <div className="text-[11px] font-semibold pt-1" style={{ color: "var(--ios-gray-1)" }}>DATA QUALITY &amp; LINEAGE</div>
       <label className="flex items-center gap-2 text-[12px]" style={{ color: "var(--text-primary)" }}>
         <input type="checkbox"
           checked={(block.quality?.enabled ?? true) !== false}
           onChange={(e) => onPatch({ quality: { ...(block.quality ?? {}), enabled: e.target.checked } })} />
         Show data-quality markers (color + symbol on bad / uncertain / stale / missing)
+      </label>
+      <label className="flex items-center gap-2 text-[12px]" style={{ color: "var(--text-primary)" }}>
+        <input type="checkbox"
+          checked={(block.lineage?.enabled ?? true) !== false}
+          onChange={(e) => onPatch({ lineage: { ...(block.lineage ?? {}), enabled: e.target.checked } })} />
+        Show provenance tooltips (hover a value for source, quality, time, origin)
       </label>
       </>)}
       <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>

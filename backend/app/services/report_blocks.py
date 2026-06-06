@@ -187,7 +187,7 @@ def _fmt_expr(value_expr: str, fmt: str | None) -> str:
     return f"{{{{ {value_expr} }}}}"
 
 
-def _compile_block(b: dict, idx: int, q: bool = False) -> str:
+def _compile_block(b: dict, idx: int, q: bool = False, l: bool = False) -> str:
     t = b.get("type")
     bid = b.get("id", f"b{idx}")
 
@@ -252,7 +252,7 @@ def _compile_block(b: dict, idx: int, q: bool = False) -> str:
                 inner = "tag(%d).display" % tid
             else:
                 inner = "(tag(%d).value | fmt(%d))" % (tid, int(dec))
-            val = "{{ %s }}" % (("qwrap(tag(%d), %s)" % (tid, inner)) if q else inner)
+            val = "{{ %s }}" % (("vwrap(tag(%d), %s, %s, %s)" % (tid, inner, l, q)) if (q or l) else inner)
             unit_html = f'<span class="kpi-unit">{unit}</span>' if unit else ""
             cells.append(
                 f'<div class="rpt-kpi"><div class="kpi-val">{val}{unit_html}</div>'
@@ -269,7 +269,7 @@ def _compile_block(b: dict, idx: int, q: bool = False) -> str:
         panels = b.get("panels", [])
         inner = []
         for panel in panels:
-            sub = "\n".join(_compile_block(pb, j, q) for j, pb in enumerate(panel))
+            sub = "\n".join(_compile_block(pb, j, q, l) for j, pb in enumerate(panel))
             inner.append(f'<div class="rpt-col">{sub}</div>')
         return f'<div class="rpt-cols" style="grid-template-columns:repeat({n},1fr)">{"".join(inner)}</div>'
 
@@ -308,11 +308,11 @@ def _compile_block(b: dict, idx: int, q: bool = False) -> str:
                         tds.append('<td class="%s">&mdash;</td>' % numcls)
                     elif dec is None or dec == "":
                         inner = "tag(%d).display" % int(cid)
-                        expr = ("qwrap(tag(%d), %s)" % (int(cid), inner)) if q else inner
+                        expr = ("vwrap(tag(%d), %s, %s, %s)" % (int(cid), inner, l, q)) if (q or l) else inner
                         tds.append('<td class="%s">{{ %s }}</td>' % (numcls, expr))
                     else:
                         inner = "(tag(%d).value | fmt(%d))" % (int(cid), int(dec))
-                        expr = ("qwrap(tag(%d), %s)" % (int(cid), inner)) if q else inner
+                        expr = ("vwrap(tag(%d), %s, %s, %s)" % (int(cid), inner, l, q)) if (q or l) else inner
                         tds.append('<td class="%s">{{ %s }}</td>' % (numcls, expr))
                 rowcls = ' class="rpt-band"' if (band_rows and dr % 2 == 1) else ""
                 out.append('<tr%s><td>%s</td><td class="rpt-unit">%s</td>%s</tr>'
@@ -370,6 +370,8 @@ _BASE_CSS = """
   .rpt-q-stale{color:#6B7280;font-weight:600}
   .rpt-q-missing{color:#9CA3AF}
   .rpt-qm{font-size:.7em;font-weight:700;margin-left:1px;vertical-align:super;font-variant-numeric:normal}
+  /* RS-Lineage — values carry a provenance tooltip (hover); subtle dotted hint */
+  .rpt-prov{cursor:help;border-bottom:1px dotted rgba(100,116,139,.45)}
   .rpt-stream .num{text-align:right;font-variant-numeric:tabular-nums}
 </style>
 """
@@ -624,7 +626,7 @@ def _merge_style(default_style: dict | None, block: dict | None) -> dict | None:
         return {k: v for k, v in (d or {}).items() if v not in (None, "")}
 
     out: dict = {"type": "report_style"}
-    for k in ("theme", "time", "page", "quality"):
+    for k in ("theme", "time", "page", "quality", "lineage"):
         merged = {**(ds.get(k) or {}), **_set(b.get(k))}
         if merged:
             out[k] = merged
@@ -656,7 +658,11 @@ def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str =
     # default) can disable via report_style.quality.enabled = false.
     q_cfg = (style or {}).get("quality") or {}
     q_enabled = q_cfg.get("enabled", True)
-    body = "\n".join(_compile_block(b, i, q_enabled) for i, b in enumerate(flow))
+    # RS-Lineage — provenance hover tooltips on every value. Default on; disable
+    # via report_style.lineage.enabled = false.
+    l_cfg = (style or {}).get("lineage") or {}
+    l_enabled = l_cfg.get("enabled", True)
+    body = "\n".join(_compile_block(b, i, q_enabled, l_enabled) for i, b in enumerate(flow))
     return page + _BASE_CSS + theme + body
 
 
