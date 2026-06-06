@@ -120,6 +120,53 @@ def _age_phrase(age: float | None) -> str:
     return f"{a // 86400}d ago"
 
 
+def _input_ids(block_config: dict | None) -> list[int]:
+    """Pull referenced input tag ids out of a calc block_config (best-effort).
+
+    Aggregation blocks use inputs:[id,...]; some use [{"tag":id},...]; weighted
+    blocks also carry weights:[{"tag":id},...]. Tolerate all shapes, ignore the
+    rest so an unfamiliar block never breaks rendering.
+    """
+    out: list[int] = []
+    bc = block_config or {}
+    for key in ("inputs", "operands", "terms"):
+        raw = bc.get(key)
+        if isinstance(raw, list):
+            for x in raw:
+                if isinstance(x, int):
+                    out.append(x)
+                elif isinstance(x, dict):
+                    t = x.get("tag") or x.get("tag_id") or x.get("id")
+                    if isinstance(t, int):
+                        out.append(t)
+    return out
+
+
+def _weight_ids(block_config: dict | None) -> list[int]:
+    raw = (block_config or {}).get("weights")
+    out: list[int] = []
+    if isinstance(raw, list):
+        for x in raw:
+            if isinstance(x, dict):
+                t = x.get("tag") or x.get("tag_id") or x.get("id")
+                if isinstance(t, int):
+                    out.append(t)
+    return out
+
+
+def format_derivation(block_type: str, block_config: dict | None, name_of) -> str:
+    """One-line derivation summary, e.g. SUM_OF(A, B) or
+    WEIGHTED_AVG(A, B · weighted by W). `name_of(id) -> str` resolves names."""
+    names = [name_of(i) for i in _input_ids(block_config)]
+    weights = sorted({name_of(w) for w in _weight_ids(block_config)})
+    bt = block_type or "?"
+    if names and weights:
+        return f"{bt}({', '.join(names)} · weighted by {', '.join(weights)})"
+    if names:
+        return f"{bt}({', '.join(names)})"
+    return bt
+
+
 def provenance_title(ctx, deriv: str | None = None) -> str:
     """Build the human-readable audit string shown on hover (RS-Lineage).
 
@@ -148,6 +195,8 @@ def provenance_title(ctx, deriv: str | None = None) -> str:
         f"Captured: {_age_phrase(getattr(ctx, 'age_seconds', None))}",
         f"Origin: {_ORIGIN_LABEL.get(src, src or 'unknown')}",
     ]
+    if deriv is None:
+        deriv = getattr(ctx, "derivation", None)
     if deriv:
         lines.append(f"Derivation: {deriv}")
     return "\n".join(lines)
@@ -191,6 +240,7 @@ class TagCtx:
     age_seconds: float | None = None
     description: str | None = None
     source: str | None = None           # origin: modbus / opc_ua / computed / manual / csv ...
+    derivation: str | None = None       # RS-Lineage v1.1: computed/Station block + inputs
     named_set_id: int | None = None
     states: dict | None = None          # {raw_value:int -> display_text:str}
 
@@ -265,6 +315,46 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
             tags_by_key[ctx.name] = ctx
             if ctx.id is not None:
                 tags_by_key[f"id:{ctx.id}"] = ctx
+
+        # RS-Lineage v1.1 — enrich computed/Station values with their derivation
+        # (block + input names). A computed_tags row may drive its own tag
+        # (ct.id) and/or a separate output tag (ct.output_tag_id); match both.
+        present = [c.id for c in ordered if c.id is not None]
+        if present:
+            try:
+                crows = db.execute(text("""
+                    SELECT ct.id AS ct_id, ct.output_tag_id, ct.block_type, ct.block_config
+                    FROM computed_tags ct
+                    WHERE ct.id = ANY(:ids) OR ct.output_tag_id = ANY(:ids)
+                """), {"ids": present}).mappings().all()
+                if crows:
+                    # Resolve all referenced input/weight names in one query.
+                    need: set[int] = set()
+                    for cr in crows:
+                        bc = cr["block_config"]
+                        need.update(_input_ids(bc))
+                        need.update(_weight_ids(bc))
+                    name_map: dict[int, str] = {}
+                    if need:
+                        nrows = db.execute(
+                            text("SELECT id, name FROM tags WHERE id = ANY(:ids)"),
+                            {"ids": list(need)},
+                        ).mappings().all()
+                        name_map = {r["id"]: r["name"] for r in nrows}
+
+                    def _name_of(i: int) -> str:
+                        return name_map.get(i, f"#{i}")
+
+                    by_ctid = {c.id: c for c in ordered if c.id is not None}
+                    for cr in crows:
+                        deriv = format_derivation(cr["block_type"], cr["block_config"], _name_of)
+                        for key in (cr["ct_id"], cr["output_tag_id"]):
+                            c = by_ctid.get(key)
+                            if c is not None and not c.derivation:
+                                c.derivation = deriv
+            except Exception:
+                # Derivation is a nicety; never let it break a render.
+                pass
 
     def tag_lookup(key: Any) -> TagCtx:
         if isinstance(key, int):

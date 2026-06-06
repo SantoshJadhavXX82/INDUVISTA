@@ -73,11 +73,27 @@ def pick_device_and_tag(token):
     sys.exit("no device with tags found")
 
 
-def stream_block(fc_id, good_tag):
+def pick_computed_tag(token):
+    """Find a computed/Station tag (carries a derivation), or None if none exist."""
+    st, devs = _req("GET", "/api/devices", token=token)
+    if st != 200:
+        return None
+    comp = [d for d in devs if (d.get("protocol") == "computed"
+                                or "STATION" in (d.get("name") or "").upper())]
+    for d in comp:
+        st, tags = _req("GET", f"/api/tags?device_id={d['id']}&limit=1000", token=token)
+        if st == 200 and tags:
+            return d["name"], tags[0]["id"], tags[0]["name"]
+    return None
+
+
+def stream_block(fc_id, good_tag, comp_tag=None):
+    rows = [{"label": "flow", "cells": [good_tag], "decimals": 2}]
+    if comp_tag is not None:
+        rows.append({"label": "computed", "cells": [comp_tag], "decimals": 2})
     return {"id": "s1", "type": "stream_table",
             "columns": [{"label": "FC A", "device_id": fc_id}],
-            "sections": [{"name": "DATA", "rows": [
-                {"label": "flow", "cells": [good_tag], "decimals": 2}]}]}
+            "sections": [{"name": "DATA", "rows": rows}]}
 
 
 def find_or_create(token, blocks):
@@ -109,8 +125,15 @@ def main():
     token = login()
     fc_id, fc_name, good_tag, good_name = pick_device_and_tag(token)
     print(f"Device: {fc_name} (#{fc_id}) | tag: {good_name} (#{good_tag})")
+    comp = pick_computed_tag(token)
+    comp_tag = None
+    if comp:
+        c_dev, comp_tag, c_name = comp
+        print(f"Computed: {c_dev} | tag: {c_name} (#{comp_tag})")
+    else:
+        print("Computed: none found — derivation check will be skipped.")
 
-    sblk = stream_block(fc_id, good_tag)
+    sblk = stream_block(fc_id, good_tag, comp_tag)
     did = find_or_create(token, [sblk])
 
     st_on, on = preview(token, did, [sblk])
@@ -128,6 +151,8 @@ def main():
         ("disabling lineage + quality removes all value spans",
          ('class="rpt-prov' not in off) and ('class="rpt-q-' not in off)),
     ]
+    if comp_tag is not None:
+        hard.append(("computed value shows a Derivation line", "Derivation:" in on))
 
     print("--- HARD CHECKS ---")
     ok = True
