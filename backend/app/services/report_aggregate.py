@@ -41,6 +41,15 @@ DATA_FUNCTIONS = (
     "sum", "count", "delta", "availability", "missing_pct",
 )
 QUALITY_RULES = ("all", "good_only", "good_uncertain")
+
+# Held / Substituted are device-fabricated fill values (Phase 2c), never
+# measured data, so they are excluded from period aggregates AND from the
+# window-quality counts under every quality_rule. st_reason is written by the
+# acquisition workers (HOLD_LAST / SUBSTITUTED); compared case-insensitively.
+_EXCLUDE_FABRICATED = (
+    " AND (st_reason IS NULL OR upper(st_reason) NOT IN "
+    "('HOLD_LAST', 'HELD', 'SUBSTITUTED', 'SUBSTITUTE'))"
+)
 MISSING_ACTIONS = ("blank", "warning", "fail", "estimate")
 BAD_ACTIONS = ("blank", "warning", "fail", "last_good")
 VALUE_FORMATS = ("number", "text", "date", "percent", "scientific")
@@ -52,12 +61,18 @@ _SCALAR_AGG = {"average": "avg", "min": "min", "max": "max",
 
 def _st_filter(quality_rule: str) -> str:
     """SQL fragment restricting which samples feed a value aggregate.
-    Constants are inlined (module constants, never user input)."""
+    Constants are inlined (module constants, never user input).
+
+    Held / Substituted readings (Phase 2c device fault policy) are device-
+    fabricated fill values, not measured data, so they are EXCLUDED from every
+    aggregate regardless of quality_rule — a custody total must never silently
+    include a held or substituted value. Genuine good/uncertain/stale/bad stay
+    governed by the rule."""
     if quality_rule == "good_only":
-        return f" AND st >= {GOOD_ST}"
+        return _EXCLUDE_FABRICATED + f" AND st >= {GOOD_ST}"
     if quality_rule == "good_uncertain":
-        return f" AND st >= {SUSPECT_ST}"
-    return ""  # 'all'
+        return _EXCLUDE_FABRICATED + f" AND st >= {SUSPECT_ST}"
+    return _EXCLUDE_FABRICATED  # 'all' — still excludes fabricated fill values
 
 
 def derive_display_st(n_total: int, n_good: int) -> int | None:
@@ -85,13 +100,13 @@ def aggregate_value(db: Session, tag_id: int, func: str,
     p = {"t": tag_id, "s": start, "e": end, "good": GOOD_ST, "susp": SUSPECT_ST}
 
     # Window quality distribution over all numeric samples (any quality).
-    dist = db.execute(text("""
+    dist = db.execute(text(f"""
         SELECT count(*) AS n_total,
                count(*) FILTER (WHERE st >= :good) AS n_good,
                count(*) FILTER (WHERE st >= :susp AND st < :good) AS n_unc,
                count(*) FILTER (WHERE st < :susp) AS n_bad
         FROM tag_values
-        WHERE tag_id = :t AND time >= :s AND time < :e AND value_double IS NOT NULL
+        WHERE tag_id = :t AND time >= :s AND time < :e AND value_double IS NOT NULL{_EXCLUDE_FABRICATED}
     """), p).mappings().first()
     n_total = (dist["n_total"] if dist else 0) or 0
     n_good = (dist["n_good"] if dist else 0) or 0
