@@ -14,7 +14,7 @@
  */
 import { useState } from "react";
 import {
-  Plus, Trash2, ChevronUp, ChevronDown, Copy, ChevronRight,
+  Plus, Trash2, ChevronUp, ChevronDown, Copy, ChevronRight, GripVertical,
   Heading, PanelTop, PanelBottom, Palette, Type, Table, Gauge, Table2,
   BarChart3, Columns, Minus, SeparatorHorizontal, Code, Square,
 } from "lucide-react";
@@ -126,6 +126,9 @@ export function ReportBlocksEditor({
   const [adding, setAdding] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  // Drag-to-reorder state: index being dragged, and the current drop target.
+  const [dragIdx, setDragIdx] = useState<number | null>(null);
+  const [overIdx, setOverIdx] = useState<number | null>(null);
   const toggleOpen = (id: string) => setOpen((o) => ({ ...o, [id]: !o[id] }));
   // Page geometry is a per-report property (Settings tab), not part of the
   // theme cascade — the stream-table overflow check uses it directly.
@@ -142,6 +145,14 @@ export function ReportBlocksEditor({
     if (j < 0 || j >= blocks.length) return;
     const next = blocks.slice();
     [next[i], next[j]] = [next[j], next[i]];
+    onChange(next);
+  };
+  // Reorder by drag: pull `from` out and re-insert at `to`.
+  const moveTo = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= blocks.length || to >= blocks.length) return;
+    const next = blocks.slice();
+    const [item] = next.splice(from, 1);
+    next.splice(to, 0, item);
     onChange(next);
   };
 
@@ -188,11 +199,34 @@ export function ReportBlocksEditor({
         const isOpen = !!open[b.id];
         return (
         <div key={b.id} className="rounded-lg overflow-hidden"
-          style={{ border: "0.5px solid var(--separator)", backgroundColor: "var(--bg-elevated)" }}>
+          style={{
+            border: overIdx === i && dragIdx !== null && dragIdx !== i
+              ? "1px solid var(--ios-blue)" : "0.5px solid var(--separator)",
+            backgroundColor: "var(--bg-elevated)",
+            opacity: dragIdx === i ? 0.45 : 1,
+          }}
+          onDragOver={(e) => { if (dragIdx !== null) { e.preventDefault(); if (overIdx !== i) setOverIdx(i); } }}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (dragIdx !== null && dragIdx !== i) moveTo(dragIdx, i);
+            setDragIdx(null); setOverIdx(null);
+          }}>
           {/* block header bar (click to expand/collapse) */}
           <div className="flex items-center gap-2 px-3 py-2 cursor-pointer"
             style={{ borderBottom: isOpen ? "0.5px solid var(--separator)" : "none", backgroundColor: "var(--bg-grouped)" }}
             onClick={() => toggleOpen(b.id)}>
+            <span title="Drag to reorder" draggable
+              onClick={(e) => e.stopPropagation()}
+              onDragStart={(e) => {
+                setDragIdx(i);
+                e.dataTransfer.effectAllowed = "move";
+                try { e.dataTransfer.setData("text/plain", String(i)); } catch { /* some browsers */ }
+              }}
+              onDragEnd={() => { setDragIdx(null); setOverIdx(null); }}
+              className="cursor-grab active:cursor-grabbing -ml-1 px-0.5 shrink-0"
+              style={{ color: "var(--ios-gray-1)", touchAction: "none" }}>
+              <GripVertical className="h-4 w-4" />
+            </span>
             <ChevronRight className="h-3.5 w-3.5 opacity-50 transition-transform"
               style={{ transform: isOpen ? "rotate(90deg)" : "none" }} />
             <BlockIcon type={b.type} />
