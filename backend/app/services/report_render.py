@@ -35,6 +35,65 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 GOOD_ST = 128
+SUSPECT_ST = 64
+
+# Fmt Phase 2 — quality markers. Project standard (docs/modbus_quality_reference):
+#   st >= 128 -> Good · st == 64 -> Stale · 64 < st < 128 -> Uncertain ·
+#   st < 64 -> Bad · no value -> Missing. Color is ALWAYS paired with a text
+#   marker (never color alone) so reports stay readable in B/W and for the
+#   color-blind (spec FMT-004).
+QUALITY_MARK = {
+    "bad":       ("\u2717", "Bad / invalid reading"),   # ✗
+    "uncertain": ("?",      "Uncertain / suspect reading"),
+    "stale":     ("\u27f3", "Stale — not refreshed"),   # ⟳
+    "missing":   ("\u2013", "Missing — no data"),        # –
+}
+
+
+def quality_state(ctx) -> str | None:
+    """Classify a resolved tag's display quality, or None when good/unknown.
+
+    Accepts a TagCtx (or anything exposing value/text/quality). Returns one of
+    'bad' | 'uncertain' | 'stale' | 'missing', or None for good/unknown values
+    (which render plain — status-by-exception keeps good reports clean).
+    """
+    val = getattr(ctx, "value", None)
+    txt = getattr(ctx, "text", None)
+    st = getattr(ctx, "quality", None)
+    if val is None and (txt is None or txt == ""):
+        return "missing"
+    if st is None:
+        return None
+    try:
+        st = int(st)
+    except (TypeError, ValueError):
+        return None
+    if st < SUSPECT_ST:
+        return "bad"
+    if st == SUSPECT_ST:
+        return "stale"
+    if st < GOOD_ST:
+        return "uncertain"
+    return None  # good
+
+
+def qwrap(ctx, formatted):
+    """Wrap an already-formatted value with a quality color class + text marker.
+
+    Good/unknown values pass through unchanged. Returns Markup so the
+    autoescaping render env does not re-escape the wrapper; the inner value is
+    escaped defensively (enum labels/text may contain special characters).
+    """
+    from markupsafe import Markup, escape
+    safe = escape("" if formatted is None else str(formatted))
+    state = quality_state(ctx)
+    if not state:
+        return Markup(safe)
+    glyph, title = QUALITY_MARK[state]
+    return Markup(
+        f'<span class="rpt-q-{state}" title="{escape(title)}">{safe}'
+        f'<sup class="rpt-qm">{glyph}</sup></span>'
+    )
 
 
 @dataclass
@@ -185,6 +244,9 @@ def render_report(
         except Exception:
             return str(value)
     env.filters["localtime"] = localtime
+
+    # Fmt Phase 2 — quality markers (color + text marker).
+    env.globals["qwrap"] = qwrap
 
     template = env.from_string(template_html)
     body = template.render(**context)

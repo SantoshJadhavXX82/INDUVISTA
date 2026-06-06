@@ -124,6 +124,10 @@ def render_html(template_html: str, context: dict[str, Any],
     env.globals["header_block"] = lambda: Markup(render_header_band(_rep))
     env.globals["signoff_block"] = lambda: Markup(render_signoff_band(_so))
 
+    # Fmt Phase 2 — quality markers (color + text marker).
+    from app.services.report_render import qwrap
+    env.globals["qwrap"] = qwrap
+
     body = env.from_string(template_html).render(**context)
 
     # Standalone HTML: ensure a default style block exists if the template

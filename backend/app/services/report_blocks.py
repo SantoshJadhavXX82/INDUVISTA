@@ -187,7 +187,7 @@ def _fmt_expr(value_expr: str, fmt: str | None) -> str:
     return f"{{{{ {value_expr} }}}}"
 
 
-def _compile_block(b: dict, idx: int) -> str:
+def _compile_block(b: dict, idx: int, q: bool = False) -> str:
     t = b.get("type")
     bid = b.get("id", f"b{idx}")
 
@@ -249,9 +249,10 @@ def _compile_block(b: dict, idx: int) -> str:
             unit = _esc(it.get("unit", ""))
             dec = it.get("decimals")
             if dec is None or dec == "":
-                val = f'{{{{ tag({tid}).display }}}}'
+                inner = "tag(%d).display" % tid
             else:
-                val = f'{{{{ tag({tid}).value | fmt({int(dec)}) }}}}'
+                inner = "(tag(%d).value | fmt(%d))" % (tid, int(dec))
+            val = "{{ %s }}" % (("qwrap(tag(%d), %s)" % (tid, inner)) if q else inner)
             unit_html = f'<span class="kpi-unit">{unit}</span>' if unit else ""
             cells.append(
                 f'<div class="rpt-kpi"><div class="kpi-val">{val}{unit_html}</div>'
@@ -268,7 +269,7 @@ def _compile_block(b: dict, idx: int) -> str:
         panels = b.get("panels", [])
         inner = []
         for panel in panels:
-            sub = "\n".join(_compile_block(pb, j) for j, pb in enumerate(panel))
+            sub = "\n".join(_compile_block(pb, j, q) for j, pb in enumerate(panel))
             inner.append(f'<div class="rpt-col">{sub}</div>')
         return f'<div class="rpt-cols" style="grid-template-columns:repeat({n},1fr)">{"".join(inner)}</div>'
 
@@ -306,10 +307,13 @@ def _compile_block(b: dict, idx: int) -> str:
                     if cid in (None, ""):
                         tds.append('<td class="%s">&mdash;</td>' % numcls)
                     elif dec is None or dec == "":
-                        tds.append('<td class="%s">{{ tag(%d).display }}</td>' % (numcls, int(cid)))
+                        inner = "tag(%d).display" % int(cid)
+                        expr = ("qwrap(tag(%d), %s)" % (int(cid), inner)) if q else inner
+                        tds.append('<td class="%s">{{ %s }}</td>' % (numcls, expr))
                     else:
-                        tds.append('<td class="%s">{{ tag(%d).value | fmt(%d) }}</td>'
-                                   % (numcls, int(cid), int(dec)))
+                        inner = "(tag(%d).value | fmt(%d))" % (int(cid), int(dec))
+                        expr = ("qwrap(tag(%d), %s)" % (int(cid), inner)) if q else inner
+                        tds.append('<td class="%s">{{ %s }}</td>' % (numcls, expr))
                 rowcls = ' class="rpt-band"' if (band_rows and dr % 2 == 1) else ""
                 out.append('<tr%s><td>%s</td><td class="rpt-unit">%s</td>%s</tr>'
                            % (rowcls, _esc(r.get("label", "")), _esc(r.get("unit", "")), "".join(tds)))
@@ -360,6 +364,12 @@ _BASE_CSS = """
   .rpt-stream .rpt-stream-head td{text-decoration:underline;text-align:right}
   .rpt-stream .rpt-stream-sect{text-decoration:underline;padding-top:10px}
   .rpt-stream .rpt-unit{color:#555}
+  /* Fmt Phase 2 — quality markers (color + text marker, never color alone) */
+  .rpt-q-bad{color:#DC2626;font-weight:700}
+  .rpt-q-uncertain{color:#D97706;font-weight:700}
+  .rpt-q-stale{color:#6B7280;font-weight:600}
+  .rpt-q-missing{color:#9CA3AF}
+  .rpt-qm{font-size:.7em;font-weight:700;margin-left:1px;vertical-align:super;font-variant-numeric:normal}
   .rpt-stream .num{text-align:right;font-variant-numeric:tabular-nums}
 </style>
 """
@@ -614,7 +624,7 @@ def _merge_style(default_style: dict | None, block: dict | None) -> dict | None:
         return {k: v for k, v in (d or {}).items() if v not in (None, "")}
 
     out: dict = {"type": "report_style"}
-    for k in ("theme", "time", "page"):
+    for k in ("theme", "time", "page", "quality"):
         merged = {**(ds.get(k) or {}), **_set(b.get(k))}
         if merged:
             out[k] = merged
@@ -641,7 +651,12 @@ def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str =
     # the theme cascade — keeps a single source of truth for page geometry.
     page = _page_style(page_size, orientation, header, footer, (style or {}).get("time"))
     theme = _theme_css(style)
-    body = "\n".join(_compile_block(b, i) for i, b in enumerate(flow))
+    # Fmt Phase 2 — quality markers. Enabled by default; only NON-good values are
+    # marked, so all-good reports render identically. A report (or the global
+    # default) can disable via report_style.quality.enabled = false.
+    q_cfg = (style or {}).get("quality") or {}
+    q_enabled = q_cfg.get("enabled", True)
+    body = "\n".join(_compile_block(b, i, q_enabled) for i, b in enumerate(flow))
     return page + _BASE_CSS + theme + body
 
 
