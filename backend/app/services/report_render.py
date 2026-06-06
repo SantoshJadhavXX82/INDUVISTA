@@ -202,6 +202,36 @@ def provenance_title(ctx, deriv: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def _prov_data_attrs(ctx, deriv=None) -> str:
+    """Machine-readable provenance as data-p-* attributes for the click-through
+    side panel. Mirrors provenance_title fields; empty values are omitted. The
+    PDF/WeasyPrint ignores unknown data-* attributes, so this is render-safe."""
+    from markupsafe import escape
+    name = getattr(ctx, "name", "") or ""
+    tid = getattr(ctx, "id", None)
+    val = getattr(ctx, "value", None)
+    txt = getattr(ctx, "text", None)
+    unit = getattr(ctx, "unit", None)
+    st = getattr(ctx, "quality", None)
+    src = getattr(ctx, "source", None)
+    state = quality_state(ctx)
+    if deriv is None:
+        deriv = getattr(ctx, "derivation", None)
+    shown = (f"{val:g}" if val is not None else (str(txt) if txt else ""))
+    pairs = {
+        "name": name,
+        "id": "" if tid is None else str(tid),
+        "value": shown,
+        "unit": unit or "",
+        "quality": _QUALITY_WORD.get(state, "Good"),
+        "st": "" if st is None else str(st),
+        "age": _age_phrase(getattr(ctx, "age_seconds", None)),
+        "origin": _ORIGIN_LABEL.get(src, src or "unknown"),
+        "deriv": deriv or "",
+    }
+    return "".join(f' data-p-{k}="{escape(v)}"' for k, v in pairs.items() if v != "")
+
+
 def vwrap(ctx, formatted, lineage=False, quality=True, deriv=None):
     """Unified value wrapper for quality markers + lineage tooltips.
 
@@ -216,8 +246,10 @@ def vwrap(ctx, formatted, lineage=False, quality=True, deriv=None):
     if not lineage and not state:
         return Markup(safe)
     classes = []
+    attrs = ""
     if lineage:
         classes.append("rpt-prov")
+        attrs = _prov_data_attrs(ctx, deriv)
     if state:
         classes.append(f"rpt-q-{state}")
     title = provenance_title(ctx, deriv) if lineage else QUALITY_MARK[state][1]
@@ -225,7 +257,7 @@ def vwrap(ctx, formatted, lineage=False, quality=True, deriv=None):
     if state:
         glyph, _ = QUALITY_MARK[state]
         inner = f'{safe}<sup class="rpt-qm">{glyph}</sup>'
-    return Markup(f'<span class="{" ".join(classes)}" title="{escape(title)}">{inner}</span>')
+    return Markup(f'<span class="{" ".join(classes)}"{attrs} title="{escape(title)}">{inner}</span>')
 
 
 @dataclass

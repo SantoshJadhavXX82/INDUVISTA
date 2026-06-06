@@ -19,7 +19,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Plus, Trash2, Save, FileDown, Clock, FolderOutput, Tags as TagsIcon,
   Loader2, FileText, CheckCircle2, AlertCircle, LayoutGrid, Settings as SettingsIcon, Settings2, Boxes,
-  Calendar, History, Palette,
+  Calendar, History, Palette, X,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { TOKEN_KEY } from "@/lib/auth";
@@ -40,6 +40,73 @@ import { ReportPeriodTab } from "@/components/reports/ReportPeriodTab";
 import { ReportDataTab } from "@/components/reports/ReportDataTab";
 import { ReportRevisionsTab } from "@/components/reports/ReportRevisionsTab";
 import { ReportBlocksEditor, ReportStyleEditor, type Block } from "@/components/reports/ReportBlocksEditor";
+
+// ---- RS-Lineage side panel ------------------------------------------------
+// Provenance of a value clicked in the preview. The fields mirror the backend's
+// data-p-* attributes emitted by vwrap().
+type Prov = {
+  name: string; id: string; value: string; unit: string;
+  quality: string; st: string; age: string; origin: string; deriv: string;
+};
+
+// Injected ONLY into the preview iframe (never the saved report/PDF): turns a
+// click on any .rpt-prov value into a postMessage the parent listens for.
+const LINEAGE_BRIDGE =
+  '<style>.rpt-prov{cursor:pointer!important}</style>' +
+  '<script>(function(){document.addEventListener("click",function(e){' +
+  'var el=e.target&&e.target.closest?e.target.closest(".rpt-prov"):null;if(!el)return;' +
+  'var d=el.dataset||{};parent.postMessage({__induvista_lineage:true,prov:{' +
+  'name:d.pName||"",id:d.pId||"",value:d.pValue||"",unit:d.pUnit||"",' +
+  'quality:d.pQuality||"",st:d.pSt||"",age:d.pAge||"",origin:d.pOrigin||"",deriv:d.pDeriv||""' +
+  '}},"*");});})();</script>';
+
+const QUALITY_COLOR: Record<string, string> = {
+  Good: "#15803D", Uncertain: "#D97706", Bad: "#DC2626", Stale: "#6B7280", Missing: "#9CA3AF",
+};
+
+function LineageDrawer({ prov, onClose }: { prov: Prov; onClose: () => void }) {
+  const qc = QUALITY_COLOR[prov.quality] || "#6B7280";
+  const Row = ({ label, children }: { label: string; children: ReactNode }) => (
+    <div className="grid gap-0.5">
+      <div className="text-[11px] uppercase tracking-wide" style={{ color: "var(--ios-gray-1)" }}>{label}</div>
+      <div className="text-[13px]" style={{ color: "var(--text-primary)" }}>{children}</div>
+    </div>
+  );
+  return (
+    <>
+      <div onClick={onClose}
+        style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.25)", zIndex: 60 }} />
+      <div role="dialog" aria-label="Value provenance"
+        style={{ position: "fixed", top: 0, right: 0, height: "100%", width: 340, zIndex: 61,
+                 background: "var(--bg-elevated)", borderLeft: "0.5px solid var(--separator)",
+                 boxShadow: "-8px 0 24px rgba(0,0,0,0.12)", padding: 16, overflowY: "auto" }}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[14px] font-semibold" style={{ color: "var(--text-primary)" }}>Value provenance</div>
+          <button type="button" onClick={onClose} aria-label="Close"
+            className="p-1 rounded-md hover:opacity-70" style={{ color: "var(--ios-gray-1)" }}>
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="grid gap-3">
+          <Row label="Source tag">{prov.name}{prov.id ? ` (#${prov.id})` : ""}</Row>
+          <Row label="Value">{prov.value || "—"}{prov.unit ? ` ${prov.unit}` : ""}</Row>
+          <Row label="Quality">
+            <span className="inline-flex items-center gap-1.5">
+              <span style={{ width: 8, height: 8, borderRadius: 99, background: qc, display: "inline-block" }} />
+              {prov.quality}{prov.st ? ` · st ${prov.st}` : ""}
+            </span>
+          </Row>
+          <Row label="Captured">{prov.age || "unknown"}</Row>
+          <Row label="Origin">{prov.origin || "unknown"}</Row>
+          {prov.deriv && <Row label="Derivation">{prov.deriv}</Row>}
+        </div>
+        <p className="mt-4 text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+          Read-only audit detail from the current live snapshot.
+        </p>
+      </div>
+    </>
+  );
+}
 
 // ---- types mirroring the backend ----------------------------------------
 type Definition = {
@@ -273,6 +340,16 @@ function Editor({
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [previewErr, setPreviewErr] = useState<string | null>(null);
+  // RS-Lineage side panel: provenance of the value clicked in the preview iframe.
+  const [lineage, setLineage] = useState<Prov | null>(null);
+  useEffect(() => {
+    const h = (e: MessageEvent) => {
+      const d = e?.data as { __induvista_lineage?: boolean; prov?: Prov } | undefined;
+      if (d && d.__induvista_lineage && d.prov) setLineage(d.prov);
+    };
+    window.addEventListener("message", h);
+    return () => window.removeEventListener("message", h);
+  }, []);
   // multi-select output formats for on-demand download (tick any combination)
   type Fmt = "pdf" | "html" | "json" | "xml";
   const [previewFormats, setPreviewFormats] = useState<Set<Fmt>>(new Set<Fmt>(["pdf"]));
@@ -576,11 +653,12 @@ function Editor({
             </div>
           )}
           {previewHtml && (
-            <iframe title="Report preview" srcDoc={previewHtml}
+            <iframe title="Report preview" srcDoc={previewHtml + LINEAGE_BRIDGE}
               style={{ width: "100%", height: 520, borderRadius: 8,
                        border: "0.5px solid var(--separator)", backgroundColor: "#fff" }} />
           )}
         </div>
+        {lineage && <LineageDrawer prov={lineage} onClose={() => setLineage(null)} />}
       </SectionCard>
       )}
 

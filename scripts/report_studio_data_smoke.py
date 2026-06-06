@@ -213,6 +213,15 @@ def main():
         ("E off-toggle", "no quality spans when disabled", 'class="rpt-q-' not in (off or "")),
     ]
 
+    # GROUP F — side-panel data contract (data-p-* attributes the drawer reads)
+    checks += [
+        ("F side-panel", "value span carries data-p-name", "data-p-name=" in (on or "")),
+        ("F side-panel", "value span carries data-p-id + data-p-origin",
+         "data-p-id=" in (on or "") and "data-p-origin=" in (on or "")),
+    ]
+    if c_id is not None:
+        checks.append(("F side-panel", "computed value carries data-p-deriv", "data-p-deriv=" in (on or "")))
+
     # Report grouped.
     print("\n========== RESULTS ==========")
     ok = True
