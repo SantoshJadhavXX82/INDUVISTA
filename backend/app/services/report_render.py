@@ -43,11 +43,22 @@ SUSPECT_ST = 64
 #   marker (never color alone) so reports stay readable in B/W and for the
 #   color-blind (spec FMT-004).
 QUALITY_MARK = {
-    "bad":       ("\u2717", "Bad / invalid reading"),   # ✗
-    "uncertain": ("?",      "Uncertain / suspect reading"),
-    "stale":     ("\u27f3", "Stale — not refreshed"),   # ⟳
-    "missing":   ("\u2013", "Missing — no data"),        # –
+    "bad":         ("\u2717", "Bad / invalid reading"),       # ✗
+    "uncertain":   ("?",      "Uncertain / suspect reading"),
+    "stale":       ("\u27f3", "Stale — not refreshed"),       # ⟳
+    "missing":     ("\u2013", "Missing — no data"),           # –
+    "held":        ("\u2299", "Held — last good value"),      # ⊙
+    "substituted": ("\u2248", "Substituted value"),           # ≈
 }
+
+# st_reason values (case-insensitive) that mark a value as device-substituted or
+# held-last-good. Aligned with OPC-UA UncertainSubstituteValue / LastUsableValue
+# and the modbus worker's st_reason codes. Anything else falls back to the
+# numeric st bands, so existing data is classified exactly as before.
+_SUBST_REASONS = {"SUBSTITUTED", "SUBSTITUTE", "SUBSTITUTE_VALUE",
+                  "SUBSTITUTEVALUE", "UNCERTAINSUBSTITUTEVALUE"}
+_HOLD_REASONS = {"HOLD_LAST", "HELD", "LAST_GOOD", "LASTGOOD", "LAST_USABLE",
+                 "LASTUSABLEVALUE", "UNCERTAINLASTUSABLEVALUE"}
 
 
 def quality_state(ctx) -> str | None:
@@ -60,8 +71,16 @@ def quality_state(ctx) -> str | None:
     val = getattr(ctx, "value", None)
     txt = getattr(ctx, "text", None)
     st = getattr(ctx, "quality", None)
+    reason = (getattr(ctx, "st_reason", None) or "").strip().upper()
     if val is None and (txt is None or txt == ""):
         return "missing"
+    # A substituted or held value carries a real number (the substitute, or the
+    # last good reading), so the reason is authoritative — check it before the
+    # numeric bands. Fresh reads use other reasons (e.g. READ_OK) and fall through.
+    if reason in _SUBST_REASONS:
+        return "substituted"
+    if reason in _HOLD_REASONS:
+        return "held"
     if st is None:
         return None
     try:
@@ -105,7 +124,8 @@ _ORIGIN_LABEL = {
     "store_forward": "Store-and-forward",
 }
 _QUALITY_WORD = {None: "Good", "bad": "Bad", "uncertain": "Uncertain",
-                 "stale": "Stale", "missing": "Missing"}
+                 "stale": "Stale", "missing": "Missing",
+                 "held": "Held (last good)", "substituted": "Substituted"}
 
 
 def _age_phrase(age: float | None) -> str:
@@ -155,16 +175,77 @@ def _weight_ids(block_config: dict | None) -> list[int]:
     return out
 
 
+_ARITH_OP = {"ADD": "+", "SUB": "\u2212", "MUL": "\u00d7", "DIV": "\u00f7",
+             "MOD": "mod", "POW": "^", "MIN_OF_TWO": "min", "MAX_OF_TWO": "max"}
+
+
+def _operand_tag(spec):
+    """Tag id from an operand spec (int or {tag:id}); None for a constant."""
+    if isinstance(spec, int) and not isinstance(spec, bool):
+        return spec
+    if isinstance(spec, dict):
+        t = spec.get("tag") or spec.get("tag_id") or spec.get("id")
+        if isinstance(t, int) and not isinstance(t, bool):
+            return t
+    return None
+
+
+def _fmt_num(n) -> str:
+    try:
+        f = float(n)
+        return str(int(f)) if f == int(f) else f"{f:g}"
+    except (TypeError, ValueError):
+        return str(n)
+
+
+def _operand_label(spec, name_of) -> str:
+    """Display label for an operand: tag name, or the constant value."""
+    tid = _operand_tag(spec)
+    if tid is not None:
+        return name_of(tid)
+    if isinstance(spec, dict) and "value" in spec:
+        return _fmt_num(spec["value"])
+    if isinstance(spec, (int, float)) and not isinstance(spec, bool):
+        return _fmt_num(spec)
+    return "?"
+
+
+def _config_tag_ids(block_config: dict | None) -> list[int]:
+    """All input/weight/operand tag ids referenced by a calc block_config."""
+    ids = set(_input_ids(block_config)) | set(_weight_ids(block_config))
+    bc = block_config or {}
+    for key in ("left", "right"):
+        t = _operand_tag(bc.get(key))
+        if t is not None:
+            ids.add(t)
+    return list(ids)
+
+
 def format_derivation(block_type: str, block_config: dict | None, name_of) -> str:
-    """One-line derivation summary, e.g. SUM_OF(A, B) or
-    WEIGHTED_AVG(A, B · weighted by W). `name_of(id) -> str` resolves names."""
-    names = [name_of(i) for i in _input_ids(block_config)]
-    weights = sorted({name_of(w) for w in _weight_ids(block_config)})
+    """One-line derivation summary. Aggregation: SUM_OF(A, B) /
+    WEIGHTED_AVG(A, B \u00b7 weighted by W). Binary arithmetic: ADD(A + 200),
+    SUB(A \u2212 B), MIN_OF_TWO(A, B). `name_of(id) -> str` resolves names."""
+    bc = block_config or {}
     bt = block_type or "?"
+    names = [name_of(i) for i in _input_ids(bc)]
+    weights = sorted({name_of(w) for w in _weight_ids(bc)})
     if names and weights:
-        return f"{bt}({', '.join(names)} · weighted by {', '.join(weights)})"
+        return f"{bt}({', '.join(names)} \u00b7 weighted by {', '.join(weights)})"
     if names:
         return f"{bt}({', '.join(names)})"
+    # Binary arithmetic: left + (right | legacy value-as-constant).
+    if "left" in bc:
+        left = _operand_label(bc.get("left"), name_of)
+        right_spec = bc.get("right")
+        if right_spec is None and "value" in bc:
+            right_spec = {"value": bc["value"]}
+        if right_spec is not None:
+            right = _operand_label(right_spec, name_of)
+            op = _ARITH_OP.get(bt)
+            if op and op not in ("min", "max", "mod"):
+                return f"{bt}({left} {op} {right})"
+            return f"{bt}({left}, {right})"
+        return f"{bt}({left})"
     return bt
 
 
@@ -272,7 +353,12 @@ def vwrap(ctx, formatted, lineage=False, quality=True, deriv=None):
     inner = safe
     if state:
         glyph, _ = QUALITY_MARK[state]
-        inner = f'{safe}<sup class="rpt-qm">{glyph}</sup>'
+        if not safe or safe == "\u2014":
+            # No value to show (missing / empty) — render the marker alone so the
+            # cell is unmistakable instead of a faint stray dash.
+            inner = f'<span class="rpt-qm">{glyph}</span>'
+        else:
+            inner = f'{safe} <span class="rpt-qm">{glyph}</span>'
     return Markup(f'<span class="{" ".join(classes)}"{attrs} title="{escape(title)}">{inner}</span>')
 
 
@@ -288,6 +374,7 @@ class TagCtx:
     age_seconds: float | None = None
     description: str | None = None
     source: str | None = None           # origin: modbus / opc_ua / computed / manual / csv ...
+    st_reason: str | None = None         # worker status reason (HOLD_LAST, SUBSTITUTED, COMM_TIMEOUT...)
     derivation: str | None = None       # RS-Lineage v1.1: computed/Station block + inputs
     named_set_id: int | None = None
     states: dict | None = None          # {raw_value:int -> display_text:str}
@@ -333,7 +420,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
         rows = db.execute(text("""
             SELECT t.id, t.name, t.description, t.named_set_id,
                    COALESCE(eu.code, t.engineering_unit) AS unit,
-                   lv.value_double, lv.value_text, lv.st, lv.source,
+                   lv.value_double, lv.value_text, lv.st, lv.source, lv.st_reason,
                    CASE WHEN lv.time IS NULL THEN NULL
                         ELSE EXTRACT(EPOCH FROM (NOW() - lv.time))::float END AS age_seconds
             FROM tags t
@@ -356,6 +443,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
                     value=r["value_double"], text=r["value_text"], unit=r["unit"],
                     quality=st, quality_good=(st is not None and st >= GOOD_ST),
                     age_seconds=r["age_seconds"], source=r["source"],
+                    st_reason=r["st_reason"],
                     named_set_id=r["named_set_id"],
                     states=states_by_set.get(r["named_set_id"]),
                 )
@@ -380,8 +468,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
                     need: set[int] = set()
                     for cr in crows:
                         bc = cr["block_config"]
-                        need.update(_input_ids(bc))
-                        need.update(_weight_ids(bc))
+                        need.update(_config_tag_ids(bc))
                     name_map: dict[int, str] = {}
                     if need:
                         nrows = db.execute(

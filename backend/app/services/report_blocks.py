@@ -407,8 +407,10 @@ _BASE_CSS = """
   .rpt-q-bad{color:#DC2626;font-weight:700}
   .rpt-q-uncertain{color:#D97706;font-weight:700}
   .rpt-q-stale{color:#6B7280;font-weight:600}
-  .rpt-q-missing{color:#9CA3AF}
-  .rpt-qm{font-size:.7em;font-weight:700;margin-left:1px;vertical-align:super;font-variant-numeric:normal}
+  .rpt-q-missing{color:#9CA3AF;font-weight:600}
+  .rpt-q-held{color:#0891B2;font-weight:600}
+  .rpt-q-substituted{color:#7C3AED;font-weight:700}
+  .rpt-qm{font-size:.85em;font-weight:700;margin-left:1px;font-variant-numeric:normal}
   /* RS-Lineage — values carry a provenance tooltip (hover); subtle dotted hint */
   .rpt-prov{cursor:help;border-bottom:1px dotted rgba(100,116,139,.45)}
   .rpt-stream .num{text-align:right;font-variant-numeric:tabular-nums}

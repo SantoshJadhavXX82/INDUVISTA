@@ -98,3 +98,4 @@ test-results-ui/
 *.bak_*
 
 *.bak_*
+scripts/ui_smoke_fail.png

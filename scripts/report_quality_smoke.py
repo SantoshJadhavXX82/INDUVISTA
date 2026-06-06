@@ -91,10 +91,10 @@ def find_or_create(token, blocks):
     return body["id"]
 
 
-def preview(token, did, blocks):
+def preview(token, did, blocks, tag_ids):
     st, html = _req("POST", f"/api/report-config/definitions/{did}/preview", token=token, raw=True,
                     body={"template_mode": "blocks", "template_blocks": blocks, "force_live": True,
-                          "page_size": "A4", "orientation": "portrait"})
+                          "tag_ids": tag_ids, "page_size": "A4", "orientation": "portrait"})
     return st, html
 
 
@@ -107,12 +107,17 @@ def main():
 
     sblk = stream_block(fc_id, good_tag)
     did = find_or_create(token, [sblk])
+    bind = [good_tag, BOGUS_TAG]
+    # Isolate quality: turn lineage OFF so spans aren't prefixed with rpt-prov and
+    # this smoke tests the quality markers alone (the master smoke covers both).
+    lin_off = {"id": "rs0", "type": "report_style", "lineage": {"enabled": False}}
 
-    # ON (markers default-enabled)
-    st_on, on = preview(token, did, [sblk])
-    # OFF (report_style block disables markers)
-    off_blocks = [{"id": "rs", "type": "report_style", "quality": {"enabled": False}}, sblk]
-    st_off, off = preview(token, did, off_blocks)
+    # ON (quality markers on, lineage off)
+    st_on, on = preview(token, did, [lin_off, sblk], bind)
+    # OFF (quality + lineage both off)
+    off_blocks = [{"id": "rs", "type": "report_style",
+                   "quality": {"enabled": False}, "lineage": {"enabled": False}}, sblk]
+    st_off, off = preview(token, did, off_blocks, bind)
 
     hard = [
         ("preview ON returns 200", st_on == 200),
