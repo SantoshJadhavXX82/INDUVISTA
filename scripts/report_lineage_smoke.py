@@ -117,10 +117,10 @@ def find_or_create(token, blocks):
     return body["id"]
 
 
-def preview(token, did, blocks):
+def preview(token, did, blocks, tag_ids):
     return _req("POST", f"/api/report-config/definitions/{did}/preview", token=token, raw=True,
                 body={"template_mode": "blocks", "template_blocks": blocks, "force_live": True,
-                      "page_size": "A4", "orientation": "portrait"})
+                      "tag_ids": tag_ids, "page_size": "A4", "orientation": "portrait"})
 
 
 def main():
@@ -140,11 +140,22 @@ def main():
 
     sblk = stream_block(fc_id, good_tag, comp_tag)
     did = find_or_create(token, [sblk])
+    bind = [good_tag] + ([comp_tag] if comp_tag is not None else [])
 
-    st_on, on = preview(token, did, [sblk])
+    st_on, on = preview(token, did, [sblk], bind)
     off_blocks = [{"id": "rs", "type": "report_style",
                    "lineage": {"enabled": False}, "quality": {"enabled": False}}, sblk]
-    st_off, off = preview(token, did, off_blocks)
+    st_off, off = preview(token, did, off_blocks, bind)
+
+    # DEBUG — show the actual provenance tooltips rendered (so a failing
+    # derivation check is diagnosable at a glance).
+    import re
+    prov = [t for t in re.findall(r'title="([^"]*)"', on, re.S) if t.startswith("Source:")]
+    print("--- provenance tooltips in ON preview ---")
+    for t in prov:
+        print("  * " + t.replace("\n", " | "))
+    if not prov:
+        print("  (none found)")
 
     hard = [
         ("preview ON returns 200", st_on == 200),
