@@ -99,7 +99,10 @@ function isModbusDevice(
   device: Device | null,
   selectedChannel: Channel | undefined | null,
 ): boolean {
-  if (device) return device.protocol === "modbus";
+  // A device is "Modbus" unless it's a synthetic computed/OPC-UA device.
+  // Real Modbus devices are seeded as 'modbus_tcp' (also 'modbus_rtu'), so an
+  // exact === "modbus" test wrongly hid Host/Port + hardening for all of them.
+  if (device) return device.protocol !== "computed" && device.protocol !== "opc_ua";
   // No device yet (create flow) — defer to the channel.
   if (!selectedChannel) return true;
   return !isComputedChannel(selectedChannel) && !isOpcChannel(selectedChannel);

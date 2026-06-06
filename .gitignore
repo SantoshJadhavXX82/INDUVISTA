@@ -99,3 +99,7 @@ test-results-ui/
 
 *.bak_*
 scripts/ui_smoke_fail.png
+*.db-shm
+*.db-wal
+*.db-journal
+storage/sf_buffer.db*
