@@ -63,6 +63,11 @@ type Device = {
   retry_count: number;
   reconnect_initial_ms: number;
   reconnect_max_ms: number;
+  // Phase 2c — device fault policy
+  fault_mode: string;             // 'missing' | 'hold_last' | 'substitute'
+  substitute_value: number | null;
+  hold_mode: string;              // 'indefinite' | 'max_age'
+  max_hold_sec: number | null;
 };
 
 type Channel = {
@@ -265,6 +270,10 @@ type FormState = {
   retry_count: string;
   reconnect_initial_ms: string;
   reconnect_max_ms: string;
+  fault_mode: string;
+  substitute_value: string;
+  hold_mode: string;
+  max_hold_sec: string;
 };
 
 function DeviceForm({
@@ -312,6 +321,10 @@ function DeviceForm({
     retry_count: device ? String(device.retry_count) : "1",
     reconnect_initial_ms: device ? String(device.reconnect_initial_ms) : "1000",
     reconnect_max_ms: device ? String(device.reconnect_max_ms) : "30000",
+    fault_mode: device?.fault_mode ?? "missing",
+    substitute_value: device?.substitute_value != null ? String(device.substitute_value) : "0",
+    hold_mode: device?.hold_mode ?? "indefinite",
+    max_hold_sec: device?.max_hold_sec != null ? String(device.max_hold_sec) : "",
   });
   const [error, setError] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState("");
@@ -367,6 +380,23 @@ function DeviceForm({
           }
         : {};  // synthetic devices don't use Modbus hardening
 
+      const faultPolicy = isModbus
+        ? {
+            fault_mode: form.fault_mode,
+            substitute_value:
+              form.fault_mode === "substitute"
+                ? (form.substitute_value === "" ? 0 : parseFloat(form.substitute_value))
+                : null,
+            hold_mode: form.hold_mode,
+            max_hold_sec:
+              form.fault_mode === "hold_last" &&
+              form.hold_mode === "max_age" &&
+              form.max_hold_sec !== ""
+                ? parseInt(form.max_hold_sec, 10)
+                : null,
+          }
+        : {};
+
       // Validate duty/standby pairing intent (Modbus only)
       if (isModbus) {
         if (form.duty_role !== "none" && !form.partner_device_id) {
@@ -391,6 +421,7 @@ function DeviceForm({
           scan_interval_ms: parseInt(form.scan_interval_ms, 10),
           enabled: form.enabled,
           ...hardening,
+          ...faultPolicy,
         });
         if (isModbus && form.duty_role !== "none" && form.partner_device_id) {
           return api.post<Device>(`/devices/${created.id}/pair`, {
@@ -425,6 +456,7 @@ function DeviceForm({
             : null,
         } : {}),
         ...hardening,
+        ...faultPolicy,
       });
 
       if (!pairingChanged) return patched;
@@ -856,6 +888,78 @@ function DeviceForm({
                 onChange={(e) => setForm({ ...form, reconnect_max_ms: e.target.value })}
               />
             </div>
+          </div>
+        </details>
+      )}
+
+      {/* Device fault policy (Phase 2c) — Modbus only */}
+      {isModbus && (
+        <details className="rounded-md border bg-secondary/20 p-3 space-y-3" open={!isNew && form.fault_mode !== "missing"}>
+          <summary className="text-sm font-semibold cursor-pointer select-none">
+            Read-failure policy
+            <span className="text-xs text-muted-foreground font-normal ml-2">
+              (what a tag emits when a read fails — defaults to no value)
+            </span>
+          </summary>
+          <div className="space-y-3 mt-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="fault_mode">On read failure</Label>
+              <select
+                id="fault_mode"
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                value={form.fault_mode}
+                onChange={(e) => setForm({ ...form, fault_mode: e.target.value })}
+              >
+                <option value="missing">Show nothing (Missing) — never fabricates data</option>
+                <option value="hold_last">Hold last good value (Held)</option>
+                <option value="substitute">Substitute a fixed value (Substituted)</option>
+              </select>
+              <p className="text-xs text-muted-foreground">
+                Held and Substituted values are flagged in reports and excluded from totals by default.
+              </p>
+            </div>
+
+            {form.fault_mode === "substitute" && (
+              <div className="space-y-1.5">
+                <Label htmlFor="substitute_value">Substitute value</Label>
+                <Input
+                  id="substitute_value"
+                  type="number"
+                  step="any"
+                  value={form.substitute_value}
+                  onChange={(e) => setForm({ ...form, substitute_value: e.target.value })}
+                />
+              </div>
+            )}
+
+            {form.fault_mode === "hold_last" && (
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="hold_mode">Hold duration</Label>
+                  <select
+                    id="hold_mode"
+                    className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                    value={form.hold_mode}
+                    onChange={(e) => setForm({ ...form, hold_mode: e.target.value })}
+                  >
+                    <option value="indefinite">Hold until next good read</option>
+                    <option value="max_age">Hold up to a max age, then Bad</option>
+                  </select>
+                </div>
+                {form.hold_mode === "max_age" && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="max_hold_sec">Max hold (seconds)</Label>
+                    <Input
+                      id="max_hold_sec"
+                      type="number"
+                      min="1"
+                      value={form.max_hold_sec}
+                      onChange={(e) => setForm({ ...form, max_hold_sec: e.target.value })}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </details>
       )}

@@ -30,6 +30,8 @@ router = APIRouter(prefix="/api", tags=["devices"])
 
 
 DutyRole = Literal["duty", "standby", "none"]
+FaultMode = Literal["missing", "hold_last", "substitute"]
+HoldMode = Literal["indefinite", "max_age"]
 
 
 # ===========================================================================
@@ -59,6 +61,10 @@ class DeviceCreate(BaseModel):
     retry_count: int = Field(1, ge=0, le=10)
     reconnect_initial_ms: int = Field(1000, ge=100, le=60000)
     reconnect_max_ms: int = Field(30000, ge=100, le=300000)
+    fault_mode: FaultMode = "missing"
+    substitute_value: float | None = None
+    hold_mode: HoldMode = "indefinite"
+    max_hold_sec: int | None = Field(None, ge=1)
 
 
 class DeviceUpdate(BaseModel):
@@ -82,6 +88,10 @@ class DeviceUpdate(BaseModel):
     retry_count: int | None = Field(None, ge=0, le=10)
     reconnect_initial_ms: int | None = Field(None, ge=100, le=60000)
     reconnect_max_ms: int | None = Field(None, ge=100, le=300000)
+    fault_mode: FaultMode | None = None
+    substitute_value: float | None = None
+    hold_mode: HoldMode | None = None
+    max_hold_sec: int | None = Field(None, ge=1)
 
 
 class DeviceResponse(BaseModel):
@@ -108,6 +118,10 @@ class DeviceResponse(BaseModel):
     retry_count: int
     reconnect_initial_ms: int
     reconnect_max_ms: int
+    fault_mode: str
+    substitute_value: float | None
+    hold_mode: str
+    max_hold_sec: int | None
 
 
 _DEVICE_SELECT = """
@@ -117,7 +131,8 @@ _DEVICE_SELECT = """
            d.secondary_host, d.secondary_port, d.secondary_unit_id,
            d.redundant_device_id, d.duty_status_tag_id, d.manual_override, d.enabled,
            d.request_timeout_ms, d.retry_count,
-           d.reconnect_initial_ms, d.reconnect_max_ms
+           d.reconnect_initial_ms, d.reconnect_max_ms,
+           d.fault_mode, d.substitute_value, d.hold_mode, d.max_hold_sec
     FROM devices d
     JOIN channels c ON c.id = d.channel_id
 """
@@ -171,6 +186,10 @@ def _full_dev(row) -> dict[str, Any]:
         "retry_count": row.get("retry_count"),
         "reconnect_initial_ms": row.get("reconnect_initial_ms"),
         "reconnect_max_ms": row.get("reconnect_max_ms"),
+        "fault_mode": row.get("fault_mode"),
+        "substitute_value": row.get("substitute_value"),
+        "hold_mode": row.get("hold_mode"),
+        "max_hold_sec": row.get("max_hold_sec"),
     }
 
 
@@ -231,7 +250,8 @@ def create_device(
                     redundant_device_id, duty_status_tag_id,
                     manual_override, enabled,
                     request_timeout_ms, retry_count,
-                    reconnect_initial_ms, reconnect_max_ms
+                    reconnect_initial_ms, reconnect_max_ms,
+                    fault_mode, substitute_value, hold_mode, max_hold_sec
                 )
                 VALUES (
                     :channel_id, :name, :description, :protocol,
@@ -241,7 +261,8 @@ def create_device(
                     :redundant_device_id, :duty_status_tag_id,
                     :manual_override, :enabled,
                     :request_timeout_ms, :retry_count,
-                    :reconnect_initial_ms, :reconnect_max_ms
+                    :reconnect_initial_ms, :reconnect_max_ms,
+                    :fault_mode, :substitute_value, :hold_mode, :max_hold_sec
                 )
                 RETURNING id
             """),
