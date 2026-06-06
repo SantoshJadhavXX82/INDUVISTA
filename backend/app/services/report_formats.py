@@ -130,6 +130,10 @@ def render_html(template_html: str, context: dict[str, Any],
     # RS-Lineage — provenance tooltips + quality, unified.
     from app.services.report_render import vwrap
     env.globals["vwrap"] = vwrap
+    from app.services.report_render import prov_quality, prov_age, prov_origin
+    env.globals["prov_quality"] = prov_quality
+    env.globals["prov_age"] = prov_age
+    env.globals["prov_origin"] = prov_origin
 
     body = env.from_string(template_html).render(**context)
 

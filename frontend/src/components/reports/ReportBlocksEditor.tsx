@@ -496,6 +496,12 @@ export function ReportStyleEditor({ block, onPatch, scope = "report", advanced =
           onChange={(e) => onPatch({ lineage: { ...(block.lineage ?? {}), enabled: e.target.checked } })} />
         Show provenance tooltips (hover a value for source, quality, time, origin)
       </label>
+      <label className="flex items-center gap-2 text-[12px]" style={{ color: "var(--text-primary)" }}>
+        <input type="checkbox"
+          checked={(block.lineage?.appendix ?? false) === true}
+          onChange={(e) => onPatch({ lineage: { ...(block.lineage ?? {}), appendix: e.target.checked } })} />
+        Append a Data Lineage table (visible in the PDF / print)
+      </label>
       </>)}
       <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
         {isGlobal

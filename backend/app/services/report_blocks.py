@@ -672,6 +672,40 @@ def _merge_style(default_style: dict | None, block: dict | None) -> dict | None:
     return out
 
 
+# RS-Lineage printed appendix (opt-in). Renders a visible "Data Lineage" table
+# from the resolved context (tags_list), present on both live and period paths.
+# Uses prov_* globals registered in the render envs.
+_LINEAGE_APPENDIX = (
+    "<style>"
+    ".rpt-lineage-appendix{margin-top:16px;page-break-inside:auto}"
+    ".rpt-lin-h{font-size:11px;font-weight:700;margin:8px 0 4px;border-top:1px solid #94a3b8;padding-top:6px}"
+    ".rpt-lin-cap{font-size:8.5px;color:#64748b;margin:0 0 4px}"
+    ".rpt-lin-tbl{width:100%;border-collapse:collapse;font-size:9px}"
+    ".rpt-lin-tbl th,.rpt-lin-tbl td{border:0.5px solid #cbd5e1;padding:2px 5px;text-align:left;vertical-align:top}"
+    ".rpt-lin-tbl thead th{background:#f1f5f9;font-weight:600}"
+    ".rpt-lin-tbl td.num{text-align:right;font-variant-numeric:tabular-nums}"
+    "</style>"
+    "{% if tags_list %}"
+    '<div class="rpt-lineage-appendix">'
+    '<div class="rpt-lin-h">Data Lineage</div>'
+    '<p class="rpt-lin-cap">Provenance of every value used in this report \u2014 '
+    "source tag, current value, quality, capture age, origin and derivation.</p>"
+    '<table class="rpt-lin-tbl"><thead><tr>'
+    "<th>Tag</th><th>Value</th><th>Quality</th><th>Captured</th><th>Origin</th><th>Derivation</th>"
+    "</tr></thead><tbody>"
+    "{% for t in tags_list %}<tr>"
+    "<td>{{ t.name }}{% if t.id %} (#{{ t.id }}){% endif %}</td>"
+    '<td class="num">{{ t.display }}{% if t.unit %} {{ t.unit }}{% endif %}</td>'
+    "<td>{{ prov_quality(t) }}{% if t.quality is not none %} (st {{ t.quality }}){% endif %}</td>"
+    "<td>{{ prov_age(t.age_seconds) }}</td>"
+    "<td>{{ prov_origin(t.source) }}</td>"
+    '<td>{{ t.derivation or "\u2014" }}</td>'
+    "</tr>{% endfor %}"
+    "</tbody></table></div>"
+    "{% endif %}"
+)
+
+
 def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str = "portrait",
                    default_style: dict | None = None) -> str:
     """Compile an ordered block list into a Jinja2 HTML template string.
@@ -702,6 +736,10 @@ def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str =
     l_cfg = (style or {}).get("lineage") or {}
     l_enabled = l_cfg.get("enabled", True)
     body = "\n".join(_compile_block(b, i, q_enabled, l_enabled) for i, b in enumerate(flow))
+    # RS-Lineage printed appendix (opt-in) — a visible "Data Lineage" table so
+    # provenance survives in the PDF, where hover/click do not exist.
+    if l_cfg.get("appendix", False):
+        body += _LINEAGE_APPENDIX
     return page + _BASE_CSS + theme + body
 
 

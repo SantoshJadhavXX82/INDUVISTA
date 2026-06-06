@@ -101,6 +101,7 @@ _ORIGIN_LABEL = {
     "modbus": "Modbus", "opc_ua": "OPC UA", "mqtt": "MQTT",
     "computed": "Computed", "calc": "Computed",
     "csv": "CSV import", "manual": "Manual entry",
+    "estimated": "Estimated",
     "store_forward": "Store-and-forward",
 }
 _QUALITY_WORD = {None: "Good", "bad": "Bad", "uncertain": "Uncertain",
@@ -230,6 +231,21 @@ def _prov_data_attrs(ctx, deriv=None) -> str:
         "deriv": deriv or "",
     }
     return "".join(f' data-p-{k}="{escape(v)}"' for k, v in pairs.items() if v != "")
+
+
+def prov_quality(ctx) -> str:
+    """Quality word for the lineage appendix table."""
+    return _QUALITY_WORD.get(quality_state(ctx), "Good")
+
+
+def prov_age(secs) -> str:
+    """Captured-age phrase for the lineage appendix table."""
+    return _age_phrase(secs)
+
+
+def prov_origin(src) -> str:
+    """Origin label for the lineage appendix table."""
+    return _ORIGIN_LABEL.get(src, src or "unknown")
 
 
 def vwrap(ctx, formatted, lineage=False, quality=True, deriv=None):
@@ -455,6 +471,10 @@ def render_report(
     env.globals["qwrap"] = qwrap
     # RS-Lineage — provenance tooltips + quality, unified.
     env.globals["vwrap"] = vwrap
+    # RS-Lineage printed appendix helpers.
+    env.globals["prov_quality"] = prov_quality
+    env.globals["prov_age"] = prov_age
+    env.globals["prov_origin"] = prov_origin
 
     template = env.from_string(template_html)
     body = template.render(**context)

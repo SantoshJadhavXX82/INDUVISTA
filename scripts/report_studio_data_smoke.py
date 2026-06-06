@@ -162,6 +162,13 @@ def main():
                   body={"template_mode": "blocks", "template_blocks": off_blocks,
                         "force_live": True, "page_size": "A4", "orientation": "portrait"})
 
+    # appendix ON (report_style block enables the printed Data Lineage table)
+    app_blocks = [{"id": "rs", "type": "report_style",
+                   "lineage": {"enabled": True, "appendix": True}}] + blocks
+    _, app = _try("POST", f"/api/report-config/definitions/{did}/preview", token=token, raw=True,
+                  body={"template_mode": "blocks", "template_blocks": app_blocks,
+                        "force_live": True, "page_size": "A4", "orientation": "portrait"})
+
     # Show the real tooltips for visibility.
     prov = [t for t in re.findall(r'title="([^"]*)"', on or "", re.S) if t.startswith("Source:")]
     print("\n--- provenance tooltips rendered (ON) ---")
@@ -221,6 +228,16 @@ def main():
     ]
     if c_id is not None:
         checks.append(("F side-panel", "computed value carries data-p-deriv", "data-p-deriv=" in (on or "")))
+
+    # GROUP G — printed lineage appendix (PDF/print-visible Data Lineage table)
+    checks += [
+        ("G appendix", "default preview has NO appendix", "rpt-lineage-appendix" not in (on or "")),
+        ("G appendix", "appendix ON renders the Data Lineage table",
+         'class="rpt-lineage-appendix"' in (app or "") and "Data Lineage" in (app or "")),
+        ("G appendix", "appendix lists the polled tag", f"(#{p_id})" in (app or "")),
+    ]
+    if c_id is not None:
+        checks.append(("G appendix", "appendix lists the computed tag", f"(#{c_id})" in (app or "")))
 
     # Report grouped.
     print("\n========== RESULTS ==========")
