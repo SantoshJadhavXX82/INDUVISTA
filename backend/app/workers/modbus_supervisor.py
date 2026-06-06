@@ -205,6 +205,12 @@ def _run_stale_check(eng) -> int:
         # This stops healthy tags on slow blocks (e.g. 60s chromatograph
         # blocks) from being swept in the gap between scans, while a dead
         # fast tag still trips at stale_after_sec.
+        # Phase 2c.1 — modbus-scoped. This sweep runs in the MODBUS worker and
+        # must only stale tags it actually polls. Computed tags (calc evaluator)
+        # and OPC tags (opc worker) manage their own freshness on their own
+        # cadence; staling them here falsely flagged healthy computed outputs
+        # as Bad whenever the calc cadence (1-3 min) exceeded their device's
+        # stale_after_sec. The d.protocol LIKE 'modbus%' filter excludes them.
         result = conn.execute(text("""
             UPDATE latest_tag_values lv
             SET st = 64, st_reason = 'STALE'
@@ -212,6 +218,7 @@ def _run_stale_check(eng) -> int:
             JOIN devices d ON d.id = t.device_id
             LEFT JOIN register_blocks b ON b.id = t.register_block_id
             WHERE lv.tag_id = t.id
+              AND d.protocol LIKE 'modbus%'
               AND t.writable = false
               AND lv.st >= 128
               AND lv.time < NOW() - (
