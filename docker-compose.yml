@@ -31,6 +31,19 @@ services:
     image: timescale/timescaledb:latest-pg16
     container_name: svj_postgres
     restart: unless-stopped
+    # synchronous_commit=off: commits return without waiting for the WAL fsync.
+    # The database stays crash-CONSISTENT (this is NOT fsync=off) — the only risk
+    # is losing the last few hundred ms of committed telemetry on an unclean
+    # shutdown, which is acceptable for a historian (tags are re-polled every
+    # second, computed tags re-derived each cycle, latest_tag_values is
+    # continuously overwritten). This removes the WAL-fsync wait that caused
+    # multi-second worker cycle stalls on Docker/Windows storage (see
+    # PERFORMANCE_AUDIT.md). The timescale entrypoint still runs initdb and
+    # reads postgresql.conf, so shared_preload_libraries=timescaledb is intact.
+    # NOTE: when durability-critical writes land (e-signatures / custody
+    # transfer), those transactions must override this with
+    # `SET LOCAL synchronous_commit = on;` — keep telemetry on the global off.
+    command: ["postgres", "-c", "synchronous_commit=off"]
     env_file:
       - .env
     ports:
