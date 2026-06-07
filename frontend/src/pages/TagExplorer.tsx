@@ -617,7 +617,7 @@ export default function TagExplorer() {
       <Card>
         <CardContent className="p-0">
           <Table>
-            <TableHeader>
+            <TableHeader className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-background">
               <TableRow>
                 <TableHead className="w-10">
                   <input
@@ -629,6 +629,7 @@ export default function TagExplorer() {
                     aria-label="Select all visible tags"
                   />
                 </TableHead>
+                <TableHead className="w-12 text-right">#</TableHead>
                 <TableHead>Name</TableHead>
                 <TableHead>Groups</TableHead>
                 <TableHead>Device</TableHead>
@@ -655,6 +656,15 @@ export default function TagExplorer() {
                    so the checkbox column is rendered as empty and clicks on
                    the row are no-ops. The Quality column shows the live
                    value's quality from the currently-active (duty) side. */
+                // Continuous serial number in display order. The IIFE re-runs
+                // each render (rowSerial resets to 0), and renderPairRow /
+                // renderRow are invoked in the same order the rows are spread
+                // into the output ([...pairSection, ...physicalSection]), so
+                // nextSerial() yields a stable top-to-bottom 1..N. Section
+                // header rows don't call it, so they don't consume a number.
+                let rowSerial = 0;
+                const nextSerial = () => (rowSerial += 1);
+
                 const renderPairRow = (pt: PairTagLive) => {
                   return (
                     <TableRow
@@ -663,6 +673,9 @@ export default function TagExplorer() {
                       style={{ backgroundColor: "color-mix(in oklab, var(--ios-blue-soft) 30%, transparent)" }}
                     >
                       <TableCell />
+                      <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
+                        {nextSerial()}
+                      </TableCell>
                       <TableCell className="font-medium">
                         <span className="inline-flex items-center gap-1.5">
                           {pt.tag_name}
@@ -757,6 +770,9 @@ export default function TagExplorer() {
                         onChange={() => toggleTag(t.tag_id)}
                         aria-label={`Select ${t.tag_name}`}
                       />
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
+                      {nextSerial()}
                     </TableCell>
                     <TableCell className="font-medium">
                       <span className="inline-flex items-center gap-1.5">
@@ -905,7 +921,7 @@ export default function TagExplorer() {
                   const primaryId = headRow.primary_device_id;
                   return [
                   <TableRow key={`pair-hdr-${g.key}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={11} className="py-1.5 text-xs">
+                    <TableCell colSpan={12} className="py-1.5 text-xs">
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <span className="font-semibold flex items-center gap-2 flex-wrap">
                           {g.label}
@@ -1018,7 +1034,7 @@ export default function TagExplorer() {
 
                 const physicalSection = groups.flatMap((g) => [
                   <TableRow key={`hdr-${g.id}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={11} className="py-1.5 text-xs font-semibold">
+                    <TableCell colSpan={12} className="py-1.5 text-xs font-semibold">
                       {g.name}
                       <span className="ml-2 font-normal text-muted-foreground tabular-nums">
                         {g.rows.length} tag{g.rows.length === 1 ? "" : "s"}
