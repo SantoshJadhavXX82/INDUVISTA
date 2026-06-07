@@ -307,12 +307,20 @@ def load_definitions(db) -> list[CalcDef]:
 def latest_inputs(db, tag_ids: list[int]) -> dict[int, InputSample]:
     if not tag_ids:
         return {}
+    # Read current input values from latest_tag_values (one indexed row per
+    # tag, PK on tag_id) instead of scanning the multi-million-row tag_values
+    # hypertable with DISTINCT ON. latest_tag_values already holds the current
+    # value/quality per tag — exactly what a calc input needs — so this is a
+    # point lookup rather than a cross-chunk history scan, which is what let the
+    # evaluator fall ~140s behind its 1s cadence under write load. The max_age
+    # guard is preserved: an input whose latest sample is older than
+    # MAX_INPUT_AGE_SEC is omitted and treated as missing (value=None, st=0),
+    # identical to the previous behaviour.
     rows = db.execute(text("""
-        SELECT DISTINCT ON (tag_id) tag_id, value_double, st
-        FROM tag_values
+        SELECT tag_id, value_double, st
+        FROM latest_tag_values
         WHERE tag_id = ANY(:ids)
           AND time >= NOW() - make_interval(secs => :max_age)
-        ORDER BY tag_id, time DESC
     """), {"ids": tag_ids, "max_age": MAX_INPUT_AGE_SEC}).mappings().all()
 
     out: dict[int, InputSample] = {}
@@ -350,21 +358,22 @@ def write_output(db, defn: CalcDef, result: BlockResult, when: datetime) -> None
 
     db.execute(text("""
         INSERT INTO tag_values
-            (time, tag_id, device_id, value_double, st, source)
+            (time, tag_id, device_id, value_double, st, st_reason, source)
         VALUES
-            (:time, :tag_id, :device_id, :value, :st, 'estimated')
+            (:time, :tag_id, :device_id, :value, :st, 'COMPUTED', 'estimated')
     """), params)
 
     db.execute(text("""
         INSERT INTO latest_tag_values
-            (tag_id, device_id, time, value_double, st, source, updated_at)
+            (tag_id, device_id, time, value_double, st, st_reason, source, updated_at)
         VALUES
-            (:tag_id, :device_id, :time, :value, :st, 'estimated', NOW())
+            (:tag_id, :device_id, :time, :value, :st, 'COMPUTED', 'estimated', NOW())
         ON CONFLICT (tag_id) DO UPDATE SET
             device_id    = EXCLUDED.device_id,
             time         = EXCLUDED.time,
             value_double = EXCLUDED.value_double,
             st           = EXCLUDED.st,
+            st_reason    = EXCLUDED.st_reason,
             source       = EXCLUDED.source,
             updated_at   = EXCLUDED.updated_at
     """), params)
@@ -646,22 +655,10 @@ def tick_once(db, scheduler: SchedulerState, defs: list[CalcDef]) -> int:
     success = 0
     for d in sorted_due:
         _run_one(db, scheduler, d)
-        # Per-tag commit (Phase 17). Committing after each tag bounds
-        # the worst-case data loss on SIGKILL to a single tag's writes
-        # instead of an entire cycle's. The next tag's begin_nested()
-        # auto-opens a fresh transaction.
-        try:
-            db.commit()
-        except Exception as e:
-            # If the commit itself fails (rare), log and rollback so
-            # the next tag starts with a clean session. Don't propagate
-            # — the next cycle will reattempt this tag.
-            log.exception("commit failed after computed_tag id=%d: %s", d.id, e)
-            db.rollback()
         success += 1
 
-        # Honor an in-flight shutdown request: stop processing more
-        # tags in this cycle. The current tag is already committed.
+        # Honor an in-flight shutdown request: stop processing more tags in
+        # this cycle; the commit below still persists what we completed.
         if _shutting_down:
             log.info(
                 "calc_evaluator: shutdown requested mid-cycle; "
@@ -669,6 +666,21 @@ def tick_once(db, scheduler: SchedulerState, defs: list[CalcDef]) -> int:
                 success, len(sorted_due),
             )
             break
+
+    # Per-CYCLE commit (Phase 2c.2 — throughput). We previously committed
+    # after every tag; on a busy historian that is ~80 WAL fsyncs per cycle
+    # and was the dominant cost keeping the evaluator from holding its 1s
+    # cadence (a full pass took ~20-30s under concurrent write load). Each tag
+    # still runs inside its own begin_nested() savepoint (see _run_one), so a
+    # single failing tag rolls back only its own work and the rest of the
+    # cycle still commits here. Computed outputs are fully re-derived every
+    # cycle, so the worst case on SIGKILL — losing the current cycle's writes
+    # — is corrected on the very next tick.
+    try:
+        db.commit()
+    except Exception as e:
+        log.exception("calc cycle commit failed after %d tags: %s", success, e)
+        db.rollback()
 
     return success
 
