@@ -129,6 +129,7 @@ def load_polling_config() -> list[dict]:
                        d.scan_interval_ms,
                        d.request_timeout_ms, d.retry_count,
                        d.reconnect_initial_ms, d.reconnect_max_ms,
+                       d.connection_mode, d.redundant_host, d.redundant_port,
                        d.fault_mode, d.substitute_value,
                        d.hold_mode, d.max_hold_sec,
                        d.channel_id,
@@ -404,6 +405,32 @@ class DeviceWorker:
         self._current_backoff_sec: float = (
             device.get("reconnect_initial_ms", 1000) / 1000.0
         )
+
+        # Phase 9 — connection redundancy. Ordered endpoint list: primary
+        # (host:port) first, then the redundant backup if the device is in
+        # 'redundant' mode and a backup host+port are configured. Simplex
+        # devices have a single endpoint and behave exactly as before. The
+        # connect path always tries from the top, so a recovered primary is
+        # preferred again — i.e. automatic failback on the next reconnect.
+        #
+        # NOTE: this worker's config load also includes Computed/OPC devices
+        # (NULL host/port, non-tcp transport). They never reach the connect
+        # path — run() gates them out first — so we build an empty endpoint
+        # list for them rather than coercing NULLs to int.
+        self._endpoints: list[tuple[str, int]] = []
+        if device.get("host") is not None and device.get("port") is not None:
+            self._endpoints.append((str(device["host"]), int(device["port"])))
+        if (
+            str(device.get("connection_mode") or "simplex") == "redundant"
+            and device.get("redundant_host")
+            and device.get("redundant_port")
+        ):
+            self._endpoints.append(
+                (str(device["redundant_host"]), int(device["redundant_port"]))
+            )
+        # Index into _endpoints of the currently-live connection — used only
+        # to log failover/failback transitions once (not every cycle).
+        self._active_ep_idx: int = 0
 
         # Phase 5b state — consecutive failures for status reporting.
         self._consecutive_failures = 0
@@ -1045,32 +1072,52 @@ class DeviceWorker:
                 return False
 
             timeout_sec = self.device["request_timeout_ms"] / 1000.0
-            try:
-                self.log.info(
-                    "Connecting to %s:%d ...",
-                    self.device["host"], self.device["port"],
-                )
-                self.client = AsyncModbusTcpClient(
-                    host=self.device["host"],
-                    port=self.device["port"],
-                    timeout=timeout_sec,
-                )
-                await self.client.connect()
-                if self.client.connected:
-                    self.log.info("Connected.")
-                    # Reset backoff
-                    self._current_backoff_sec = (
-                        self.device["reconnect_initial_ms"] / 1000.0
-                    )
-                    self._next_connect_attempt_mono = 0.0
-                    self._consecutive_failures = 0
-                    return True
-                self.client = None
-            except Exception as e:
-                self.log.warning("Connect failed: %s", e)
-                self.client = None
 
-            # Connect failed — schedule next attempt with exponential backoff.
+            # Phase 9 — try endpoints in priority order (primary, then the
+            # redundant backup). The first that connects wins; we only enter
+            # backoff once EVERY endpoint has failed this attempt. For simplex
+            # devices the list has a single entry, so this behaves exactly as
+            # the original single-endpoint connect.
+            redundant = len(self._endpoints) > 1
+            for idx, (host, port) in enumerate(self._endpoints):
+                label = "primary" if idx == 0 else "redundant"
+                try:
+                    if redundant:
+                        self.log.info("Connecting to %s:%d (%s) ...", host, port, label)
+                    else:
+                        self.log.info("Connecting to %s:%d ...", host, port)
+                    client = AsyncModbusTcpClient(
+                        host=host, port=port, timeout=timeout_sec,
+                    )
+                    await client.connect()
+                    if client.connected:
+                        self.client = client
+                        if redundant and idx != self._active_ep_idx:
+                            self.log.warning(
+                                "Failover: now connected via %s endpoint %s:%d",
+                                label, host, port,
+                            )
+                        self._active_ep_idx = idx
+                        self.log.info("Connected.")
+                        # Reset backoff
+                        self._current_backoff_sec = (
+                            self.device["reconnect_initial_ms"] / 1000.0
+                        )
+                        self._next_connect_attempt_mono = 0.0
+                        self._consecutive_failures = 0
+                        return True
+                    # connected flag false — close this client, try the next.
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self.log.warning(
+                        "Connect to %s:%d (%s) failed: %s", host, port, label, e,
+                    )
+
+            # Every endpoint failed — schedule next attempt with backoff.
+            self.client = None
             self._consecutive_failures += 1
             self._next_connect_attempt_mono = (
                 time.monotonic() + self._current_backoff_sec
@@ -1616,6 +1663,7 @@ def _config_fingerprint(config: list[dict]) -> str:
             d["request_timeout_ms"], d["retry_count"],
             d["reconnect_initial_ms"], d["reconnect_max_ms"],
             d.get("channel_transport"),
+            d.get("connection_mode"), d.get("redundant_host"), d.get("redundant_port"),
         )
         blocks_part = tuple(
             (b["id"], b["function_code"], b["start_address"], b["count"],
