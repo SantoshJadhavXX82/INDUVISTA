@@ -383,7 +383,7 @@ function DeviceForm({
           }
         : {};  // synthetic devices don't use Modbus hardening
 
-      const faultPolicy = isModbus
+      const faultPolicy = (isModbus || isOpc)
         ? {
             fault_mode: form.fault_mode,
             substitute_value:
@@ -895,8 +895,8 @@ function DeviceForm({
         </details>
       )}
 
-      {/* Device fault policy (Phase 2c) — Modbus only */}
-      {isModbus && (
+      {/* Device fault policy (Phase 2c / 2e.3) — acquired devices: Modbus + OPC UA */}
+      {(isModbus || isOpc) && (
         <details className="rounded-md border bg-secondary/20 p-3 space-y-3" open={!isNew && form.fault_mode !== "missing"}>
           <summary className="text-sm font-semibold cursor-pointer select-none">
             Read-failure policy
