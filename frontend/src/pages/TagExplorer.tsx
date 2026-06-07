@@ -616,6 +616,14 @@ export default function TagExplorer() {
       {/* Table */}
       <Card>
         <CardContent className="p-0">
+          {/* Bounded-height scroll region. The sticky header needs a scroll
+              CONTAINER to pin against; shadcn's <Table> wraps the table in a
+              `overflow-auto` div with no height, so the page scrolled and the
+              header scrolled away with it. `[&>div]` targets that wrapper and
+              gives it a max-height, so the table body scrolls inside it and
+              the header stays pinned. Tune the 300px if the area above the
+              table changes height. */}
+          <div className="[&>div]:max-h-[calc(100vh-300px)] [&>div]:overflow-y-auto">
           <Table>
             <TableHeader className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-background">
               <TableRow>
@@ -1048,6 +1056,7 @@ export default function TagExplorer() {
               })()}
             </TableBody>
           </Table>
+          </div>
           {filtered.length === 0 && tags.data && (
             <p className="text-sm text-muted-foreground text-center py-8">
               No tags match the current filter.
