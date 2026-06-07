@@ -124,6 +124,7 @@ from app.modbus.status import (
     ST_HOLD_LAST,
     ST_RANGE_WARN,
     ST_READ_OK,
+    ST_STALE,
     ST_SUBSTITUTED,
 )
 from app.local_buffer import LocalBuffer
@@ -319,6 +320,13 @@ class _SourceContext:
     # other untrusted servers should stay at False to avoid wall-clock
     # drift contaminating tag_values.time. See migration 0055.
     trust_server_timestamp: bool = False
+
+    # Phase 2e.2b — connection state, set by _connect_and_subscribe (True
+    # once the subscription is active, False the moment the connection ends).
+    # The continuous _disconnect_hold_loop reads this to decide whether to
+    # apply the fault policy: while connected the per-connection keep-alive
+    # handles freshness; while disconnected the hold loop holds/substitutes.
+    connected: bool = False
 
     # Phase 2e — device fault policy (mirrors modbus _apply_fault_policy).
     # Config comes from the owning device row (devices.fault_mode/...) via the
@@ -740,6 +748,52 @@ async def _keepalive_loop(
             ctx.last_value_by_tag[tag_id] = last
 
 
+async def _disconnect_hold_loop(
+    ctx: "_SourceContext",
+    stop_event: asyncio.Event,
+) -> None:
+    """Phase 2e.2b — while the source is DISCONNECTED, periodically apply the
+    device fault policy so the live value holds the last good reading (or
+    substitutes), decaying to a real failure once max_hold_sec elapses. This
+    mirrors modbus, which re-applies the policy on every failed poll cycle.
+
+    No-op while connected (the per-connection keep-alive owns liveness then).
+    No-op when fault_mode is missing/None: the value is left to age to STALE
+    on its own — we never fabricate data without an explicit policy.
+
+    Re-emitted samples carry the KEEPALIVE: marker so the flusher routes them
+    to latest_only (live view), never history — the outage shows as a history
+    gap, while the live/render layer reflects HELD / SUBSTITUTED / STALE.
+    """
+    while not stop_event.is_set():
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=OPC_KEEPALIVE_SEC)
+            break  # stop requested
+        except asyncio.TimeoutError:
+            pass
+        if ctx.connected:
+            continue  # live — keep-alive handles freshness
+        if not ctx.fault_mode or ctx.fault_mode == "missing":
+            continue  # no policy — let the value age to STALE naturally
+        now = asyncio.get_event_loop().time()
+        for tag_id, last in list(ctx.last_value_by_tag.items()):
+            value_double, value_text, st, reason = ctx.apply_fault_policy(
+                tag_id, last.value_double, last.value_text,
+                ST_STALE, "DISCONNECTED", now,
+            )
+            ctx.buffer.append(Sample(
+                tag_id=last.tag_id,
+                device_id=last.device_id,
+                register_block_id=last.register_block_id,
+                time=datetime.now(timezone.utc),
+                value_double=value_double,
+                value_text=value_text,
+                st=st,
+                st_reason="KEEPALIVE:" + (reason or ""),
+                source=last.source,
+            ))
+
+
 async def opc_source_worker(
     source: dict,
     buffer: _SampleBuffer,
@@ -773,6 +827,15 @@ async def opc_source_worker(
         max_hold_sec=source.get("max_hold_sec"),
     )
 
+    # Phase 2e.2b — disconnect-hold runs continuously across reconnects so a
+    # dropped subscription still holds/substitutes per the device fault policy
+    # (decaying under max_age). Idle while connected.
+    hold_stop: asyncio.Event = asyncio.Event()
+    hold_task = asyncio.create_task(
+        _disconnect_hold_loop(ctx, hold_stop),
+        name=f"hold-{ctx.source_name}",
+    )
+
     while not global_stop_event.is_set() and not restart_event.is_set():
         try:
             await _connect_and_subscribe(
@@ -802,6 +865,13 @@ async def opc_source_worker(
         except asyncio.TimeoutError:
             pass
         backoff = min(backoff * 2.0, backoff_max)
+
+    hold_stop.set()
+    hold_task.cancel()
+    try:
+        await hold_task
+    except (asyncio.CancelledError, Exception):
+        pass
 
     log.info("[%s] worker exiting", name)
 
@@ -875,6 +945,7 @@ async def _connect_and_subscribe(
             "[%s] subscription active (%d/%d nodes)",
             ctx.source_name, subscribed, len(ctx.tag_by_node),
         )
+        ctx.connected = True  # Phase 2e.2b — hold loop stands down while live
         # Phase OPC-web.2.3 server clock probe - non-blocking
         # observability. Logs drift and persists to opc_sources for
         # the UI. Does NOT change which timestamp the worker writes
@@ -932,6 +1003,7 @@ async def _connect_and_subscribe(
                     f"no samples for >{_format_stall_threshold(source)}s"
                 )
         finally:
+            ctx.connected = False  # Phase 2e.2b — disconnect: hold loop takes over
             watchdog_task.cancel()
             keepalive_stop.set()
             keepalive_task.cancel()
@@ -1425,8 +1497,26 @@ async def main() -> None:
     # "what the reloader thinks it spawned" — without it, a config
     # change landing between the two loads could cause the reloader
     # to immediately decide the freshly-spawned worker is stale.
-    fingerprints = load_fingerprints_from_db()
-    sources = load_sources_from_db()
+    # Phase 2e.2c — tolerate Postgres not being ready at startup (right after
+    # `docker compose up`, or while postgres is restarting/recovering). Without
+    # this the initial load throws and the whole process crashes with an
+    # alarming traceback, recovering only via Docker's restart policy. Retry
+    # with capped backoff and a concise one-line message, mirroring how the
+    # reloader loop already tolerates transient DB errors on each tick.
+    attempt = 0
+    while True:
+        try:
+            fingerprints = load_fingerprints_from_db()
+            sources = load_sources_from_db()
+            break
+        except Exception as e:
+            attempt += 1
+            wait = min(2.0 * attempt, 15.0)
+            log.warning(
+                "opc_supervisor: database not ready (%s: %s) — retrying in %.0fs",
+                type(e).__name__, e, wait,
+            )
+            await asyncio.sleep(wait)
     log.info(
         "opc_supervisor: loaded %d enabled source(s) with mappings",
         len(sources),

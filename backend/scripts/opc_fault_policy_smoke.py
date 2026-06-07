@@ -14,7 +14,7 @@ last-good. st bytes + st_reason match modbus so downstream is identical.
 import sys
 
 from app.workers.opc_supervisor import _SampleBuffer, _SourceContext
-from app.modbus.status import ST_HOLD_LAST, ST_SUBSTITUTED
+from app.modbus.status import ST_HOLD_LAST, ST_STALE, ST_SUBSTITUTED
 
 GOOD = 192       # OPC Good band
 UNCERTAIN = 96   # OPC Uncertain
@@ -45,6 +45,8 @@ vd, vt, st, r = c.apply_fault_policy(10, None, None, BAD, "0x8000", now=1.0)
 check("bad -> held last good", vd == 123.0 and st == ST_HOLD_LAST and r == "HOLD_LAST")
 vd, vt, st, r = c.apply_fault_policy(10, 999.0, None, UNCERTAIN, "uncertain", now=2.0)
 check("uncertain -> held (not-Good)", vd == 123.0 and st == ST_HOLD_LAST)
+vd, vt, st, r = c.apply_fault_policy(10, None, None, ST_STALE, "DISCONNECTED", now=2.5)
+check("disconnect (stale) -> held", vd == 123.0 and st == ST_HOLD_LAST and r == "HOLD_LAST")
 vd, vt, st, r = c.apply_fault_policy(99, None, None, BAD, "0x8000", now=3.0)
 check("no prior good -> bad stands", st == BAD)
 
