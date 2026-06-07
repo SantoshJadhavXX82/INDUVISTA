@@ -68,11 +68,51 @@ type RegisterBlock = {
   addressing_mode: "STANDARD" | "ENRON_HOLDING" | "ENRON_INPUT";
 };
 
+// Quality classification — mirrors the per-tag dot state machine exactly so
+// the Quality filter and the health-summary chips match what the dot shows
+// (st<128 → bad/"error"; otherwise age>30s → stale; otherwise good; no
+// reading → unknown). Kept module-level so there is a single source of truth.
+const ST_GOOD_MIN = 128;   // matches backend GOOD_QUALITY threshold
+const STALE_SEC = 30;      // age beyond which a still-good tag reads stale
+type QualityState = "good" | "stale" | "error" | "unknown";
+
+function tagQualityState(t: LiveTag): QualityState {
+  if (t.st !== null && t.age_seconds !== null) {
+    if (t.st < ST_GOOD_MIN) return "error";
+    if (t.age_seconds > STALE_SEC) return "stale";
+    return "good";
+  }
+  return "unknown";
+}
+
+function tagSource(
+  t: LiveTag,
+  protoMap: Map<number, string | null>,
+): "modbus" | "computed" | "opc" | "other" {
+  const p = (protoMap.get(t.device_id) ?? "").toLowerCase();
+  if (p.startsWith("modbus")) return "modbus";
+  if (p === "computed") return "computed";
+  if (p.startsWith("opc")) return "opc";
+  return "other";
+}
+
+// Quality filter options + chip colors (FMT-004 status palette).
+const QUALITY_OPTIONS: { value: QualityState; label: string; color: string }[] = [
+  { value: "good", label: "Good", color: "#15803D" },
+  { value: "stale", label: "Stale", color: "#6B7280" },
+  { value: "error", label: "Bad", color: "#DC2626" },
+  { value: "unknown", label: "No data", color: "#9CA3AF" },
+];
+
 export default function TagExplorer() {
   const queryClient = useQueryClient();
   const [group, setGroup] = useState<string>("");
   const [deviceId, setDeviceId] = useState<string>("");
   const [search, setSearch] = useState<string>("");
+  // Increment 1 — additive filters (do not change table columns).
+  const [quality, setQuality] = useState<"" | QualityState>("");
+  const [dtype, setDtype] = useState<string>("");
+  const [source, setSource] = useState<"" | "modbus" | "computed" | "opc">("");
   const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
   const [creatingTag, setCreatingTag] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -201,9 +241,22 @@ export default function TagExplorer() {
       if (did !== null && t.device_id !== did) return false;
       if (group && !t.groups.includes(group)) return false;
       if (lowerSearch && !t.tag_name.toLowerCase().includes(lowerSearch)) return false;
+      if (quality && tagQualityState(t) !== quality) return false;
+      if (dtype && t.data_type !== dtype) return false;
+      if (source && tagSource(t, deviceProtocolMap) !== source) return false;
       return true;
     });
-  }, [tags.data, deviceId, group, search]);
+  }, [tags.data, deviceId, group, search, quality, dtype, source, deviceProtocolMap]);
+
+  // Fleet-health counts over ALL tags (not the filtered subset) for the
+  // summary chips, so the totals stay meaningful while drilling down.
+  const qualityCounts = useMemo(() => {
+    const c: Record<QualityState, number> = { good: 0, stale: 0, error: 0, unknown: 0 };
+    tags.data?.forEach((t) => { c[tagQualityState(t)] += 1; });
+    return c;
+  }, [tags.data]);
+
+  const anyFilterActive = Boolean(group || deviceId || search || quality || dtype || source);
 
   const countsByDevice = useMemo(() => {
     const counts: Record<number | "all", number> = { all: tags.data?.length ?? 0 };
@@ -217,16 +270,9 @@ export default function TagExplorer() {
   // Rule: error > stale > good > unknown. Worst tag wins so any failing
   // tag flashes red at the device-picker level.
   const healthByDevice = useMemo(() => {
-    const ST_GOOD_MIN = 128;     // matches backend GOOD_QUALITY threshold
-    const STALE_SEC = 30;
-    const h: Record<number, "good" | "stale" | "error" | "unknown"> = {};
+    const h: Record<number, QualityState> = {};
     tags.data?.forEach((t) => {
-      let state: "good" | "stale" | "error" | "unknown" = "unknown";
-      if (t.st !== null && t.age_seconds !== null) {
-        if (t.st < ST_GOOD_MIN) state = "error";
-        else if (t.age_seconds > STALE_SEC) state = "stale";
-        else state = "good";
-      }
+      const state = tagQualityState(t);
       const prev = h[t.device_id];
       // worst-wins ordering
       const rank = { error: 3, stale: 2, good: 1, unknown: 0 };
@@ -440,6 +486,36 @@ export default function TagExplorer() {
         </div>
       )}
 
+      {/* Health summary — fleet-wide quality counts; click a chip to filter */}
+      {tags.data && (
+        <div className="flex flex-wrap items-center gap-2">
+          {QUALITY_OPTIONS.map((q) => {
+            const active = quality === q.value;
+            return (
+              <button
+                key={q.value}
+                type="button"
+                onClick={() => setQuality(active ? "" : q.value)}
+                aria-pressed={active}
+                title={`Show ${q.label.toLowerCase()} tags`}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
+                  active ? "border-transparent" : "border-input hover:bg-secondary/60",
+                )}
+                style={active ? { backgroundColor: q.color, color: "#fff" } : undefined}
+              >
+                <span
+                  className="h-2 w-2 rounded-full"
+                  style={{ backgroundColor: active ? "#fff" : q.color }}
+                />
+                {q.label}
+                <span className="tabular-nums opacity-80">{qualityCounts[q.value]}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {/* Filters */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
         <select
@@ -453,6 +529,42 @@ export default function TagExplorer() {
           ))}
         </select>
 
+        <select
+          value={quality}
+          onChange={(e) => setQuality(e.target.value as "" | QualityState)}
+          aria-label="Filter by quality"
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="">All quality</option>
+          {QUALITY_OPTIONS.map((q) => (
+            <option key={q.value} value={q.value}>{q.label}</option>
+          ))}
+        </select>
+
+        <select
+          value={source}
+          onChange={(e) => setSource(e.target.value as "" | "modbus" | "computed" | "opc")}
+          aria-label="Filter by source"
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="">All sources</option>
+          <option value="modbus">Modbus</option>
+          <option value="computed">Computed</option>
+          <option value="opc">OPC UA</option>
+        </select>
+
+        <select
+          value={dtype}
+          onChange={(e) => setDtype(e.target.value)}
+          aria-label="Filter by data type"
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+        >
+          <option value="">All types</option>
+          {DATA_TYPES.map((dt) => (
+            <option key={dt} value={dt}>{dt}</option>
+          ))}
+        </select>
+
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
@@ -463,6 +575,19 @@ export default function TagExplorer() {
             className="pl-8"
           />
         </div>
+
+        {anyFilterActive && (
+          <button
+            type="button"
+            onClick={() => {
+              setGroup(""); setDeviceId(""); setSearch("");
+              setQuality(""); setDtype(""); setSource("");
+            }}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm text-muted-foreground hover:bg-secondary/60"
+          >
+            Clear filters
+          </button>
+        )}
 
         <span className="text-sm text-muted-foreground tabular-nums sm:ml-auto">
           {tags.data ? `${filtered.length} of ${tags.data.length}` : "Loading…"}
