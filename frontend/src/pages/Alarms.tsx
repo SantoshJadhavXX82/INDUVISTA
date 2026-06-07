@@ -27,7 +27,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Bell, BellRing, History, Settings, RefreshCw, Pause, Flame } from "lucide-react";
 
 import { api } from "@/lib/api";
-import { useSeverityColors, hexWithAlpha } from "@/components/SeverityBadge";
+import { useSeverityColors } from "@/components/SeverityBadge";
 import { useSeverities } from "@/lib/useSeverities";
 
 import type { AlarmActive, Severity } from "@/types/alarms";

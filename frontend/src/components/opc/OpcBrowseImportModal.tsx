@@ -50,7 +50,7 @@
  *    names (e.g. tag-name conflicts) and re-import the failed rows.
  */
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   X, ChevronRight, ChevronDown, Folder, Gauge, AlertCircle,
   CheckCircle2, Loader2, Search, RefreshCw,

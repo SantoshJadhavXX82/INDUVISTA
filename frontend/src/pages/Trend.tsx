@@ -57,7 +57,6 @@ import TooltipModeSelector, {
 import QualityFilterSelector, {
   type QualityFilter, loadQualityFilter,
 } from "@/components/QualityFilterSelector";
-import { useTimeFormat } from "@/lib/timeFormat";
 import type { TrendViewConfig } from "@/types/api";
 
 type Mode = "historical" | "live";

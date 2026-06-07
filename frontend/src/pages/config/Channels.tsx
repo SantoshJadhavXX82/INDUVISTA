@@ -105,7 +105,7 @@ export default function Channels() {
       <Drawer
         open={editing !== null}
         onClose={() => setEditing(null)}
-        title={editing === "new" ? "New network" : `Network: ${editing && editing !== "new" ? editing.name : ""}`}
+        title={editing === "new" ? "New network" : `Network: ${editing ? editing.name : ""}`}
       >
         {editing !== null && (
           <ChannelForm

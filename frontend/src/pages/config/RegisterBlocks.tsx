@@ -54,12 +54,6 @@ type RegisterBlock = {
 
 type Device = { id: number; name: string };
 
-const FC_LABELS: Record<number, string> = {
-  1: "FC1 — Coils (read bools)",
-  2: "FC2 — Discrete inputs (read bools)",
-  3: "FC3 — Holding registers (read/write words)",
-  4: "FC4 — Input registers (read words)",
-};
 
 export default function RegisterBlocks() {
   const queryClient = useQueryClient();
@@ -211,7 +205,7 @@ export default function RegisterBlocks() {
       <Drawer
         open={editing !== null}
         onClose={() => setEditing(null)}
-        title={editing === "new" ? "New register block" : `Block: ${editing && editing !== "new" ? editing.name : ""}`}
+        title={editing === "new" ? "New register block" : `Block: ${editing ? editing.name : ""}`}
       >
         {editing !== null && (
           <BlockForm
@@ -347,12 +341,6 @@ type FormState = {
 };
 
 /** Convert FC numeric → friendly area label. */
-const AREA_LABEL: Record<string, string> = {
-  "1": "Coil",
-  "2": "Discrete Input",
-  "3": "Holding Register",
-  "4": "Input Register",
-};
 
 /** Is this area RW-capable per Modbus spec? */
 function fcAllowsWrite(fc: string): boolean {

@@ -30,9 +30,6 @@ export interface AlarmRowProps {
   className?: string;
 }
 
-type SeverityVariantTyped = NonNullable<AlarmRowProps["severity"]>;
-// Local alias so TS picks up the imported SeverityVariant correctly
-type _ = SeverityVariant;
 
 export function AlarmRow({
   severity, severityLabel, tagName, message, ageLabel,

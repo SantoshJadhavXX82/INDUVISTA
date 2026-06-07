@@ -46,7 +46,7 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { formatTagValue } from "@/lib/format";
-import { TagQualityBadge, formatAge } from "@/components/tags/tag-quality-badge";
+import { TagQualityBadge } from "@/components/tags/tag-quality-badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusPill } from "@/components/ui/status-pill";
 
@@ -68,63 +68,11 @@ type RegisterBlock = {
   addressing_mode: "STANDARD" | "ENRON_HOLDING" | "ENRON_INPUT";
 };
 
-// Quality classification — mirrors the per-tag dot state machine exactly so
-// the Quality filter and the health-summary chips match what the dot shows
-// (st<128 → bad/"error"; otherwise age>30s → stale; otherwise good; no
-// reading → unknown). Kept module-level so there is a single source of truth.
-const ST_GOOD_MIN = 128;   // matches backend GOOD_QUALITY threshold
-const STALE_SEC = 30;      // age beyond which a still-good tag reads stale
-type QualityState = "good" | "stale" | "error" | "unknown";
-
-function tagQualityState(t: LiveTag): QualityState {
-  if (t.st !== null && t.age_seconds !== null) {
-    if (t.st < ST_GOOD_MIN) return "error";
-    if (t.age_seconds > STALE_SEC) return "stale";
-    return "good";
-  }
-  return "unknown";
-}
-
-function tagSource(
-  t: LiveTag,
-  protoMap: Map<number, string | null>,
-): "modbus" | "computed" | "opc" | "other" {
-  const p = (protoMap.get(t.device_id) ?? "").toLowerCase();
-  if (p.startsWith("modbus")) return "modbus";
-  if (p === "computed") return "computed";
-  if (p.startsWith("opc")) return "opc";
-  return "other";
-}
-
-// Chip colors mirror the live quality dot (tag-quality-badge.tsx) so the
-// summary matches the per-row dots: the small dot matches the badge exactly
-// (good=green-500, stale=amber-400, error=red-500, unknown=gray-300). `active`
-// is a slightly darker shade used as the selected-chip background so white
-// text stays legible.
-const QUALITY_OPTIONS: { value: QualityState; label: string; dot: string; active: string }[] = [
-  { value: "good", label: "Good", dot: "#22C55E", active: "#16A34A" },
-  { value: "stale", label: "Stale", dot: "#FBBF24", active: "#D97706" },
-  { value: "error", label: "Bad", dot: "#EF4444", active: "#DC2626" },
-  { value: "unknown", label: "No data", dot: "#D1D5DB", active: "#6B7280" },
-];
-
-// Columns the table can be sorted by. A sort flattens the grouped view into a
-// single globally-ordered list (see the render IIFE).
-type SortKey = "name" | "device" | "type" | "value" | "quality" | "age";
-
 export default function TagExplorer() {
   const queryClient = useQueryClient();
   const [group, setGroup] = useState<string>("");
   const [deviceId, setDeviceId] = useState<string>("");
   const [search, setSearch] = useState<string>("");
-  // Increment 1 — additive filters (do not change table columns).
-  const [quality, setQuality] = useState<"" | QualityState>("");
-  const [dtype, setDtype] = useState<string>("");
-  const [source, setSource] = useState<"" | "modbus" | "computed" | "opc">("");
-  // Sortable columns. When sortKey is set, the grouped layout is replaced by a
-  // single globally-sorted list (clear sort to return to grouping).
-  const [sortKey, setSortKey] = useState<SortKey | null>(null);
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
   const [creatingTag, setCreatingTag] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -253,70 +201,9 @@ export default function TagExplorer() {
       if (did !== null && t.device_id !== did) return false;
       if (group && !t.groups.includes(group)) return false;
       if (lowerSearch && !t.tag_name.toLowerCase().includes(lowerSearch)) return false;
-      if (quality && tagQualityState(t) !== quality) return false;
-      if (dtype && t.data_type !== dtype) return false;
-      if (source && tagSource(t, deviceProtocolMap) !== source) return false;
       return true;
     });
-  }, [tags.data, deviceId, group, search, quality, dtype, source, deviceProtocolMap]);
-
-  // Fleet-health counts over ALL tags (not the filtered subset) for the
-  // summary chips, so the totals stay meaningful while drilling down.
-  const qualityCounts = useMemo(() => {
-    const c: Record<QualityState, number> = { good: 0, stale: 0, error: 0, unknown: 0 };
-    tags.data?.forEach((t) => { c[tagQualityState(t)] += 1; });
-    return c;
-  }, [tags.data]);
-
-  const anyFilterActive = Boolean(group || deviceId || search || quality || dtype || source || sortKey);
-
-  // Flat global sort. When a sort column is active we bypass device grouping and
-  // render one sorted list of the filtered (physical) tags. Pairs are omitted
-  // while sorting — clearing the sort restores the grouped view with pairs.
-  const sortedFlat = useMemo(() => {
-    if (!sortKey) return null;
-    const dir = sortDir === "asc" ? 1 : -1;
-    // Quality sort surfaces problems first (asc = worst → best).
-    const qRank: Record<QualityState, number> = { error: 0, stale: 1, unknown: 2, good: 3 };
-    const keyOf = (t: LiveTag): string | number => {
-      switch (sortKey) {
-        case "name": return t.tag_name.toLowerCase();
-        case "device": return t.device_name.toLowerCase();
-        case "type": return t.data_type;
-        case "value": return t.value_double ?? Number.NEGATIVE_INFINITY;
-        case "quality": return qRank[tagQualityState(t)];
-        case "age": return t.age_seconds ?? Number.POSITIVE_INFINITY;
-        default: return 0;
-      }
-    };
-    return [...filtered].sort((a, b) => {
-      const av = keyOf(a), bv = keyOf(b);
-      if (av < bv) return -1 * dir;
-      if (av > bv) return 1 * dir;
-      return a.tag_name.localeCompare(b.tag_name); // stable tiebreak
-    });
-  }, [filtered, sortKey, sortDir]);
-
-  const toggleSort = (k: SortKey) => {
-    if (sortKey === k) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    else { setSortKey(k); setSortDir("asc"); }
-  };
-
-  const sortHead = (k: SortKey, label: string, align?: "right" | "center") => (
-    <TableHead className={cn(align === "right" && "text-right", align === "center" && "text-center")}>
-      <button
-        type="button"
-        onClick={() => toggleSort(k)}
-        className={cn(
-          "inline-flex items-center gap-1 hover:text-foreground",
-          sortKey === k && "text-foreground font-medium",
-        )}
-      >
-        {label}
-        {sortKey === k && <span className="text-[10px]">{sortDir === "asc" ? "▲" : "▼"}</span>}
-      </button>
-    </TableHead>
-  );
+  }, [tags.data, deviceId, group, search]);
 
   const countsByDevice = useMemo(() => {
     const counts: Record<number | "all", number> = { all: tags.data?.length ?? 0 };
@@ -330,9 +217,16 @@ export default function TagExplorer() {
   // Rule: error > stale > good > unknown. Worst tag wins so any failing
   // tag flashes red at the device-picker level.
   const healthByDevice = useMemo(() => {
-    const h: Record<number, QualityState> = {};
+    const ST_GOOD_MIN = 128;     // matches backend GOOD_QUALITY threshold
+    const STALE_SEC = 30;
+    const h: Record<number, "good" | "stale" | "error" | "unknown"> = {};
     tags.data?.forEach((t) => {
-      const state = tagQualityState(t);
+      let state: "good" | "stale" | "error" | "unknown" = "unknown";
+      if (t.st !== null && t.age_seconds !== null) {
+        if (t.st < ST_GOOD_MIN) state = "error";
+        else if (t.age_seconds > STALE_SEC) state = "stale";
+        else state = "good";
+      }
       const prev = h[t.device_id];
       // worst-wins ordering
       const rank = { error: 3, stale: 2, good: 1, unknown: 0 };
@@ -441,7 +335,7 @@ export default function TagExplorer() {
   );
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 max-w-7xl mx-auto">
       <PageHeader
         title="Tags"
         subtitle={`Browse, search, and edit ${tags.data?.length ?? "…"} tags`}
@@ -546,36 +440,6 @@ export default function TagExplorer() {
         </div>
       )}
 
-      {/* Health summary — fleet-wide quality counts; click a chip to filter */}
-      {tags.data && (
-        <div className="flex flex-wrap items-center gap-2">
-          {QUALITY_OPTIONS.map((q) => {
-            const active = quality === q.value;
-            return (
-              <button
-                key={q.value}
-                type="button"
-                onClick={() => setQuality(active ? "" : q.value)}
-                aria-pressed={active}
-                title={`Show ${q.label.toLowerCase()} tags`}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
-                  active ? "border-transparent" : "border-input hover:bg-secondary/60",
-                )}
-                style={active ? { backgroundColor: q.active, color: "#fff" } : undefined}
-              >
-                <span
-                  className="h-2 w-2 rounded-full"
-                  style={{ backgroundColor: active ? "#fff" : q.dot }}
-                />
-                {q.label}
-                <span className="tabular-nums opacity-80">{qualityCounts[q.value]}</span>
-              </button>
-            );
-          })}
-        </div>
-      )}
-
       {/* Filters */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">
         <select
@@ -589,42 +453,6 @@ export default function TagExplorer() {
           ))}
         </select>
 
-        <select
-          value={quality}
-          onChange={(e) => setQuality(e.target.value as "" | QualityState)}
-          aria-label="Filter by quality"
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-        >
-          <option value="">All quality</option>
-          {QUALITY_OPTIONS.map((q) => (
-            <option key={q.value} value={q.value}>{q.label}</option>
-          ))}
-        </select>
-
-        <select
-          value={source}
-          onChange={(e) => setSource(e.target.value as "" | "modbus" | "computed" | "opc")}
-          aria-label="Filter by source"
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-        >
-          <option value="">All sources</option>
-          <option value="modbus">Modbus</option>
-          <option value="computed">Computed</option>
-          <option value="opc">OPC UA</option>
-        </select>
-
-        <select
-          value={dtype}
-          onChange={(e) => setDtype(e.target.value)}
-          aria-label="Filter by data type"
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-        >
-          <option value="">All types</option>
-          {DATA_TYPES.map((dt) => (
-            <option key={dt} value={dt}>{dt}</option>
-          ))}
-        </select>
-
         <div className="relative flex-1 max-w-sm">
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
           <Input
@@ -635,20 +463,6 @@ export default function TagExplorer() {
             className="pl-8"
           />
         </div>
-
-        {anyFilterActive && (
-          <button
-            type="button"
-            onClick={() => {
-              setGroup(""); setDeviceId(""); setSearch("");
-              setQuality(""); setDtype(""); setSource("");
-              setSortKey(null); setSortDir("asc");
-            }}
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm text-muted-foreground hover:bg-secondary/60"
-          >
-            Clear filters
-          </button>
-        )}
 
         <span className="text-sm text-muted-foreground tabular-nums sm:ml-auto">
           {tags.data ? `${filtered.length} of ${tags.data.length}` : "Loading…"}
@@ -677,16 +491,8 @@ export default function TagExplorer() {
       {/* Table */}
       <Card>
         <CardContent className="p-0">
-          {/* Bounded-height scroll region. The sticky header needs a scroll
-              CONTAINER to pin against; shadcn's <Table> wraps the table in a
-              `overflow-auto` div with no height, so the page scrolled and the
-              header scrolled away with it. `[&>div]` targets that wrapper and
-              gives it a max-height, so the table body scrolls inside it and
-              the header stays pinned. Tune the 300px if the area above the
-              table changes height. */}
-          <div className="[&>div]:max-h-[calc(100vh-300px)] [&>div]:overflow-y-auto">
           <Table>
-            <TableHeader className="[&_th]:sticky [&_th]:top-0 [&_th]:z-20 [&_th]:bg-background">
+            <TableHeader>
               <TableRow>
                 <TableHead className="w-10">
                   <input
@@ -698,18 +504,16 @@ export default function TagExplorer() {
                     aria-label="Select all visible tags"
                   />
                 </TableHead>
-                <TableHead className="w-12 text-right">#</TableHead>
-                {sortHead("name", "Name")}
+                <TableHead>Name</TableHead>
                 <TableHead>Groups</TableHead>
-                {sortHead("device", "Device")}
+                <TableHead>Device</TableHead>
                 <TableHead className="text-right">FC</TableHead>
                 <TableHead className="text-right">Addr</TableHead>
-                {sortHead("type", "Type")}
+                <TableHead>Type</TableHead>
                 <TableHead>Unit</TableHead>
-                {sortHead("value", "Current", "right")}
+                <TableHead className="text-right">Current</TableHead>
                 <TableHead className="text-center">Trend</TableHead>
-                {sortHead("age", "Age", "right")}
-                {sortHead("quality", "Quality")}
+                <TableHead>Quality</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -726,15 +530,6 @@ export default function TagExplorer() {
                    so the checkbox column is rendered as empty and clicks on
                    the row are no-ops. The Quality column shows the live
                    value's quality from the currently-active (duty) side. */
-                // Continuous serial number in display order. The IIFE re-runs
-                // each render (rowSerial resets to 0), and renderPairRow /
-                // renderRow are invoked in the same order the rows are spread
-                // into the output ([...pairSection, ...physicalSection]), so
-                // nextSerial() yields a stable top-to-bottom 1..N. Section
-                // header rows don't call it, so they don't consume a number.
-                let rowSerial = 0;
-                const nextSerial = () => (rowSerial += 1);
-
                 const renderPairRow = (pt: PairTagLive) => {
                   return (
                     <TableRow
@@ -743,9 +538,6 @@ export default function TagExplorer() {
                       style={{ backgroundColor: "color-mix(in oklab, var(--ios-blue-soft) 30%, transparent)" }}
                     >
                       <TableCell />
-                      <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
-                        {nextSerial()}
-                      </TableCell>
                       <TableCell className="font-medium">
                         <span className="inline-flex items-center gap-1.5">
                           {pt.tag_name}
@@ -812,15 +604,11 @@ export default function TagExplorer() {
                           );
                         })()}
                       </TableCell>
-                      <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
-                        {formatAge(pt.age_seconds)}
-                      </TableCell>
                       <TableCell>
                         <TagQualityBadge
                           st={pt.st}
                           st_reason={pt.st_reason}
                           age_seconds={pt.age_seconds}
-                          hideAge
                         />
                       </TableCell>
                     </TableRow>
@@ -844,9 +632,6 @@ export default function TagExplorer() {
                         onChange={() => toggleTag(t.tag_id)}
                         aria-label={`Select ${t.tag_name}`}
                       />
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
-                      {nextSerial()}
                     </TableCell>
                     <TableCell className="font-medium">
                       <span className="inline-flex items-center gap-1.5">
@@ -939,26 +724,15 @@ export default function TagExplorer() {
                         );
                       })()}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
-                      {formatAge(t.age_seconds)}
-                    </TableCell>
                     <TableCell>
                       <TagQualityBadge
                         st={t.st}
                         st_reason={t.st_reason}
                         age_seconds={t.age_seconds}
-                        hideAge
                       />
                     </TableCell>
                   </TableRow>
                 );
-
-                // Global sort overrides device grouping: render one flat,
-                // sorted list. Section headers and pair rows are omitted while
-                // a sort is active (clear the sort to return to grouping).
-                if (sortedFlat) {
-                  return sortedFlat.map(renderRow);
-                }
 
                 if (deviceId !== "") {
                   // Specific device — flat layout.
@@ -1006,7 +780,7 @@ export default function TagExplorer() {
                   const primaryId = headRow.primary_device_id;
                   return [
                   <TableRow key={`pair-hdr-${g.key}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={13} className="py-1.5 text-xs">
+                    <TableCell colSpan={11} className="py-1.5 text-xs">
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <span className="font-semibold flex items-center gap-2 flex-wrap">
                           {g.label}
@@ -1119,7 +893,7 @@ export default function TagExplorer() {
 
                 const physicalSection = groups.flatMap((g) => [
                   <TableRow key={`hdr-${g.id}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={13} className="py-1.5 text-xs font-semibold">
+                    <TableCell colSpan={11} className="py-1.5 text-xs font-semibold">
                       {g.name}
                       <span className="ml-2 font-normal text-muted-foreground tabular-nums">
                         {g.rows.length} tag{g.rows.length === 1 ? "" : "s"}
@@ -1133,7 +907,6 @@ export default function TagExplorer() {
               })()}
             </TableBody>
           </Table>
-          </div>
           {filtered.length === 0 && tags.data && (
             <p className="text-sm text-muted-foreground text-center py-8">
               No tags match the current filter.
@@ -2438,6 +2211,8 @@ type NewTagForm = {
   named_set_id: number | null;
   // Phase 8.5.1 — explicit write opt-in. Hidden when area is DI/IR.
   writable: boolean;
+  // Phase 23.8 — display precision; "" means NULL (auto).
+  decimal_places: string;
 };
 
 function NewTagPanel({

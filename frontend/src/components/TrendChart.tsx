@@ -1097,41 +1097,6 @@ function passesQualityFilter(
  *   callers (e.g. live legend hooks) but new code should use
  *   `formatXAxisTime` and `formatXAxisDate` separately.
  */
-function formatXAxisTick(
-  ts: number,
-  is24h: boolean,
-  incrSec: number,
-  isDayBoundary: boolean = false,
-): string {
-  const d = new Date(ts * 1000);
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const showSeconds = incrSec < 60;
-  // Show date inline when this tick is the first tick of a new calendar
-  // day, OR when ticks are spaced more than a day apart (multi-day view
-  // where every tick is a different day so we want dates on every one).
-  const showDate = isDayBoundary || incrSec >= 86_400;
-
-  let timeStr: string;
-  if (is24h) {
-    timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    if (showSeconds) timeStr += `:${pad(d.getSeconds())}`;
-  } else {
-    const h24 = d.getHours();
-    const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-    const period = h24 >= 12 ? "PM" : "AM";
-    timeStr = `${h12}:${pad(d.getMinutes())}`;
-    if (showSeconds) timeStr += `:${pad(d.getSeconds())}`;
-    timeStr += ` ${period}`;
-  }
-
-  if (showDate) {
-    // Format "23 May" rather than "05/23" — easier to scan and unambiguous
-    // across regional date formats.
-    const monthName = d.toLocaleString("en-US", { month: "short" });
-    return `${d.getDate()} ${monthName} ${timeStr}`;
-  }
-  return timeStr;
-}
 
 /**
  * Time-only X-axis tick formatter (Phase 23.7).

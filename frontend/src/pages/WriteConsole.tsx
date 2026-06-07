@@ -215,13 +215,13 @@ export default function WriteConsole() {
               </p>
             </div>
             <div className="flex gap-2 justify-center pt-1">
-              <Button asChild size="sm" variant="secondary">
+              <Button asChild size="sm" variant="outline">
                 <Link to="/config/blocks">
                   <Settings className="h-3.5 w-3.5 mr-1.5" />
                   Configure Blocks
                 </Link>
               </Button>
-              <Button asChild size="sm" variant="secondary">
+              <Button asChild size="sm" variant="outline">
                 <Link to="/tags">Open Tag Explorer</Link>
               </Button>
             </div>
@@ -391,7 +391,7 @@ export default function WriteConsole() {
                             <Gate cap="operate" mode="disable">
                             <Button
                               size="sm"
-                              variant="secondary"
+                              variant="outline"
                               disabled={pending || !pendingValues[t.tag_id]?.trim()}
                               onClick={() => handleWrite(t.tag_id)}
                               className="h-8 px-3"

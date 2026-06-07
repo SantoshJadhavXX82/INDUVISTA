@@ -234,7 +234,7 @@ export default function Devices() {
       <Drawer
         open={editing !== null}
         onClose={() => setEditing(null)}
-        title={editing === "new" ? "New device" : `Device: ${editing && editing !== "new" ? editing.name : ""}`}
+        title={editing === "new" ? "New device" : `Device: ${editing ? editing.name : ""}`}
         size="lg"
       >
         {editing !== null && (

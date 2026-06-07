@@ -16,7 +16,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Search, Play } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { type LiveTag } from "@/types/api";
-import { Card, CardContent } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { SectionCard } from "@/components/ui/section-card";
 import { Button } from "@/components/ui/button";
@@ -217,7 +216,7 @@ export default function DataGaps() {
         </div>
       </SectionCard>
 
-      {gaps.data && runKey && <GapResults gaps={gaps.data.gaps} context={gaps.data.context} windowSec={runKey.windowSec} minGap={runKey.minGap} />}
+      {gaps.data && runKey && <GapResults gaps={gaps.data.gaps} context={gaps.data.context} windowSec={runKey.windowSec} />}
       {gaps.isError && (
         <SectionCard>
           <div className="text-sm" style={{ color: "var(--status-error-on-soft)" }}>
@@ -231,7 +230,7 @@ export default function DataGaps() {
 
 // --------------------------------------------------------------------------
 
-function GapResults({ gaps, context, windowSec, minGap }: { gaps: DataGap[]; context: DataGapsContext; windowSec: number; minGap: number }) {
+function GapResults({ gaps, context, windowSec }: { gaps: DataGap[]; context: DataGapsContext; windowSec: number }) {
   const totalDowntime = gaps.reduce((sum, g) => sum + g.gap_seconds, 0);
   const uptimePct = windowSec > 0
     ? Math.max(0, Math.min(100, ((windowSec - totalDowntime) / windowSec) * 100))

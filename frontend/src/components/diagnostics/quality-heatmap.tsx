@@ -55,16 +55,8 @@ const CELL_RADIUS = 3;
  *  near the top and a richer base color at the bottom. */
 type RampStop = { top: string; bottom: string; glow: string | null };
 
-function getRamps(palette: Record<number, { top: string; bottom: string; glow: string | null }>): Record<number, RampStop> {
-  return palette;
-}
 
 
-function cssVar(name: string, fallback: string): string {
-  if (typeof document === "undefined") return fallback;
-  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  return v || fallback;
-}
 
 
 function readRamps(): Record<number, RampStop> {

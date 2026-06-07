@@ -42,8 +42,6 @@ import { HelpTip } from "@/components/ui/help-tip";
 import { help } from "@/lib/help-text";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricStrip, type MetricItem } from "@/components/ui/metric-strip";
-import { SectionCard } from "@/components/ui/section-card";
-import { StatusPill } from "@/components/ui/status-pill";
 import { QualityHeatmapCard } from "@/components/diagnostics/quality-heatmap";
 
 const REFRESH_MS = 5_000;
@@ -311,121 +309,6 @@ export default function Diagnostics() {
   );
 }
 
-// --------------------------------------------------------------------------
-// Summary cards
-// --------------------------------------------------------------------------
-
-function WorkersCard({ summary }: { summary?: DiagnosticsSummary }) {
-  const healthy = summary?.workers_healthy ?? 0;
-  const unhealthy = summary?.workers_unhealthy ?? 0;
-  const total = healthy + unhealthy;
-  const allOk = total > 0 && unhealthy === 0;
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Activity className="h-4 w-4" />
-          Workers
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-baseline gap-2">
-          <span className="text-3xl font-bold tabular-nums">{healthy}</span>
-          <span className="text-sm text-muted-foreground">/ {total} healthy</span>
-        </div>
-        <div className="mt-2">
-          {summary == null ? (
-            <Badge variant="secondary">…</Badge>
-          ) : allOk ? (
-            <Badge variant="success">all polling cleanly</Badge>
-          ) : unhealthy > 0 ? (
-            <Badge variant="destructive">{unhealthy} unhealthy</Badge>
-          ) : (
-            <Badge variant="warning">no workers reporting</Badge>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function BufferCard({ buffer }: { buffer?: BufferHealth }) {
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-base">Store-and-forward buffer</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-baseline gap-2">
-          <span className="text-3xl font-bold tabular-nums">
-            {buffer?.backlog ?? "—"}
-          </span>
-          <span className="text-sm text-muted-foreground">samples queued</span>
-        </div>
-        <div className="mt-2">
-          {buffer == null ? (
-            <Badge variant="secondary">…</Badge>
-          ) : (
-            <Badge
-              variant={
-                buffer.status === "healthy"
-                  ? "success"
-                  : buffer.status === "buffering"
-                    ? "warning"
-                    : "destructive"
-              }
-            >
-              {buffer.status}
-            </Badge>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function ConfigIssuesCard({ summary }: { summary?: DiagnosticsSummary }) {
-  const totalIssues =
-    (summary?.overlap_count ?? 0) +
-    (summary?.block_fit_issue_count ?? 0) +
-    (summary?.stale_tag_count ?? 0);
-  return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-base">Config & data issues</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-baseline gap-2">
-          <span className="text-3xl font-bold tabular-nums">
-            {summary != null ? totalIssues : "—"}
-          </span>
-          <span className="text-sm text-muted-foreground">issues</span>
-        </div>
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {summary == null ? (
-            <Badge variant="secondary">…</Badge>
-          ) : totalIssues === 0 ? (
-            <Badge variant="success">clean</Badge>
-          ) : (
-            <>
-              {summary.overlap_count > 0 && (
-                <Badge variant="destructive">{summary.overlap_count} overlap</Badge>
-              )}
-              {summary.block_fit_issue_count > 0 && (
-                <Badge variant="destructive">
-                  {summary.block_fit_issue_count} block-fit
-                </Badge>
-              )}
-              {summary.stale_tag_count > 0 && (
-                <Badge variant="warning">{summary.stale_tag_count} stale</Badge>
-              )}
-            </>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
 
 // --------------------------------------------------------------------------
 // Connection badge

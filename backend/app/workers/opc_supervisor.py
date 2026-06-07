@@ -120,6 +120,12 @@ from sqlalchemy import text
 
 from app.db import engine
 from app.historian import BufferedHistorianWriter, HistorianWriter, Sample
+from app.modbus.status import (
+    ST_HOLD_LAST,
+    ST_RANGE_WARN,
+    ST_READ_OK,
+    ST_SUBSTITUTED,
+)
 from app.local_buffer import LocalBuffer
 
 
@@ -314,6 +320,74 @@ class _SourceContext:
     # drift contaminating tag_values.time. See migration 0055.
     trust_server_timestamp: bool = False
 
+    # Phase 2e — device fault policy (mirrors modbus _apply_fault_policy).
+    # Config comes from the owning device row (devices.fault_mode/...) via the
+    # LEFT JOIN in load_sources_from_db; last_good_by_tag / fault_state_by_tag
+    # are per-source runtime state. On a not-Good OPC status the policy holds
+    # the last good value or substitutes a configured one, using the SAME st
+    # bytes and st_reason strings as modbus so the render/totals layers treat
+    # OPC Held/Substituted identically.
+    fault_mode: str | None = None
+    substitute_value: float | None = None
+    hold_mode: str | None = None
+    max_hold_sec: float | None = None
+    last_good_by_tag: dict = field(default_factory=dict)
+    fault_state_by_tag: dict = field(default_factory=dict)
+
+    def apply_fault_policy(
+        self, tag_id: int, value_double, value_text, st: int, reason, now: float,
+    ):
+        """Return a possibly-rewritten (value_double, value_text, st, st_reason).
+
+        Good reads (st >= ST_READ_OK or ST_RANGE_WARN — for OPC that's the 192
+        Good band) are recorded as last-good and passed through. On a not-Good
+        read (OPC Uncertain=96 / Bad=0) the owning device's fault_mode applies:
+        'missing' leaves it untouched (default; never fabricates data);
+        'substitute' emits substitute_value flagged Substituted; 'hold_last'
+        reuses the last good value flagged Held, decaying to the real failure
+        once max_hold_sec is exceeded when hold_mode='max_age'. `now` is the
+        caller's monotonic clock (asyncio loop time), matching the watchdog.
+        """
+        if st >= ST_READ_OK or st == ST_RANGE_WARN:
+            self.last_good_by_tag[tag_id] = (value_double, value_text, now)
+            if self.fault_state_by_tag.get(tag_id) not in (None, "ok"):
+                self.fault_state_by_tag[tag_id] = "ok"
+            return value_double, value_text, st, reason
+
+        mode = self.fault_mode or "missing"
+        if mode == "missing":
+            return value_double, value_text, st, reason
+        if mode == "substitute":
+            sub = 0.0 if self.substitute_value is None else float(self.substitute_value)
+            self._note_fault(tag_id, "substituted")
+            return sub, None, ST_SUBSTITUTED, "SUBSTITUTED"
+        if mode == "hold_last":
+            lg = self.last_good_by_tag.get(tag_id)
+            if lg is None:
+                return value_double, value_text, st, reason  # nothing good yet
+            lg_val, lg_txt, lg_ts = lg
+            if (
+                self.hold_mode == "max_age"
+                and self.max_hold_sec
+                and (now - lg_ts) > self.max_hold_sec
+            ):
+                self._note_fault(tag_id, "expired")  # let the failure stand
+                return value_double, value_text, st, reason
+            self._note_fault(tag_id, "held")
+            return lg_val, lg_txt, ST_HOLD_LAST, "HOLD_LAST"
+        return value_double, value_text, st, reason
+
+    def _note_fault(self, tag_id: int, state: str) -> None:
+        """Edge-triggered logging: announce held/substituted once per
+        transition, not on every not-Good notification."""
+        prev = self.fault_state_by_tag.get(tag_id)
+        self.fault_state_by_tag[tag_id] = state
+        if prev != state and state in ("held", "substituted"):
+            log.warning(
+                "fault-policy: OPC tag %s on '%s' -> %s",
+                tag_id, self.source_name, state.upper(),
+            )
+
 
 class _SubHandler:
     """asyncua delivers DataChangeNotifications by calling this method
@@ -367,6 +441,14 @@ class _SubHandler:
                 t = datetime.now(timezone.utc)
             st, reason = _ua_status_to_st(mv.StatusCode)
             value_double, value_text = _coerce_value(val)
+
+            # Phase 2e — apply the owning device's fault policy before building
+            # the sample (mirrors modbus). `now` uses the same monotonic clock
+            # the watchdog uses, so max_age hold decays on a consistent base.
+            value_double, value_text, st, reason = self.ctx.apply_fault_policy(
+                tag_id, value_double, value_text, st, reason,
+                asyncio.get_event_loop().time(),
+            )
 
             sample = Sample(
                 tag_id=tag_id,
@@ -453,12 +535,14 @@ def load_sources_from_db() -> list[dict]:
     subscribing to nothing wastes a TCP session."""
     with engine.connect() as conn:
         rows = conn.execute(text("""
-            SELECT id, name, endpoint, security_policy, username, password,
-                   publishing_interval_ms, reconnect_min_sec, reconnect_max_sec,
-                   device_id, trust_server_timestamp
-            FROM opc_sources
-            WHERE is_enabled = TRUE
-            ORDER BY id
+            SELECT s.id, s.name, s.endpoint, s.security_policy, s.username, s.password,
+                   s.publishing_interval_ms, s.reconnect_min_sec, s.reconnect_max_sec,
+                   s.device_id, s.trust_server_timestamp,
+                   d.fault_mode, d.substitute_value, d.hold_mode, d.max_hold_sec
+            FROM opc_sources s
+            LEFT JOIN devices d ON d.id = s.device_id
+            WHERE s.is_enabled = TRUE
+            ORDER BY s.id
         """)).mappings().all()
 
         result: list[dict] = []
@@ -654,6 +738,10 @@ async def opc_source_worker(
         tag_by_node=source["tag_by_node"],
         buffer=buffer,
         trust_server_timestamp=bool(source.get("trust_server_timestamp", False)),
+        fault_mode=source.get("fault_mode"),
+        substitute_value=source.get("substitute_value"),
+        hold_mode=source.get("hold_mode"),
+        max_hold_sec=source.get("max_hold_sec"),
     )
 
     while not global_stop_event.is_set() and not restart_event.is_set():

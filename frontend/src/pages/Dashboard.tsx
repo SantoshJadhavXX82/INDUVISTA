@@ -391,8 +391,8 @@ function DashboardHero({
   // the user can pin their own favorites.
   const pinnedTags = useMemo(() => {
     return [...liveTags]
-      .filter(t => t.value !== null && t.value !== undefined)
-      .sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime())
+      .filter(t => t.value_double !== null && t.value_double !== undefined)
+      .sort((a, b) => new Date(b.time ?? 0).getTime() - new Date(a.time ?? 0).getTime())
       .slice(0, 4);
   }, [liveTags]);
 
@@ -466,8 +466,8 @@ function DashboardHero({
               <KpiCard
                 key={t.tag_id}
                 label={t.tag_name}
-                value={t.value}
-                unit={t.unit ?? undefined}
+                value={t.value_double}
+                unit={t.engineering_unit ?? undefined}
                 quality={mapQuality(t.st)}
               />
             ))}

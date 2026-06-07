@@ -42,12 +42,6 @@ type User = {
 const ROLES = ["viewer", "operator", "engineer", "approver", "admin"] as const;
 const PROVIDERS = ["local", "ldap", "os"] as const;
 
-function roleBadgeVariant(role: string): "default" | "outline" | "success" | "warning" {
-  if (role === "admin") return "warning";
-  if (role === "approver") return "warning";
-  if (role === "engineer") return "success";
-  return "outline";
-}
 
 export default function Users() {
   const qc = useQueryClient();
@@ -75,10 +69,10 @@ export default function Users() {
   });
 
   const toggleEnabled = useMutation({
-    mutationFn: ({ id, enable }: { id: number; enable: boolean }) =>
-      enable
-        ? api.patch<User>(`/admin/users/${id}`, { is_enabled: true })
-        : api.delete(`/admin/users/${id}`),
+    mutationFn: async ({ id, enable }: { id: number; enable: boolean }) => {
+      if (enable) await api.patch<User>(`/admin/users/${id}`, { is_enabled: true });
+      else await api.delete(`/admin/users/${id}`);
+    },
     onSuccess: (_d, v) => { qc.invalidateQueries({ queryKey: ["admin-users"] }); flash("ok", v.enable ? "User enabled." : "User disabled."); },
     onError: (e: ApiError) => flash("err", e.detail),
   });

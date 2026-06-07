@@ -10,8 +10,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Filter, RefreshCw, AlertTriangle, ChevronRight, ChevronsRight,
-} from "lucide-react";
+  Filter, RefreshCw, AlertTriangle, ChevronRight, } from "lucide-react";
 
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";

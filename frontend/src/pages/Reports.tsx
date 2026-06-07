@@ -7,7 +7,7 @@
  */
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Plus, X, CalendarDays, FileBarChart, Loader2, Download } from "lucide-react";
+import {  X, CalendarDays, FileBarChart, Loader2, Download } from "lucide-react";
 import { api } from "@/lib/api";
 import { TOKEN_KEY } from "@/lib/auth";
 import { PageHeader } from "@/components/ui/page-header";

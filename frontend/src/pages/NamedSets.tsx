@@ -15,10 +15,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Pencil, Trash2, Shield, AlertCircle, Search, GripVertical, X,
+  Plus, Pencil, Trash2, Shield, AlertCircle, Search, X,
 } from "lucide-react";
 
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
 } from "@/components/ui/table";
@@ -32,7 +32,7 @@ import { api, ApiError } from "@/lib/api";
 import { help } from "@/lib/help-text";
 import { cn } from "@/lib/utils";
 import type {
-  NamedSet, NamedSetValue, NamedSetCreate,
+  NamedSet, NamedSetCreate,
 } from "@/types/api";
 
 export default function NamedSets() {

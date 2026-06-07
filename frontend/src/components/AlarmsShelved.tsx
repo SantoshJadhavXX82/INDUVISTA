@@ -12,7 +12,7 @@
 import { useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Pause, Play, RefreshCw, AlertTriangle, Clock,
+  Pause, Play, RefreshCw, Clock,
 } from "lucide-react";
 
 import { api } from "@/lib/api";

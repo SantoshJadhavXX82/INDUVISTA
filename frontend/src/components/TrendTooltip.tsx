@@ -60,7 +60,6 @@ type TrendTooltipProps = {
   containerHeight: number;
 };
 
-const OFFSET = 14;
 const TOOLTIP_WIDTH_FULL = 360;
 const TOOLTIP_WIDTH_COMPACT = 240;
 const TOOLTIP_MAX_HEIGHT = 380;

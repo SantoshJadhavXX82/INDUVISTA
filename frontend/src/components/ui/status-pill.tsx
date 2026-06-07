@@ -20,7 +20,7 @@
 import { cn } from "@/lib/utils";
 
 type StatusVariant = "good" | "warn" | "error" | "info" | "neutral";
-type SeverityVariant =
+export type SeverityVariant =
   | "vcritical" | "critical" | "high" | "medium"
   | "low" | "info" | "noncritical";
 

@@ -12,7 +12,11 @@ export type RuleType =
   | "lo"
   | "lo_lo"
   | "deviation"
-  | "rate_of_change";
+  | "rate_of_change"
+  | "frozen"
+  | "spike"
+  | "bool_true"
+  | "bool_false";
 
 export type Severity = "critical" | "high" | "medium" | "low" | "info";
 
@@ -46,6 +50,10 @@ export const RULE_TYPE_LABELS: Record<RuleType, string> = {
   lo_lo: "Low-Low",
   deviation: "Deviation",
   rate_of_change: "Rate of Change",
+  frozen: "Frozen",
+  spike: "Spike",
+  bool_true: "Boolean True",
+  bool_false: "Boolean False",
 };
 
 export const SEVERITY_LABELS: Record<Severity, string> = {

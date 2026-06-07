@@ -74,9 +74,6 @@ function worstQuality(samples: InputSample[]): number {
   return Math.min(...samples.map(s => s.quality));
 }
 
-function allGood(samples: InputSample[]): boolean {
-  return samples.every(s => s.quality >= GOOD_QUALITY && s.value !== null);
-}
 
 /** Aggregation output quality. Computes from samples (tag operands)
  *  — constants don't drag quality down (always inline-GOOD). Returns
@@ -110,16 +107,6 @@ function goodValues(cfg: any, samples: InputSample[]): number[] {
   return out;
 }
 
-/** Aggregation strict mode: returns ([], worst) if any input is < GOOD.
- *  Matches arithmetic_tier_e's _nary_good_values. */
-function naryGoodValues(samples: InputSample[]): { vals: number[]; quality: number } {
-  if (samples.length === 0) return { vals: [], quality: 0 };
-  const w = worstQuality(samples);
-  if (w < GOOD_QUALITY) return { vals: [], quality: w };
-  const vals: number[] = [];
-  for (const s of samples) if (s.value !== null) vals.push(s.value);
-  return { vals, quality: GOOD_NON_SPECIFIC };
-}
 
 function isNaryMode(cfg: any): boolean {
   return cfg && typeof cfg === "object" && "inputs" in cfg;
@@ -906,7 +893,7 @@ function evalNot(cfg: any, samples: InputSample[]): BlockResult {
 // SUM_OF (the original Tier 0 block, partial-sum semantics)
 // ===========================================================================
 
-function evalSumOf(cfg: any, samples: InputSample[]): BlockResult {
+function evalSumOf(_cfg: any, samples: InputSample[]): BlockResult {
   if (!samples.length) return { value: null, quality: 0 };
   let total = 0;
   for (const s of samples) if (s.value !== null) total += s.value;

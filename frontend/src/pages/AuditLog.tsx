@@ -8,12 +8,11 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Shield, RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
+  RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, Ban,
 } from "lucide-react";
 
 import { api } from "@/lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { PageHeader } from "@/components/ui/page-header";
 import { SectionCard } from "@/components/ui/section-card";
 

@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Activity, Play, Pause, AlertCircle, ArrowDown, ArrowUp,
+  Activity, Play, Pause, ArrowDown, ArrowUp,
   Zap, TrendingUp, AlertTriangle, RefreshCw, Square,
 } from "lucide-react";
 import { api } from "@/lib/api";
