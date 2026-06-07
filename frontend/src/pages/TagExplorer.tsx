@@ -96,13 +96,21 @@ function tagSource(
   return "other";
 }
 
-// Quality filter options + chip colors (FMT-004 status palette).
-const QUALITY_OPTIONS: { value: QualityState; label: string; color: string }[] = [
-  { value: "good", label: "Good", color: "#15803D" },
-  { value: "stale", label: "Stale", color: "#6B7280" },
-  { value: "error", label: "Bad", color: "#DC2626" },
-  { value: "unknown", label: "No data", color: "#9CA3AF" },
+// Chip colors mirror the live quality dot (tag-quality-badge.tsx) so the
+// summary matches the per-row dots: the small dot matches the badge exactly
+// (good=green-500, stale=amber-400, error=red-500, unknown=gray-300). `active`
+// is a slightly darker shade used as the selected-chip background so white
+// text stays legible.
+const QUALITY_OPTIONS: { value: QualityState; label: string; dot: string; active: string }[] = [
+  { value: "good", label: "Good", dot: "#22C55E", active: "#16A34A" },
+  { value: "stale", label: "Stale", dot: "#FBBF24", active: "#D97706" },
+  { value: "error", label: "Bad", dot: "#EF4444", active: "#DC2626" },
+  { value: "unknown", label: "No data", dot: "#D1D5DB", active: "#6B7280" },
 ];
+
+// Columns the table can be sorted by. A sort flattens the grouped view into a
+// single globally-ordered list (see the render IIFE).
+type SortKey = "name" | "device" | "type" | "value" | "quality";
 
 export default function TagExplorer() {
   const queryClient = useQueryClient();
@@ -113,6 +121,10 @@ export default function TagExplorer() {
   const [quality, setQuality] = useState<"" | QualityState>("");
   const [dtype, setDtype] = useState<string>("");
   const [source, setSource] = useState<"" | "modbus" | "computed" | "opc">("");
+  // Sortable columns. When sortKey is set, the grouped layout is replaced by a
+  // single globally-sorted list (clear sort to return to grouping).
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [selectedTagId, setSelectedTagId] = useState<number | null>(null);
   const [creatingTag, setCreatingTag] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -256,7 +268,54 @@ export default function TagExplorer() {
     return c;
   }, [tags.data]);
 
-  const anyFilterActive = Boolean(group || deviceId || search || quality || dtype || source);
+  const anyFilterActive = Boolean(group || deviceId || search || quality || dtype || source || sortKey);
+
+  // Flat global sort. When a sort column is active we bypass device grouping and
+  // render one sorted list of the filtered (physical) tags. Pairs are omitted
+  // while sorting — clearing the sort restores the grouped view with pairs.
+  const sortedFlat = useMemo(() => {
+    if (!sortKey) return null;
+    const dir = sortDir === "asc" ? 1 : -1;
+    // Quality sort surfaces problems first (asc = worst → best).
+    const qRank: Record<QualityState, number> = { error: 0, stale: 1, unknown: 2, good: 3 };
+    const keyOf = (t: LiveTag): string | number => {
+      switch (sortKey) {
+        case "name": return t.tag_name.toLowerCase();
+        case "device": return t.device_name.toLowerCase();
+        case "type": return t.data_type;
+        case "value": return t.value_double ?? Number.NEGATIVE_INFINITY;
+        case "quality": return qRank[tagQualityState(t)];
+        default: return 0;
+      }
+    };
+    return [...filtered].sort((a, b) => {
+      const av = keyOf(a), bv = keyOf(b);
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      return a.tag_name.localeCompare(b.tag_name); // stable tiebreak
+    });
+  }, [filtered, sortKey, sortDir]);
+
+  const toggleSort = (k: SortKey) => {
+    if (sortKey === k) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(k); setSortDir("asc"); }
+  };
+
+  const sortHead = (k: SortKey, label: string, align?: "right" | "center") => (
+    <TableHead className={cn(align === "right" && "text-right", align === "center" && "text-center")}>
+      <button
+        type="button"
+        onClick={() => toggleSort(k)}
+        className={cn(
+          "inline-flex items-center gap-1 hover:text-foreground",
+          sortKey === k && "text-foreground font-medium",
+        )}
+      >
+        {label}
+        {sortKey === k && <span className="text-[10px]">{sortDir === "asc" ? "▲" : "▼"}</span>}
+      </button>
+    </TableHead>
+  );
 
   const countsByDevice = useMemo(() => {
     const counts: Record<number | "all", number> = { all: tags.data?.length ?? 0 };
@@ -502,11 +561,11 @@ export default function TagExplorer() {
                   "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
                   active ? "border-transparent" : "border-input hover:bg-secondary/60",
                 )}
-                style={active ? { backgroundColor: q.color, color: "#fff" } : undefined}
+                style={active ? { backgroundColor: q.active, color: "#fff" } : undefined}
               >
                 <span
                   className="h-2 w-2 rounded-full"
-                  style={{ backgroundColor: active ? "#fff" : q.color }}
+                  style={{ backgroundColor: active ? "#fff" : q.dot }}
                 />
                 {q.label}
                 <span className="tabular-nums opacity-80">{qualityCounts[q.value]}</span>
@@ -582,6 +641,7 @@ export default function TagExplorer() {
             onClick={() => {
               setGroup(""); setDeviceId(""); setSearch("");
               setQuality(""); setDtype(""); setSource("");
+              setSortKey(null); setSortDir("asc");
             }}
             className="h-9 rounded-md border border-input bg-background px-3 text-sm text-muted-foreground hover:bg-secondary/60"
           >
@@ -638,16 +698,16 @@ export default function TagExplorer() {
                   />
                 </TableHead>
                 <TableHead className="w-12 text-right">#</TableHead>
-                <TableHead>Name</TableHead>
+                {sortHead("name", "Name")}
                 <TableHead>Groups</TableHead>
-                <TableHead>Device</TableHead>
+                {sortHead("device", "Device")}
                 <TableHead className="text-right">FC</TableHead>
                 <TableHead className="text-right">Addr</TableHead>
-                <TableHead>Type</TableHead>
+                {sortHead("type", "Type")}
                 <TableHead>Unit</TableHead>
-                <TableHead className="text-right">Current</TableHead>
+                {sortHead("value", "Current", "right")}
                 <TableHead className="text-center">Trend</TableHead>
-                <TableHead>Quality</TableHead>
+                {sortHead("quality", "Quality")}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -882,6 +942,13 @@ export default function TagExplorer() {
                     </TableCell>
                   </TableRow>
                 );
+
+                // Global sort overrides device grouping: render one flat,
+                // sorted list. Section headers and pair rows are omitted while
+                // a sort is active (clear the sort to return to grouping).
+                if (sortedFlat) {
+                  return sortedFlat.map(renderRow);
+                }
 
                 if (deviceId !== "") {
                   // Specific device — flat layout.
