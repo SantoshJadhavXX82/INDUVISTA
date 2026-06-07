@@ -51,6 +51,11 @@ type Device = {
   host: string | null;             // NULL for computed/opc_ua devices
   port: number | null;             // NULL for computed/opc_ua devices
   unit_id: number | null;          // NULL for computed/opc_ua devices
+  // Phase 9 — connection redundancy (Modbus)
+  connection_mode: string;         // 'simplex' | 'redundant'
+  secondary_host: string | null;
+  secondary_port: number | null;
+  secondary_unit_id: number | null;
   duty_role: string;
   redundant_device_id: number | null;
   duty_status_tag_id: number | null;
@@ -268,6 +273,10 @@ type FormState = {
   host: string;
   port: string;
   unit_id: string;
+  connection_mode: string;
+  secondary_host: string;
+  secondary_port: string;
+  secondary_unit_id: string;
   duty_role: string;
   partner_device_id: string;
   duty_status_tag_id: string;
@@ -320,6 +329,10 @@ function DeviceForm({
     host: device?.host ?? "",
     port: device?.port != null ? String(device.port) : "502",
     unit_id: device?.unit_id != null ? String(device.unit_id) : "1",
+    connection_mode: device?.connection_mode ?? "simplex",
+    secondary_host: device?.secondary_host ?? "",
+    secondary_port: device?.secondary_port != null ? String(device.secondary_port) : "",
+    secondary_unit_id: device?.secondary_unit_id != null ? String(device.secondary_unit_id) : "",
     duty_role: device?.duty_role ?? "none",
     partner_device_id: device?.redundant_device_id ? String(device.redundant_device_id) : "",
     duty_status_tag_id: device?.duty_status_tag_id ? String(device.duty_status_tag_id) : "",
@@ -406,6 +419,31 @@ function DeviceForm({
           }
         : {};
 
+      const redundancy = isModbus
+        ? {
+            connection_mode: form.connection_mode,
+            secondary_host:
+              form.connection_mode === "redundant"
+                ? (form.secondary_host || null)
+                : null,
+            secondary_port:
+              form.connection_mode === "redundant" && form.secondary_port !== ""
+                ? parseInt(form.secondary_port, 10)
+                : null,
+            secondary_unit_id:
+              form.connection_mode === "redundant" && form.secondary_unit_id !== ""
+                ? parseInt(form.secondary_unit_id, 10)
+                : null,
+          }
+        : {};
+
+      // Validate redundant connection intent (Modbus only)
+      if (isModbus && form.connection_mode === "redundant") {
+        if (!form.secondary_host || form.secondary_port === "") {
+          throw new Error("backup host and port are required for redundant connection mode");
+        }
+      }
+
       // Validate duty/standby pairing intent (Modbus only)
       if (isModbus) {
         if (form.duty_role !== "none" && !form.partner_device_id) {
@@ -431,6 +469,7 @@ function DeviceForm({
           enabled: form.enabled,
           ...hardening,
           ...faultPolicy,
+          ...redundancy,
         });
         if (isModbus && form.duty_role !== "none" && form.partner_device_id) {
           return api.post<Device>(`/devices/${created.id}/pair`, {
@@ -466,6 +505,7 @@ function DeviceForm({
         } : {}),
         ...hardening,
         ...faultPolicy,
+        ...redundancy,
       });
 
       if (!pairingChanged) return patched;
@@ -801,6 +841,74 @@ function DeviceForm({
           </label>
         </div>
       </div>
+
+      {/* Connection redundancy — Modbus only (Phase 9) */}
+      {isModbus && (
+        <div className="space-y-3 rounded-md border bg-secondary/20 p-3">
+          <div className="space-y-1.5">
+            <Label htmlFor="connection_mode">Connection</Label>
+            <select
+              id="connection_mode"
+              value={form.connection_mode}
+              onChange={(e) => setForm({ ...form, connection_mode: e.target.value })}
+              className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+            >
+              <option value="simplex">Simplex (single endpoint)</option>
+              <option value="redundant">Redundant (primary + backup endpoint)</option>
+            </select>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Redundant uses the backup endpoint below when the primary host:port
+              is unreachable, and fails back to the primary automatically once it
+              recovers.
+            </p>
+          </div>
+
+          {form.connection_mode === "redundant" && (
+            <div className="grid grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="secondary_host">
+                  Backup host
+                  <span className="normal-case text-muted-foreground"> (required)</span>
+                </Label>
+                <Input
+                  id="secondary_host"
+                  required
+                  value={form.secondary_host}
+                  onChange={(e) => setForm({ ...form, secondary_host: e.target.value })}
+                  placeholder="192.168.1.11 or backup service name"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="secondary_port">
+                  Backup port
+                  <span className="normal-case text-muted-foreground"> (required)</span>
+                </Label>
+                <Input
+                  id="secondary_port"
+                  type="number"
+                  required
+                  value={form.secondary_port}
+                  onChange={(e) => setForm({ ...form, secondary_port: e.target.value })}
+                  placeholder="502"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="secondary_unit_id">
+                  Backup unit ID
+                  <span className="normal-case text-muted-foreground"> (optional)</span>
+                </Label>
+                <Input
+                  id="secondary_unit_id"
+                  type="number"
+                  value={form.secondary_unit_id}
+                  onChange={(e) => setForm({ ...form, secondary_unit_id: e.target.value })}
+                  placeholder={form.unit_id || "1"}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">

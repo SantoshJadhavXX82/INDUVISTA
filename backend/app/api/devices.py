@@ -32,6 +32,7 @@ router = APIRouter(prefix="/api", tags=["devices"])
 DutyRole = Literal["duty", "standby", "none"]
 FaultMode = Literal["missing", "hold_last", "substitute"]
 HoldMode = Literal["indefinite", "max_age"]
+ConnMode = Literal["simplex", "redundant"]
 
 
 # ===========================================================================
@@ -50,6 +51,7 @@ class DeviceCreate(BaseModel):
     duty_role: DutyRole = "none"
     stale_after_sec: int = Field(30, ge=1)
     scan_interval_ms: int = Field(1000, ge=10)
+    connection_mode: ConnMode = "simplex"
     secondary_host: str | None = None
     secondary_port: int | None = Field(None, ge=1, le=65535)
     secondary_unit_id: int | None = Field(None, ge=0, le=255)
@@ -77,6 +79,7 @@ class DeviceUpdate(BaseModel):
     duty_role: DutyRole | None = None
     stale_after_sec: int | None = Field(None, ge=1)
     scan_interval_ms: int | None = Field(None, ge=10)
+    connection_mode: ConnMode | None = None
     secondary_host: str | None = None
     secondary_port: int | None = Field(None, ge=1, le=65535)
     secondary_unit_id: int | None = Field(None, ge=0, le=255)
@@ -107,6 +110,7 @@ class DeviceResponse(BaseModel):
     duty_role: str | None
     stale_after_sec: int
     scan_interval_ms: int
+    connection_mode: str
     secondary_host: str | None
     secondary_port: int | None
     secondary_unit_id: int | None
@@ -128,7 +132,7 @@ _DEVICE_SELECT = """
     SELECT d.id, d.name, d.channel_id, c.name AS channel_name,
            d.description, d.protocol, d.host, d.port, d.unit_id,
            d.duty_role, d.stale_after_sec, d.scan_interval_ms,
-           d.secondary_host, d.secondary_port, d.secondary_unit_id,
+           d.connection_mode, d.secondary_host, d.secondary_port, d.secondary_unit_id,
            d.redundant_device_id, d.duty_status_tag_id, d.manual_override, d.enabled,
            d.request_timeout_ms, d.retry_count,
            d.reconnect_initial_ms, d.reconnect_max_ms,
@@ -175,6 +179,7 @@ def _full_dev(row) -> dict[str, Any]:
         "duty_role": row.get("duty_role"),
         "stale_after_sec": row.get("stale_after_sec"),
         "scan_interval_ms": row.get("scan_interval_ms"),
+        "connection_mode": row.get("connection_mode"),
         "secondary_host": row.get("secondary_host"),
         "secondary_port": row.get("secondary_port"),
         "secondary_unit_id": row.get("secondary_unit_id"),
@@ -239,6 +244,14 @@ def create_device(
 ):
     target_label = body.name
 
+    if body.connection_mode == "redundant" and (
+        body.secondary_host is None or body.secondary_port is None
+    ):
+        raise HTTPException(
+            400,
+            "connection_mode 'redundant' requires secondary_host and secondary_port",
+        )
+
     try:
         new_id = db.execute(
             text("""
@@ -246,7 +259,7 @@ def create_device(
                     channel_id, name, description, protocol,
                     host, port, unit_id,
                     duty_role, stale_after_sec, scan_interval_ms,
-                    secondary_host, secondary_port, secondary_unit_id,
+                    connection_mode, secondary_host, secondary_port, secondary_unit_id,
                     redundant_device_id, duty_status_tag_id,
                     manual_override, enabled,
                     request_timeout_ms, retry_count,
@@ -257,7 +270,7 @@ def create_device(
                     :channel_id, :name, :description, :protocol,
                     :host, :port, :unit_id,
                     :duty_role, :stale_after_sec, :scan_interval_ms,
-                    :secondary_host, :secondary_port, :secondary_unit_id,
+                    :connection_mode, :secondary_host, :secondary_port, :secondary_unit_id,
                     :redundant_device_id, :duty_status_tag_id,
                     :manual_override, :enabled,
                     :request_timeout_ms, :retry_count,

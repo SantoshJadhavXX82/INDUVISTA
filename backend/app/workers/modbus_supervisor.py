@@ -129,7 +129,8 @@ def load_polling_config() -> list[dict]:
                        d.scan_interval_ms,
                        d.request_timeout_ms, d.retry_count,
                        d.reconnect_initial_ms, d.reconnect_max_ms,
-                       d.connection_mode, d.redundant_host, d.redundant_port,
+                       d.connection_mode, d.secondary_host, d.secondary_port,
+                       d.secondary_unit_id,
                        d.fault_mode, d.substitute_value,
                        d.hold_mode, d.max_hold_sec,
                        d.channel_id,
@@ -422,11 +423,11 @@ class DeviceWorker:
             self._endpoints.append((str(device["host"]), int(device["port"])))
         if (
             str(device.get("connection_mode") or "simplex") == "redundant"
-            and device.get("redundant_host")
-            and device.get("redundant_port")
+            and device.get("secondary_host")
+            and device.get("secondary_port")
         ):
             self._endpoints.append(
-                (str(device["redundant_host"]), int(device["redundant_port"]))
+                (str(device["secondary_host"]), int(device["secondary_port"]))
             )
         # Index into _endpoints of the currently-live connection — used only
         # to log failover/failback transitions once (not every cycle).
@@ -909,7 +910,7 @@ class DeviceWorker:
         fc = block["function_code"]
         start = block["start_address"]
         count = block["count"]
-        unit_id = self.device["unit_id"]
+        unit_id = self._active_unit_id()
         now = datetime.now(timezone.utc)
 
         # Phase 9.1.1 — Enron blocks go through a separate persistent socket
@@ -1141,6 +1142,20 @@ class DeviceWorker:
                 except Exception:
                     pass
             self.client = None
+
+    def _active_unit_id(self) -> int:
+        """Unit id for the currently-active endpoint.
+
+        On the secondary endpoint, honour secondary_unit_id when configured;
+        otherwise fall back to the device's primary unit_id. Simplex devices
+        (and the primary endpoint of a redundant device) always use unit_id.
+        """
+        if (
+            self._active_ep_idx == 1
+            and self.device.get("secondary_unit_id") is not None
+        ):
+            return int(self.device["secondary_unit_id"])
+        return int(self.device["unit_id"])
 
     # ---------- response-time tracking + status flush -----------------------
     def _record_latency(self, ms: float) -> None:
@@ -1663,7 +1678,8 @@ def _config_fingerprint(config: list[dict]) -> str:
             d["request_timeout_ms"], d["retry_count"],
             d["reconnect_initial_ms"], d["reconnect_max_ms"],
             d.get("channel_transport"),
-            d.get("connection_mode"), d.get("redundant_host"), d.get("redundant_port"),
+            d.get("connection_mode"), d.get("secondary_host"), d.get("secondary_port"),
+            d.get("secondary_unit_id"),
         )
         blocks_part = tuple(
             (b["id"], b["function_code"], b["start_address"], b["count"],
