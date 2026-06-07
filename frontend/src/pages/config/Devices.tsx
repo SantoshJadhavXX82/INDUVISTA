@@ -21,7 +21,7 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, AlertCircle, Calculator, Network } from "lucide-react";
+import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
@@ -168,14 +168,20 @@ export default function Devices() {
                       <div className="flex items-center gap-1.5">
                         {isComputed && (
                           <Calculator
-                            className="h-3 w-3 text-muted-foreground"
+                            className="h-3.5 w-3.5 shrink-0 text-amber-500"
                             aria-label="Computed device"
                           />
                         )}
                         {isOpc && (
                           <Network
-                            className="h-3 w-3 text-muted-foreground"
+                            className="h-3.5 w-3.5 shrink-0 text-violet-500"
                             aria-label="OPC UA device"
+                          />
+                        )}
+                        {!isComputed && !isOpc && (
+                          <Cpu
+                            className="h-3.5 w-3.5 shrink-0 text-blue-500"
+                            aria-label="Modbus device"
                           />
                         )}
                         {d.name}

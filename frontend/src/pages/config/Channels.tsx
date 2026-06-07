@@ -7,7 +7,7 @@
  */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, AlertCircle } from "lucide-react";
+import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -84,7 +84,29 @@ export default function Channels() {
                   onClick={() => setEditing(c)}
                   className="cursor-pointer"
                 >
-                  <TableCell className="font-medium">{c.name}</TableCell>
+                  <TableCell className="font-medium">
+                    <div className="flex items-center gap-1.5">
+                      {c.protocol_connector === "internal" && (
+                        <Calculator
+                          className="h-3.5 w-3.5 shrink-0 text-amber-500"
+                          aria-label="Computed (internal) network"
+                        />
+                      )}
+                      {c.protocol_connector === "opc_ua" && (
+                        <Network
+                          className="h-3.5 w-3.5 shrink-0 text-violet-500"
+                          aria-label="OPC UA network"
+                        />
+                      )}
+                      {c.protocol_connector === "modbus" && (
+                        <Cpu
+                          className="h-3.5 w-3.5 shrink-0 text-blue-500"
+                          aria-label="Modbus network"
+                        />
+                      )}
+                      {c.name}
+                    </div>
+                  </TableCell>
                   <TableCell className="text-xs">{c.protocol_connector}</TableCell>
                   <TableCell className="text-xs">{c.transport}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">
