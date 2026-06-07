@@ -49,10 +49,11 @@ interface TagQualityBadgeProps {
   st_reason: string | null;
   age_seconds: number | null;
   className?: string;
+  hideAge?: boolean;
 }
 
 export function TagQualityBadge({
-  st, st_reason, age_seconds, className,
+  st, st_reason, age_seconds, className, hideAge = false,
 }: TagQualityBadgeProps) {
   const q = tagQuality(st, age_seconds);
   const age = formatAge(age_seconds);
@@ -76,7 +77,7 @@ export function TagQualityBadge({
   );
 
   // For "good" we hide the age unless > 5s (don't waste pixels for fresh data).
-  const showAge = q !== "unknown" && (q !== "good" || (age_seconds ?? 0) > 5);
+  const showAge = !hideAge && q !== "unknown" && (q !== "good" || (age_seconds ?? 0) > 5);
 
   return (
     <span

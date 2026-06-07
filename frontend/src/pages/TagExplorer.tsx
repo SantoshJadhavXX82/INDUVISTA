@@ -46,7 +46,7 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { formatTagValue } from "@/lib/format";
-import { TagQualityBadge } from "@/components/tags/tag-quality-badge";
+import { TagQualityBadge, formatAge } from "@/components/tags/tag-quality-badge";
 import { PageHeader } from "@/components/ui/page-header";
 import { StatusPill } from "@/components/ui/status-pill";
 
@@ -110,7 +110,7 @@ const QUALITY_OPTIONS: { value: QualityState; label: string; dot: string; active
 
 // Columns the table can be sorted by. A sort flattens the grouped view into a
 // single globally-ordered list (see the render IIFE).
-type SortKey = "name" | "device" | "type" | "value" | "quality";
+type SortKey = "name" | "device" | "type" | "value" | "quality" | "age";
 
 export default function TagExplorer() {
   const queryClient = useQueryClient();
@@ -285,6 +285,7 @@ export default function TagExplorer() {
         case "type": return t.data_type;
         case "value": return t.value_double ?? Number.NEGATIVE_INFINITY;
         case "quality": return qRank[tagQualityState(t)];
+        case "age": return t.age_seconds ?? Number.POSITIVE_INFINITY;
         default: return 0;
       }
     };
@@ -440,7 +441,7 @@ export default function TagExplorer() {
   );
 
   return (
-    <div className="space-y-4 max-w-7xl mx-auto">
+    <div className="space-y-4">
       <PageHeader
         title="Tags"
         subtitle={`Browse, search, and edit ${tags.data?.length ?? "…"} tags`}
@@ -707,6 +708,7 @@ export default function TagExplorer() {
                 <TableHead>Unit</TableHead>
                 {sortHead("value", "Current", "right")}
                 <TableHead className="text-center">Trend</TableHead>
+                {sortHead("age", "Age", "right")}
                 {sortHead("quality", "Quality")}
               </TableRow>
             </TableHeader>
@@ -810,11 +812,15 @@ export default function TagExplorer() {
                           );
                         })()}
                       </TableCell>
+                      <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
+                        {formatAge(pt.age_seconds)}
+                      </TableCell>
                       <TableCell>
                         <TagQualityBadge
                           st={pt.st}
                           st_reason={pt.st_reason}
                           age_seconds={pt.age_seconds}
+                          hideAge
                         />
                       </TableCell>
                     </TableRow>
@@ -933,11 +939,15 @@ export default function TagExplorer() {
                         );
                       })()}
                     </TableCell>
+                    <TableCell className="text-right tabular-nums text-xs text-muted-foreground">
+                      {formatAge(t.age_seconds)}
+                    </TableCell>
                     <TableCell>
                       <TagQualityBadge
                         st={t.st}
                         st_reason={t.st_reason}
                         age_seconds={t.age_seconds}
+                        hideAge
                       />
                     </TableCell>
                   </TableRow>
@@ -996,7 +1006,7 @@ export default function TagExplorer() {
                   const primaryId = headRow.primary_device_id;
                   return [
                   <TableRow key={`pair-hdr-${g.key}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={12} className="py-1.5 text-xs">
+                    <TableCell colSpan={13} className="py-1.5 text-xs">
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <span className="font-semibold flex items-center gap-2 flex-wrap">
                           {g.label}
@@ -1109,7 +1119,7 @@ export default function TagExplorer() {
 
                 const physicalSection = groups.flatMap((g) => [
                   <TableRow key={`hdr-${g.id}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={12} className="py-1.5 text-xs font-semibold">
+                    <TableCell colSpan={13} className="py-1.5 text-xs font-semibold">
                       {g.name}
                       <span className="ml-2 font-normal text-muted-foreground tabular-nums">
                         {g.rows.length} tag{g.rows.length === 1 ? "" : "s"}

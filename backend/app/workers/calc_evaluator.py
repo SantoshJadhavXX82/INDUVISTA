@@ -64,6 +64,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app.db import SessionLocal
+from app.services.latest_values import latest_values_by_tag
 from app.workers.calc_blocks import (
     BLOCK_REGISTRY, get_block, InputSample, BlockResult,
 )
@@ -307,32 +308,27 @@ def load_definitions(db) -> list[CalcDef]:
 def latest_inputs(db, tag_ids: list[int]) -> dict[int, InputSample]:
     if not tag_ids:
         return {}
-    # Read current input values from latest_tag_values (one indexed row per
-    # tag, PK on tag_id) instead of scanning the multi-million-row tag_values
-    # hypertable with DISTINCT ON. latest_tag_values already holds the current
-    # value/quality per tag — exactly what a calc input needs — so this is a
-    # point lookup rather than a cross-chunk history scan, which is what let the
-    # evaluator fall ~140s behind its 1s cadence under write load. The max_age
-    # guard is preserved: an input whose latest sample is older than
-    # MAX_INPUT_AGE_SEC is omitted and treated as missing (value=None, st=0),
-    # identical to the previous behaviour.
-    rows = db.execute(text("""
-        SELECT tag_id, value_double, st
-        FROM latest_tag_values
-        WHERE tag_id = ANY(:ids)
-          AND time >= NOW() - make_interval(secs => :max_age)
-    """), {"ids": tag_ids, "max_age": MAX_INPUT_AGE_SEC}).mappings().all()
+    # Current input values via the shared latest_tag_values reader (one indexed
+    # row per tag), never a scan of the multi-million-row tag_values hypertable
+    # — scanning it with DISTINCT ON is what let the evaluator fall ~140s behind
+    # its 1s cadence under write load. The max_age guard is preserved: an input
+    # whose latest sample is older than MAX_INPUT_AGE_SEC is omitted by the
+    # reader and treated here as missing (value=None, quality=0).
+    rows = latest_values_by_tag(db, tag_ids, max_age_sec=MAX_INPUT_AGE_SEC)
 
     out: dict[int, InputSample] = {}
-    for r in rows:
-        out[r["tag_id"]] = InputSample(
-            tag_id=r["tag_id"],
-            value=float(r["value_double"]) if r["value_double"] is not None else None,
-            quality=int(r["st"]) if r["st"] is not None else 0,
-        )
     for tid in tag_ids:
-        if tid not in out:
+        r = rows.get(tid)
+        if r is None:
             out[tid] = InputSample(tag_id=tid, value=None, quality=0)
+            continue
+        vd = r["value_double"]
+        st = r["st"]
+        out[tid] = InputSample(
+            tag_id=tid,
+            value=float(vd) if vd is not None else None,
+            quality=int(st) if st is not None else 0,
+        )
     return out
 
 

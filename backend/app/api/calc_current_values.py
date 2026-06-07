@@ -17,9 +17,9 @@ value_double (0.0/1.0 for booleans).
 """
 
 from fastapi import APIRouter
-from sqlalchemy import text
 
 from app.db import SessionLocal
+from app.services.latest_values import latest_values_by_tag
 
 
 router = APIRouter(tags=["calc"])
@@ -48,28 +48,27 @@ def get_current_values():
     """
     with SessionLocal() as db:
         try:
-            rows = db.execute(text("""
-                SELECT DISTINCT ON (tag_id)
-                    tag_id, value_double, value_text, st, time, source
-                FROM tag_values
-                ORDER BY tag_id, time DESC
-            """)).mappings().all()
+            # Current values come from latest_tag_values (one indexed row per
+            # tag) via the shared reader, never a DISTINCT ON scan of the
+            # tag_values history hypertable.
+            rows = latest_values_by_tag(db)
         except Exception as e:
             return {
                 "values": {},
                 "_error": f"{type(e).__name__}: {e}",
                 "_note": (
-                    "Query against tag_values failed. If the column names "
-                    "have drifted from (tag_id, value_double, value_text, "
-                    "st, time, source), update calc_current_values.py."
+                    "Query against latest_tag_values failed. If the column "
+                    "names have drifted from (tag_id, value_double, "
+                    "value_text, st, time, source), update "
+                    "calc_current_values.py / latest_values.py."
                 ),
             }
 
         values: dict[str, dict] = {}
-        for row in rows:
+        for tid, row in rows.items():
             vd = row["value_double"]
             ts = row["time"]
-            values[str(row["tag_id"])] = {
+            values[str(tid)] = {
                 "value": float(vd) if vd is not None else None,
                 "value_text": row["value_text"],
                 "quality": row["st"],
@@ -77,4 +76,4 @@ def get_current_values():
                 "source": row["source"],
             }
 
-        return {"values": values, "_source": "tag_values.time"}
+        return {"values": values, "_source": "latest_tag_values"}

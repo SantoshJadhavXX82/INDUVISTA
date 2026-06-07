@@ -27,6 +27,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app.db import SessionLocal
+from app.services.latest_values import latest_values_by_tag as _latest_values
 
 
 # ---------------------------------------------------------------------------
@@ -108,26 +109,18 @@ def load_rules(db) -> list[Rule]:
 
 
 def latest_values_by_tag(db, tag_ids: list[int]) -> dict[int, dict[str, Any]]:
-    if not tag_ids:
-        return {}
-    rows = db.execute(text("""
-        SELECT DISTINCT ON (tag_id)
-               tag_id, time, value_double, st
-        FROM tag_values
-        WHERE tag_id = ANY(:ids)
-          AND time >= NOW() - make_interval(secs => :max_age)
-        ORDER BY tag_id, time DESC
-    """), {
-        "ids": tag_ids,
-        "max_age": MAX_VALUE_AGE_SEC,
-    }).mappings().all()
+    # Current values from latest_tag_values (indexed point lookup) via the
+    # shared reader, not a DISTINCT ON scan of the tag_values hypertable. Tags
+    # whose latest sample is older than MAX_VALUE_AGE_SEC are omitted (treated
+    # as having no current value), preserving the previous behaviour.
+    rows = _latest_values(db, tag_ids, max_age_sec=MAX_VALUE_AGE_SEC)
     return {
-        r["tag_id"]: {
+        tid: {
             "time": r["time"],
             "value": r["value_double"],
             "st": r["st"],
         }
-        for r in rows
+        for tid, r in rows.items()
     }
 
 
