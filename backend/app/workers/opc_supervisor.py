@@ -595,6 +595,16 @@ class _SourceFingerprint:
     # Phase OPC-web.2.2: toggling trust_server_timestamp restarts the
     # worker via the reloader so the new value reaches _SourceContext.
     trust_server_timestamp: bool
+    # Phase 2e.2: the device fault policy reaches the worker via
+    # _SourceContext but lives on the devices row (not opc_sources), so a
+    # plain opc_sources.updated_at bump won't catch an edit to it. Include
+    # it here so changing devices.fault_mode / substitute_value / hold_mode
+    # / max_hold_sec restarts the worker and reloads the policy without a
+    # manual restart. NULL when the source has no linked device.
+    fault_mode: str | None
+    substitute_value: float | None
+    hold_mode: str | None
+    max_hold_sec: float | None
 
 
 def load_fingerprints_from_db() -> dict[int, _SourceFingerprint]:
@@ -613,12 +623,19 @@ def load_fingerprints_from_db() -> dict[int, _SourceFingerprint]:
                    s.is_enabled,
                    s.updated_at,
                    s.trust_server_timestamp,
+                   d.fault_mode,
+                   d.substitute_value,
+                   d.hold_mode,
+                   d.max_hold_sec,
                    MAX(m.created_at) AS last_mapping_change,
                    COUNT(m.id) AS mapping_count
             FROM opc_sources s
             LEFT JOIN opc_tag_mappings m
                 ON m.opc_source_id = s.id
-            GROUP BY s.id, s.is_enabled, s.updated_at, s.trust_server_timestamp
+            LEFT JOIN devices d
+                ON d.id = s.device_id
+            GROUP BY s.id, s.is_enabled, s.updated_at, s.trust_server_timestamp,
+                     d.fault_mode, d.substitute_value, d.hold_mode, d.max_hold_sec
         """)).mappings().all()
         return {
             r["id"]: _SourceFingerprint(
@@ -627,6 +644,16 @@ def load_fingerprints_from_db() -> dict[int, _SourceFingerprint]:
                 last_mapping_change=r["last_mapping_change"],
                 mapping_count=int(r["mapping_count"]),
                 trust_server_timestamp=bool(r["trust_server_timestamp"]),
+                fault_mode=r["fault_mode"],
+                substitute_value=(
+                    float(r["substitute_value"])
+                    if r["substitute_value"] is not None else None
+                ),
+                hold_mode=r["hold_mode"],
+                max_hold_sec=(
+                    float(r["max_hold_sec"])
+                    if r["max_hold_sec"] is not None else None
+                ),
             )
             for r in rows
         }
@@ -641,11 +668,13 @@ def load_one_source_from_db(source_id: int) -> dict | None:
     eligibility check that startup does."""
     with engine.connect() as conn:
         s = conn.execute(text("""
-            SELECT id, name, endpoint, security_policy, username, password,
-                   publishing_interval_ms, reconnect_min_sec, reconnect_max_sec,
-                   device_id, is_enabled, trust_server_timestamp
-            FROM opc_sources
-            WHERE id = :id
+            SELECT s.id, s.name, s.endpoint, s.security_policy, s.username, s.password,
+                   s.publishing_interval_ms, s.reconnect_min_sec, s.reconnect_max_sec,
+                   s.device_id, s.is_enabled, s.trust_server_timestamp,
+                   d.fault_mode, d.substitute_value, d.hold_mode, d.max_hold_sec
+            FROM opc_sources s
+            LEFT JOIN devices d ON d.id = s.device_id
+            WHERE s.id = :id
         """), {"id": source_id}).mappings().first()
         if s is None or not s["is_enabled"]:
             return None
