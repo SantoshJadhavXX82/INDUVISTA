@@ -449,14 +449,6 @@ const TrendChart = forwardRef<TrendChartHandle, TrendChartProps>(
             },
           ];
 
-          console.log("[TrendChart] mounting uPlot", {
-            width, height,
-            seriesCount: opts.series?.length ?? 0,
-            scaleCount: Object.keys(opts.scales ?? {}).length,
-            axisCount: opts.axes?.length ?? 0,
-            xLen: data[0]?.length ?? 0,
-            restoringHidden: hiddenLabelsRef.current.size,
-          });
           plotRef.current = new uPlot(opts, data, container);
 
           // After mount, restore the hidden state from our ref so the
@@ -648,16 +640,6 @@ function buildChart(
         : xs.map(() => null);
       const uncertainCount = uncertainData.filter((v) => v != null).length;
 
-      console.log(`[TrendChart] quality markers for ${s.tag_name}:`, {
-        aggregation: history.aggregation,
-        totalPoints: s.points.length,
-        badCount,
-        uncertainCount,
-        qualityFilter,
-        note: isRaw
-          ? "raw mode: 1 marker = 1 bad reading"
-          : "aggregated mode: 1 marker = bucket containing ≥1 bad reading",
-      });
 
       if (badCount > 0) {
         markerSeries.push({
