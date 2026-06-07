@@ -405,7 +405,7 @@ def get_history(
             SELECT tag_id, COALESCE(SUM(sample_count), 0)::bigint AS n
             FROM {view}
             WHERE tag_id = ANY(:ids)
-              AND bucket + INTERVAL '{bucket_interval}' > :s
+              AND bucket > :s - INTERVAL '{bucket_interval}'
               AND bucket < :e
             GROUP BY tag_id
         """), {"ids": ids, "s": start, "e": end}).mappings().all()
@@ -525,7 +525,7 @@ def _query_aggregated(db: Session, view: str, tag_id: int,
                sample_count, good_count, bad_count
         FROM {view}
         WHERE tag_id = :tid
-          AND bucket + INTERVAL '{bucket_interval}' > :s
+          AND bucket > :s - INTERVAL '{bucket_interval}'
           AND bucket < :e
         ORDER BY bucket
         LIMIT :max_pts
@@ -590,7 +590,7 @@ def _query_aggregated_batch(
                    ROW_NUMBER() OVER (PARTITION BY tag_id ORDER BY bucket) AS rn
             FROM {view}
             WHERE tag_id = ANY(:ids)
-              AND bucket + INTERVAL '{bucket_interval}' > :s
+              AND bucket > :s - INTERVAL '{bucket_interval}'
               AND bucket < :e
         )
         SELECT * FROM ranked
