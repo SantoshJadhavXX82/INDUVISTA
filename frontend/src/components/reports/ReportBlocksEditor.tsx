@@ -383,7 +383,7 @@ function BlockBody({
       : selected.map((id) => allTags.find((x) => x.id === id)?.name ?? `tag ${id}`);
     return (
       <div className="space-y-2">
-        {/* chart-tc3e */}
+        {/* chart-tc4 */}
         <Field label="Chart type">
           <Select value={ct}
             options={["line", "area", "bar", "hbar", "pie", "doughnut", "exploded", "sunburst"]}
@@ -453,6 +453,31 @@ function BlockBody({
               onChange={(v) => onPatch({ time_format: v })} />
           </Field>
         )}
+        {isTimeSeries && (
+          <Field label="Dual axis (by unit)">
+            <Select value={block.dual_axis === "single" ? "single" : "auto"}
+              options={["auto", "single"]} labels={["Auto (2nd axis for other units)", "Single axis"]}
+              onChange={(v) => onPatch({ dual_axis: v })} />
+          </Field>
+        )}
+        {isTimeSeries && (
+          <Field label="Quality markers">
+            <Select value={block.show_quality === false ? "hide" : "show"}
+              options={["show", "hide"]} labels={["Show (gap bad, mark uncertain)", "Hide"]}
+              onChange={(v) => onPatch({ show_quality: v === "show" })} />
+          </Field>
+        )}
+        {isTimeSeries && (
+          <Field label="Alarm limit lines (optional)">
+            <div className="grid grid-cols-4 gap-1.5">
+              {(["hh", "h", "l", "ll"] as const).map((k) => (
+                <Input key={k} type="number" placeholder={k.toUpperCase()}
+                  value={block["limit_" + k] ?? ""}
+                  onChange={(e) => onPatch({ ["limit_" + k]: e.target.value === "" ? undefined : Number(e.target.value) })} />
+              ))}
+            </div>
+          </Field>
+        )}
         <Field label="Legend">
           <Select value={block.show_legend === false ? "hide" : "show"}
             options={["show", "hide"]} labels={["Show", "Hide"]}
@@ -474,7 +499,7 @@ function BlockBody({
             onChange={(v) => onPatch({ show_border: v === "show" })} />
         </Field>
         <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
-          Line/Area plot each tag's history (report period, else last {block.window_minutes ?? 60} min). Bar/Pie/Doughnut/Sunburst use each tag's period value; Sunburst groups tags by device.
+          Line/Area plot each tag's history (report period, else last {block.window_minutes ?? 60} min); a 2nd Y-axis is added automatically when units differ. Bar/Pie/Doughnut/Sunburst use each tag's period value; Sunburst groups by device.
         </p>
       </div>
     );

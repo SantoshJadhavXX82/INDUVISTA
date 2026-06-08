@@ -29,6 +29,20 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.utils.audit import audit, AuditEvent
 from app.config import settings
+
+def _iv_watermark(db, ctx) -> str | None:
+    """Watermark text for a render: DRAFT until approved, else the configured
+    print watermark (system_settings 'report.print_watermark'); blank = none."""
+    so = ctx.get("signoff") or {}
+    status = str(so.get("status") or "").lower()
+    if not (status in ("approved", "active") or so.get("approved_by")):
+        return "DRAFT"
+    try:
+        v = db.execute(text("SELECT value FROM system_settings WHERE key = :k"),
+                       {"k": "report.print_watermark"}).scalar()
+        return (v or "").strip() or None
+    except Exception:
+        return None
 from app.api.signatures import signing_state, report_signoff_required, signoff_block_reason  # Phase B-ESIG.2
 from app.services.report_render import build_live_context, render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
@@ -781,7 +795,7 @@ def render_definition(
 
     template_str = row["template_html"]
     if mode == "blocks" and blocks:
-        template_str = compile_blocks(blocks, row["page_size"], row["orientation"], get_default_style(db))
+        template_str = compile_blocks(blocks, row["page_size"], row["orientation"], get_default_style(db), watermark=_iv_watermark(db, ctx))
         _bc = build_block_context(blocks, ctx.get("tags_list") or [], db=db, window=window)
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
@@ -897,7 +911,7 @@ def preview_definition(def_id: int, body: PreviewBody,
     if mode == "blocks":
         if not blocks:
             raise HTTPException(400, "Nothing to preview — this report has no blocks yet.")
-        template_str = compile_blocks(blocks, body.page_size, body.orientation, get_default_style(db))
+        template_str = compile_blocks(blocks, body.page_size, body.orientation, get_default_style(db), watermark=_iv_watermark(db, ctx))
         _bc = build_block_context(blocks, ctx.get("tags_list") or [], db=db, window=_window)
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]

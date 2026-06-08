@@ -709,8 +709,21 @@ _LINEAGE_APPENDIX = (
 )
 
 
+def _watermark_html(text: str | None) -> str:
+    """A faint, rotated, page-repeating watermark (WeasyPrint position:fixed)."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    safe = t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return ('<style>.iv-watermark{position:fixed;top:50%;left:50%;'
+            'transform:translate(-50%,-50%) rotate(-30deg);z-index:-1;'
+            'font-size:64px;font-weight:800;color:rgba(203,0,0,0.10);'
+            'white-space:nowrap;letter-spacing:6px}</style>'
+            '<div class="iv-watermark">' + safe + '</div>')
+
+
 def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str = "portrait",
-                   default_style: dict | None = None) -> str:
+                   default_style: dict | None = None, watermark: str | None = None) -> str:
     """Compile an ordered block list into a Jinja2 HTML template string.
 
     page_header / page_footer / report_style blocks are pulled out of the flow:
@@ -743,7 +756,7 @@ def compile_blocks(blocks: list[dict], page_size: str = "A4", orientation: str =
     # provenance survives in the PDF, where hover/click do not exist.
     if l_cfg.get("appendix", False):
         body += _LINEAGE_APPENDIX
-    return page + _BASE_CSS + theme + body
+    return page + _BASE_CSS + theme + _watermark_html(watermark) + body
 
 
 # ---------------------------------------------------------------------------

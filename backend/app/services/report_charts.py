@@ -185,6 +185,8 @@ def _legend_row(names, y) -> str:
 # data fetch (line / area)
 # --------------------------------------------------------------------------
 def _fetch_series(db, tag_ids, start, end, buckets: int = 140) -> dict[int, list]:
+    """{tag_id: [(time, value, q), ...]} where q is 0=good, 1=uncertain, 2=bad
+    (derived from min(st) in the bucket; st>=128 Good, 64..127 Uncertain, <64 Bad)."""
     out: dict[int, list] = {}
     try:
         span = (end - start).total_seconds()
@@ -194,14 +196,21 @@ def _fetch_series(db, tag_ids, start, end, buckets: int = 140) -> dict[int, list
     for tid in tag_ids:
         try:
             rows = db.execute(text("""
-                SELECT min(time) AS t, avg(value_double) AS v
+                SELECT min(time) AS t, avg(value_double) AS v, min(st) AS q
                 FROM tag_values
                 WHERE tag_id = :t AND time >= :s AND time < :e
                   AND value_double IS NOT NULL
                 GROUP BY floor(extract(epoch from (time - :s)) / :w)
                 ORDER BY 1
             """), {"t": tid, "s": start, "e": end, "w": width}).fetchall()
-            out[tid] = [(r[0], float(r[1])) for r in rows if r[1] is not None]
+            pts = []
+            for r in rows:
+                if r[1] is None:
+                    continue
+                st = r[2]
+                q = 0 if st is None else (0 if st >= 128 else 1 if st >= 64 else 2)
+                pts.append((r[0], float(r[1]), q))
+            out[tid] = pts
         except Exception:
             out[tid] = []
     return out
@@ -413,41 +422,110 @@ def _svg_sunburst(groups, title, show_legend, show_border) -> str:
 
 
 def _svg_line(series, title, area, show_legend, show_grid, show_border,
-              tz, tz_abbr) -> str:
+              tz, tz_abbr, limits=None, dual_axis=True, show_quality=True) -> str:
     series = [(nm, un, pts) for nm, un, pts in series if pts]
     if not series:
         return _note("No time-series data in this period.", show_border)
-    px0, px1 = 58, _W - 22
+    limits = limits or {}                       # {"HH":v,"H":v,"L":v,"LL":v}
+
+    # axis assignment by unit: primary unit on left, any other unit on right
+    units: list = []
+    for _, un, _ in series:
+        if un not in units:
+            units.append(un)
+    use_dual = bool(dual_axis) and len(units) >= 2
+    primary_unit = units[0] if units else ""
+
+    def axis_of(un):
+        return 0 if (not use_dual or un == primary_unit) else 1
+
+    v1 = [v for nm, un, pts in series if axis_of(un) == 0 for _, v, _ in pts]
+    v2 = [v for nm, un, pts in series if axis_of(un) == 1 for _, v, _ in pts]
+    lim_vals = [x for x in limits.values() if isinstance(x, (int, float))]
+    base1 = (v1 + lim_vals) or [0.0, 1.0]
+    lo1, hi1 = _bounds(min(base1), max(base1))
+    lo2, hi2 = (_bounds(min(v2), max(v2)) if v2 else (0.0, 1.0))
+
+    px0 = 58
+    px1 = (_W - 56) if use_dual else (_W - 22)
     py0 = 52 if title else 24
     py1 = _H - (52 if show_legend else 40)
-    all_v = [v for _, _, pts in series for _, v in pts]
-    all_t = [t.timestamp() for _, _, pts in series for t, _ in pts]
-    lo, hi = _bounds(min(all_v), max(all_v))
+    all_t = [t.timestamp() for _, _, pts in series for t, _, _ in pts]
     t0, t1 = min(all_t), max(all_t)
     span = (t1 - t0) or 1.0
 
     def X(ts):
         return px0 + (ts - t0) / span * (px1 - px0)
 
-    def Y(v):
-        return py1 - (v - lo) / (hi - lo) * (py1 - py0) if hi > lo else py1
+    def Y(v, axis=0):
+        if axis == 1 and use_dual:
+            return py1 - (v - lo2) / (hi2 - lo2) * (py1 - py0) if hi2 > lo2 else py1
+        return py1 - (v - lo1) / (hi1 - lo1) * (py1 - py0) if hi1 > lo1 else py1
 
     body = [_title(title), _panel(px0, py0, px1, py1),
-            _axes(lo, hi, px0, py0, px1, py1, show_grid)]
+            _axes(lo1, hi1, px0, py0, px1, py1, show_grid)]
+    # secondary (right) axis labels - no gridlines, to avoid clutter
+    if use_dual:
+        for tk in _ticks(lo2, hi2):
+            y = py1 - (tk - lo2) / (hi2 - lo2) * (py1 - py0) if hi2 > lo2 else py1
+            body.append(f'<text x="{px1 + 7}" y="{y + 3:.1f}" text-anchor="start" '
+                        f'font-size="9.5" fill="{_C_LABEL}">{_esc(_fmt(tk))}</text>')
+        body.append(f'<line x1="{px1}" y1="{py0}" x2="{px1}" y2="{py1}" '
+                    f'stroke="{_C_AXIS}" stroke-width="1"/>')
+
+    # alarm/limit lines (on the primary axis)
+    _LC = {"HH": "#dc2626", "LL": "#dc2626", "H": "#d97706", "L": "#d97706"}
+    for key in ("HH", "H", "L", "LL"):
+        lv = limits.get(key)
+        if isinstance(lv, (int, float)) and hi1 > lo1 and lo1 <= lv <= hi1:
+            y = Y(lv, 0)
+            col = _LC[key]
+            body.append(f'<line x1="{px0}" y1="{y:.1f}" x2="{px1}" y2="{y:.1f}" '
+                        f'stroke="{col}" stroke-width="1" stroke-dasharray="5 3" '
+                        f'opacity="0.85"/>')
+            body.append(f'<text x="{px0 + 4}" y="{y - 3:.1f}" font-size="8.5" '
+                        f'font-weight="600" fill="{col}">{key} {_esc(_fmt(lv))}</text>')
+
+    # series (split the line at bad samples when quality is shown)
     for i, (name, unit, pts) in enumerate(series):
         c = _PAL[i % len(_PAL)]
-        coords = [(X(t.timestamp()), Y(v)) for t, v in pts]
-        if area and coords:
-            d = (f'M {coords[0][0]:.1f} {py1:.1f} '
-                 + " ".join(f'L {x:.1f} {y:.1f}' for x, y in coords)
-                 + f' L {coords[-1][0]:.1f} {py1:.1f} Z')
-            body.append(f'<path d="{d}" fill="{c}" fill-opacity="0.15" stroke="none"/>')
-        poly = " ".join(f'{x:.1f},{y:.1f}' for x, y in coords)
-        body.append(f'<polyline points="{poly}" fill="none" stroke="{c}" '
-                    f'stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"/>')
-        if len(coords) == 1:
-            body.append(f'<circle cx="{coords[0][0]:.1f}" cy="{coords[0][1]:.1f}" '
-                        f'r="2.8" fill="{c}"/>')
+        ax = axis_of(unit)
+        coords = [(X(t.timestamp()), Y(v, ax), q) for t, v, q in pts]
+        if show_quality:
+            segs, cur = [], []
+            for x, y, q in coords:
+                if q == 2:                      # bad -> break the line (gap)
+                    if cur:
+                        segs.append(cur)
+                        cur = []
+                    continue
+                cur.append((x, y))
+            if cur:
+                segs.append(cur)
+        else:
+            segs = [[(x, y) for x, y, _ in coords]]
+        if area:
+            for seg in segs:
+                if len(seg) >= 2:
+                    d = (f'M {seg[0][0]:.1f} {py1:.1f} '
+                         + " ".join(f'L {x:.1f} {y:.1f}' for x, y in seg)
+                         + f' L {seg[-1][0]:.1f} {py1:.1f} Z')
+                    body.append(f'<path d="{d}" fill="{c}" fill-opacity="0.13" stroke="none"/>')
+        for seg in segs:
+            if len(seg) >= 2:
+                poly = " ".join(f'{x:.1f},{y:.1f}' for x, y in seg)
+                body.append(f'<polyline points="{poly}" fill="none" stroke="{c}" '
+                            f'stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round"/>')
+            elif len(seg) == 1:
+                body.append(f'<circle cx="{seg[0][0]:.1f}" cy="{seg[0][1]:.1f}" '
+                            f'r="2.6" fill="{c}"/>')
+        if show_quality:
+            for x, y, q in coords:
+                if q == 1:
+                    body.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.2" fill="#d97706"/>')
+                elif q == 2:
+                    body.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.2" fill="#dc2626"/>')
+
     span_days = span / 86400.0
     fmt = "%H:%M" if span_days < 1 else "%m-%d %H:%M"
     for frac in (0.0, 0.5, 1.0):
@@ -456,11 +534,19 @@ def _svg_line(series, title, area, show_legend, show_grid, show_border,
         anchor = "start" if frac == 0 else "end" if frac == 1 else "middle"
         body.append(f'<text x="{X(ts):.1f}" y="{py1 + 15:.1f}" text-anchor="{anchor}" '
                     f'font-size="9.5" fill="{_C_LABEL}">{_esc(lbl)}</text>')
+    cap = []
     if tz_abbr:
+        cap.append(f"Times in {tz_abbr}")
+    if use_dual:
+        cap.append(f"L: {primary_unit or '-'}  R: {next((u for u in units if u != primary_unit), '-')}")
+    if show_quality:
+        cap.append("amber=uncertain  red=bad")
+    if cap:
         body.append(f'<text x="{px0}" y="{_H - 8}" font-size="9" fill="{_C_LABEL}">'
-                    f'Times in {_esc(tz_abbr)}</text>')
+                    f'{_esc("   ".join(cap))}</text>')
     if show_legend:
-        body.append(_legend_row([nm for nm, _, _ in series], _H - 22))
+        names = [f"{nm} ({un})" if un else nm for nm, un, _ in series]
+        body.append(_legend_row(names, _H - 22))
     return _shell("".join(body), show_border)
 
 
@@ -582,9 +668,17 @@ def render_chart(block: dict, tags_list, db=None, window=None) -> str:
             ids = [m["id"] for m in meta]
             series_map = _fetch_series(db, ids, start_, end_) if db is not None else {}
             named = [(m["name"], m["unit"], series_map.get(m["id"], [])) for m in meta]
+            limits = {}
+            for k in ("hh", "h", "l", "ll"):
+                lv = block.get(f"limit_{k}")
+                if isinstance(lv, (int, float)):
+                    limits[k.upper()] = float(lv)
+            dual = block.get("dual_axis", "auto") != "single"
+            show_quality = block.get("show_quality", True) is not False
             return _svg_line(named, title, area=(ctype == "area"),
                              show_legend=show_legend, show_grid=show_grid,
-                             show_border=show_border, tz=tz, tz_abbr=tz_abbr)
+                             show_border=show_border, tz=tz, tz_abbr=tz_abbr,
+                             limits=limits, dual_axis=dual, show_quality=show_quality)
 
         # value charts: bar / hbar / pie / doughnut / exploded / sunburst
         need = [m["id"] for m in meta if not isinstance(m["value"], (int, float))]
