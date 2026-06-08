@@ -188,6 +188,10 @@ from app.api import users_admin as _users_admin
 app.include_router(_auth.router)
 app.include_router(_users_admin.router)
 
+# Phase B-ESIG.1 signatures router
+from app.api import signatures as _signatures
+app.include_router(_signatures.router)
+
 @app.on_event("startup")
 def _audit_schema_startup() -> None:
     # Phase 16.0g: create audit_log table + hypertable + retention on
@@ -212,3 +216,4 @@ def _auth_bootstrap_startup() -> None:
     # non-fatal (logs and continues on any error).
     from app.auth.bootstrap import bootstrap_admin
     bootstrap_admin()
+
