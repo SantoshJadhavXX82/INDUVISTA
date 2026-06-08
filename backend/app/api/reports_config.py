@@ -1171,6 +1171,9 @@ def activate_report_revision(def_id: int, rev_id: int, request: Request,
     # Phase B-ESIG.2 - block activation unless the revision carries a complete,
     # intact, content-bound e-signature chain. Enabled via system_settings
     # 'esig.require_report_signoff' (default off preserves prior behavior).
+    _ex = get_revision(db, rev_id)  # Phase B-ESIG.3 - existence check before the sign-off gate
+    if _ex is None or _ex.get("report_id") != def_id:
+        raise HTTPException(404, f"Revision {rev_id} not found for report {def_id}.")
     if report_signoff_required(db):
         _st = signing_state(db, "report_revision", rev_id)
         if not (_st["fully_signed"] and _st["chain_intact"] and _st["content_unchanged"]):
@@ -1320,4 +1323,5 @@ def delete_batch(batch_id: int, request: Request,
     audit(AuditEvent(action="report.batch.delete", target_type="report_batch",
                      target_id=batch_id, summary=f"Deleted batch {batch_id}"), request)
     return Response(status_code=204)
+
 

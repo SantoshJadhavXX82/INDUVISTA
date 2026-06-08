@@ -208,6 +208,35 @@ def effective_definition(db: Session, report_id: int) -> dict[str, Any] | None:
 _IDENTITY_KEYS = ("report_code", "area", "equipment", "owner_dept")
 
 
+def _esig_signoff(db: Session, revision_id: Any) -> dict[str, Any]:  # Phase B-ESIG.3
+    # Real 21 CFR Part 11 e-signatures for a report revision (sign-off block).
+    # Defensive: never breaks a render.
+    out: dict[str, Any] = {"signatures": [], "fully_signed": False,
+                           "content_unchanged": True, "stale": False}
+    if not revision_id:
+        return out
+    try:
+        from app.api.signatures import signing_state
+        st = signing_state(db, "report_revision", revision_id)
+        out["signatures"] = [
+            {
+                "meaning": r["meaning"],
+                "signer_username": r["signer_username"],
+                "signer_role": r["signer_role"],
+                "signed_at": (r["signed_at"].isoformat()
+                              if hasattr(r["signed_at"], "isoformat") else str(r["signed_at"])),
+                "reason_code": r["reason_code"],
+            }
+            for r in st["rows"]
+        ]
+        out["fully_signed"] = bool(st["fully_signed"] and st["chain_intact"])
+        out["content_unchanged"] = bool(st["content_unchanged"])
+        out["stale"] = not bool(st["content_unchanged"])
+    except Exception:
+        pass
+    return out
+
+
 def document_header(db: Session, report_id: int) -> dict[str, Any]:
     identity: dict[str, Any] = {k: None for k in _IDENTITY_KEYS}
     revision: dict[str, Any] | None = None
@@ -229,6 +258,7 @@ def document_header(db: Session, report_id: int) -> dict[str, Any]:
                 "prepared_at": rev.get("created_at"),
                 "approved_by": rev.get("activated_by"),
                 "approved_at": rev.get("activated_at"),
+                **_esig_signoff(db, rid),  # Phase B-ESIG.3
             }
     else:
         row = _first(
@@ -245,3 +275,4 @@ def document_header(db: Session, report_id: int) -> dict[str, Any]:
         "revision": revision,
         "status": "active" if revision else "draft",
     }
+
