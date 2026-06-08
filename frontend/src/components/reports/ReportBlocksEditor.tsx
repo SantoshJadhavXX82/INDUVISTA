@@ -37,7 +37,7 @@ const PALETTE: { type: string; label: string; hint: string }[] = [
   { type: "tag_table", label: "Tag table", hint: "One row per bound tag + calc columns" },
   { type: "stream_table", label: "Stream table", hint: "Compare devices side-by-side (FC A / FC B)" },
   { type: "kpi_row", label: "KPI row", hint: "Big single-value tiles" },
-  { type: "chart", label: "Chart", hint: "Rendering pending (TC-3)" },
+  { type: "chart", label: "Chart", hint: "Line, bar, pie or area of the report's tags" },
   { type: "spacer", label: "Spacer", hint: "Vertical gap" },
   { type: "page_break", label: "Page break", hint: "Start a new page" },
   { type: "raw", label: "Raw HTML", hint: "Advanced: verbatim HTML/Jinja2" },
@@ -69,7 +69,7 @@ function defaults(type: string): Block {
     case "stream_table": return { id, type, title: "", columns: [
       { label: "FC A", device_id: null }, { label: "FC B", device_id: null },
     ], sections: [{ name: "SECTION", rows: [] }] };
-    case "chart": return { id, type, title: "" };
+    case "chart": return { id, type, chart_type: "line", title: "", show_legend: true, show_values: false };
     case "spacer": return { id, type, height_mm: 6 };
     case "page_break": return { id, type };
     case "raw": return { id, type, html: "" };
@@ -375,13 +375,91 @@ function BlockBody({
   }
 
   if (block.type === "chart") {
+    const selected: number[] | undefined = block.tag_ids;
+    const ct = block.chart_type ?? "line";
+    const isTimeSeries = ct === "line" || ct === "area";
     return (
       <div className="space-y-2">
+        {/* chart-tc3c */}
+        <Field label="Chart type">
+          <Select value={ct}
+            options={["line", "area", "bar", "pie"]}
+            labels={["Line (time-series)", "Area (time-series)", "Bar (comparison)", "Pie (composition)"]}
+            onChange={(v) => onPatch({ chart_type: v })} />
+        </Field>
+        <Field label="Tags to plot">
+          <div className="rounded-md p-2" style={{ border: "0.5px solid var(--separator)" }}>
+            <div className="flex items-center gap-3 mb-1.5">
+              <button type="button" className="text-[11px] underline" style={{ color: "var(--ios-blue)" }}
+                onClick={() => onPatch({ tag_ids: allTags.map((x) => x.id) })}>Select all</button>
+              <button type="button" className="text-[11px] underline" style={{ color: "var(--ios-blue)" }}
+                onClick={() => onPatch({ tag_ids: [] })}>Clear all</button>
+              <span className="text-[11px] ml-auto" style={{ color: "var(--ios-gray-1)" }}>
+                {selected === undefined ? `All ${allTags.length}` : `${selected.length} of ${allTags.length}`}
+              </span>
+            </div>
+            <div className="flex flex-col gap-1 max-h-40 overflow-auto">
+              {allTags.length === 0 && (
+                <span className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
+                  Bind tags to this report on the Data tab to chart them.
+                </span>
+              )}
+              {allTags.map((t) => {
+                const checked = selected === undefined ? true : selected.includes(t.id);
+                return (
+                  <label key={t.id} className="flex items-center gap-2 text-[12px] cursor-pointer">
+                    <input type="checkbox" checked={checked} onChange={(e) => {
+                      const base: number[] = block.tag_ids ?? allTags.map((x) => x.id);
+                      const next = e.target.checked
+                        ? Array.from(new Set([...base, t.id]))
+                        : base.filter((id) => id !== t.id);
+                      onPatch({ tag_ids: next });
+                    }} />
+                    <span className="truncate">{t.name}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+        </Field>
         <Field label="Chart title (optional)">
           <Input value={block.title ?? ""} onChange={(e) => onPatch({ title: e.target.value })} />
         </Field>
+        {isTimeSeries && (
+          <Field label="Time window (minutes)">
+            <Input type="number" value={String(block.window_minutes ?? 60)}
+              onChange={(e) => onPatch({ window_minutes: Number(e.target.value) || 0 })} />
+          </Field>
+        )}
+        {isTimeSeries && (
+          <Field label="Time format">
+            <Select value={block.time_format ?? "system"}
+              options={["system", "utc"]} labels={["System time", "UTC"]}
+              onChange={(v) => onPatch({ time_format: v })} />
+          </Field>
+        )}
+        <Field label="Legend">
+          <Select value={block.show_legend === false ? "hide" : "show"}
+            options={["show", "hide"]} labels={["Show", "Hide"]}
+            onChange={(v) => onPatch({ show_legend: v === "show" })} />
+        </Field>
+        <Field label="Value labels">
+          <Select value={block.show_values ? "show" : "hide"}
+            options={["hide", "show"]} labels={["Hide", "Show"]}
+            onChange={(v) => onPatch({ show_values: v === "show" })} />
+        </Field>
+        <Field label="Gridlines">
+          <Select value={block.show_grid === false ? "hide" : "show"}
+            options={["show", "hide"]} labels={["Show", "Hide"]}
+            onChange={(v) => onPatch({ show_grid: v === "show" })} />
+        </Field>
+        <Field label="Border">
+          <Select value={block.show_border === false ? "hide" : "show"}
+            options={["show", "hide"]} labels={["Show", "Hide"]}
+            onChange={(v) => onPatch({ show_border: v === "show" })} />
+        </Field>
         <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
-          Chart rendering is not wired yet — a placeholder appears in the output for now.
+          Line/Area plot each tag's history: if the report has a fixed period they use it, otherwise the last {block.window_minutes ?? 60} minutes. Bar/Pie use each tag's period value. System time uses the app timezone.
         </p>
       </div>
     );

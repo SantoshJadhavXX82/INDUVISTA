@@ -78,6 +78,8 @@ type ExpandableGroup = {
   icon: LucideIcon;
   matchPrefix: string;
   children: Leaf[];
+  /** iOS color key for the group header icon tile (e.g. "blue"). */
+  color?: string;
 };
 
 type Section = {
@@ -136,7 +138,7 @@ function useEntries(alarmCount: number): Section[] {
         // and Devices), not global reference data.
         { kind: "leaf", to: "/config/opc-sources", label: "OPC UA",        icon: Wifi,  matchPrefix: "/config/opc-sources" },
         {
-          kind: "group", id: "modbus", label: "Modbus", icon: Wrench,
+          kind: "group", id: "modbus", label: "Modbus", icon: Wrench, color: "blue",
           matchPrefix: "/modbus", children: [
             { kind: "leaf", to: "/modbus/registers",     label: "Registers", icon: ScanLine,  matchPrefix: "/modbus/registers" },
             { kind: "leaf", to: "/modbus/frames",        label: "Frames",    icon: Radio,     matchPrefix: "/modbus/frames" },
@@ -155,7 +157,7 @@ function useEntries(alarmCount: number): Section[] {
           // (timezone now, plant name / units / shift definition later).
           // Sits after Duty/standby because it's plant-wide config rather
           // than reference-data masters like the others.
-          kind: "group", id: "global-setup", label: "Global/Setup", icon: SlidersHorizontal,
+          kind: "group", id: "global-setup", label: "Global/Setup", icon: SlidersHorizontal, color: "purple",
           matchPrefix: "/global", children: [
             { kind: "leaf", to: "/global/engineering-units",   label: "Units",         icon: Ruler,          matchPrefix: "/global/engineering-units" },
             { kind: "leaf", to: "/global/alarm-severities",    label: "Severities",    icon: Palette,        matchPrefix: "/global/alarm-severities" },
@@ -243,6 +245,7 @@ const NAV_TILE_COLORS: Record<string, string> = {
   "/dashboard": "blue",
   "/explorer": "purple",
   "/reports": "indigo",
+  "/reports/config": "orange",
   "/trend": "teal",
   "/alarms": "red",
   "/tags": "green",
@@ -265,10 +268,10 @@ const NAV_TILE_COLORS: Record<string, string> = {
   "/global/groups": "green",
   "/global/named-sets": "teal",
   "/global/duty-standby-values": "orange",
-  "/global/settings": "gray",
+  "/global/settings": "blue",
   "/global/users": "blue",
   "/help": "blue",
-  "/about": "gray",
+  "/about": "pink",
 };
 
 function tileColor(to: string): string {
@@ -359,12 +362,22 @@ function ExpandableBlock({
           ? { color: "var(--ios-blue-on-soft)", fontWeight: 500 }
           : { color: "var(--text-secondary)" }}
       >
-        <group.icon
-          className="h-4 w-4 shrink-0"
-          fill={childIsActive ? "currentColor" : "none"}
-          fillOpacity={childIsActive ? 0.18 : undefined}
-          strokeWidth={childIsActive ? 2 : 1.75}
-        />
+        <span
+          className="shrink-0 inline-flex items-center justify-center rounded-[7px]"
+          style={{
+            width: 28,
+            height: 28,
+            backgroundColor: childIsActive
+              ? `var(--ios-${group.color ?? "gray"})`
+              : `var(--ios-${group.color ?? "gray"}-soft)`,
+          }}
+        >
+          <group.icon
+            className="h-5 w-5"
+            style={{ color: childIsActive ? "#fff" : `var(--ios-${group.color ?? "gray"})` }}
+            strokeWidth={2}
+          />
+        </span>
         <span className="flex-1 text-left truncate">{group.label}</span>
         {open
           ? <ChevronDown className="h-3.5 w-3.5 opacity-60" />

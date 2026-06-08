@@ -782,7 +782,7 @@ def render_definition(
     template_str = row["template_html"]
     if mode == "blocks" and blocks:
         template_str = compile_blocks(blocks, row["page_size"], row["orientation"], get_default_style(db))
-        _bc = build_block_context(blocks, ctx.get("tags_list") or [])
+        _bc = build_block_context(blocks, ctx.get("tags_list") or [], db=db, window=window)
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
 
@@ -898,7 +898,7 @@ def preview_definition(def_id: int, body: PreviewBody,
         if not blocks:
             raise HTTPException(400, "Nothing to preview — this report has no blocks yet.")
         template_str = compile_blocks(blocks, body.page_size, body.orientation, get_default_style(db))
-        _bc = build_block_context(blocks, ctx.get("tags_list") or [])
+        _bc = build_block_context(blocks, ctx.get("tags_list") or [], db=db, window=_window)
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
     else:

@@ -33,6 +33,7 @@ from __future__ import annotations
 import html
 import re
 from typing import Any
+from app.services.report_charts import render_chart  # TC-3 chart rendering
 
 # simpleeval is the sandboxed evaluator (added to requirements with the render deps)
 try:
@@ -760,7 +761,7 @@ _CHART_PLACEHOLDER = ('<div style="color:#8a93a0;font-size:10px;border:1px dashe
                       'padding:10px;text-align:center">[chart rendering pending]</div>')
 
 
-def build_block_context(blocks: list[dict], tags_list: list) -> dict[str, Any]:
+def build_block_context(blocks: list[dict], tags_list: list, db=None, window=None) -> dict[str, Any]:
     """Return {'tables': {...}, 'charts': {...}} for a compiled block list."""
     def _q(t) -> str:
         return "GOOD" if getattr(t, "quality_good", False) else "BAD"
@@ -793,7 +794,7 @@ def build_block_context(blocks: list[dict], tags_list: list) -> dict[str, Any]:
                         safe_rows.append(rr)
                     tables[bid] = {"rows": safe_rows, "aggregates": {}}
             elif t == "chart":
-                charts[bid] = _CHART_PLACEHOLDER
+                charts[bid] = render_chart(b, tags_list, db, window)
             elif t == "columns":
                 for panel in b.get("panels", []):
                     walk(panel)
