@@ -378,13 +378,16 @@ function BlockBody({
     const selected: number[] | undefined = block.tag_ids;
     const ct = block.chart_type ?? "line";
     const isTimeSeries = ct === "line" || ct === "area";
+    const selectedNames = selected === undefined
+      ? ["All bound tags"]
+      : selected.map((id) => allTags.find((x) => x.id === id)?.name ?? `tag ${id}`);
     return (
       <div className="space-y-2">
-        {/* chart-tc3c */}
+        {/* chart-tc3e */}
         <Field label="Chart type">
           <Select value={ct}
-            options={["line", "area", "bar", "pie"]}
-            labels={["Line (time-series)", "Area (time-series)", "Bar (comparison)", "Pie (composition)"]}
+            options={["line", "area", "bar", "hbar", "pie", "doughnut", "exploded", "sunburst"]}
+            labels={["Line (time-series)", "Area (time-series)", "Bar (vertical)", "Bar (horizontal)", "Pie", "Doughnut", "Exploded pie", "Sunburst (by device)"]}
             onChange={(v) => onPatch({ chart_type: v })} />
         </Field>
         <Field label="Tags to plot">
@@ -419,6 +422,18 @@ function BlockBody({
                   </label>
                 );
               })}
+            </div>
+            <div className="mt-2 pt-2 flex flex-wrap items-center gap-1"
+              style={{ borderTop: "0.5px solid var(--separator)" }}>
+              <span className="text-[10px] mr-1" style={{ color: "var(--ios-gray-1)" }}>Selected:</span>
+              {selectedNames.length === 0 ? (
+                <span className="text-[10px]" style={{ color: "var(--ios-gray-1)" }}>none</span>
+              ) : (
+                selectedNames.map((nm, i) => (
+                  <span key={i} className="text-[10px] px-1.5 py-0.5 rounded-full"
+                    style={{ background: "var(--ios-blue-soft)", color: "var(--ios-blue)" }}>{nm}</span>
+                ))
+              )}
             </div>
           </div>
         </Field>
@@ -459,7 +474,7 @@ function BlockBody({
             onChange={(v) => onPatch({ show_border: v === "show" })} />
         </Field>
         <p className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
-          Line/Area plot each tag's history: if the report has a fixed period they use it, otherwise the last {block.window_minutes ?? 60} minutes. Bar/Pie use each tag's period value. System time uses the app timezone.
+          Line/Area plot each tag's history (report period, else last {block.window_minutes ?? 60} min). Bar/Pie/Doughnut/Sunburst use each tag's period value; Sunburst groups tags by device.
         </p>
       </div>
     );

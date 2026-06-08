@@ -126,6 +126,22 @@ def _ticks(lo: float, hi: float, n: int = 4) -> list[float]:
     return [lo + step * i for i in range(n + 1)]
 
 
+def _percentages(values: list[float]) -> list[int]:
+    """Integer percentages that always sum to exactly 100 (largest-remainder
+    method) - avoids the naive per-slice rounding that can total 99 or 101."""
+    total = sum(values)
+    if total <= 0:
+        return [0] * len(values)
+    raw = [v / total * 100 for v in values]
+    floors = [int(math.floor(x)) for x in raw]
+    rem = 100 - sum(floors)
+    order = sorted(range(len(values)), key=lambda i: raw[i] - floors[i], reverse=True)
+    for k in range(max(rem, 0)):
+        if order:
+            floors[order[k % len(order)]] += 1
+    return floors
+
+
 def _panel(px0, py0, px1, py1) -> str:
     return (f'<rect x="{px0}" y="{py0}" width="{px1 - px0}" height="{py1 - py0}" '
             f'rx="7" fill="{_C_PANEL}"/>')
@@ -223,45 +239,176 @@ def _svg_bar(pairs, title, show_values, show_grid, show_border) -> str:
     return _shell("".join(body), show_border)
 
 
-def _svg_pie(pairs, title, show_legend, show_values, show_border) -> str:
+def _lighten(hexc: str, amt: float) -> str:
+    hexc = hexc.lstrip("#")
+    r, g, b = int(hexc[0:2], 16), int(hexc[2:4], 16), int(hexc[4:6], 16)
+    r = int(r + (255 - r) * amt)
+    g = int(g + (255 - g) * amt)
+    b = int(b + (255 - b) * amt)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _annular(cx, cy, r1, r2, a1, a2, fill, op=0.92) -> str:
+    """A ring segment between radii r1 (inner) and r2 (outer)."""
+    large = 1 if (a2 - a1) > math.pi else 0
+    x1o, y1o = cx + r2 * math.cos(a1), cy + r2 * math.sin(a1)
+    x2o, y2o = cx + r2 * math.cos(a2), cy + r2 * math.sin(a2)
+    x1i, y1i = cx + r1 * math.cos(a2), cy + r1 * math.sin(a2)
+    x2i, y2i = cx + r1 * math.cos(a1), cy + r1 * math.sin(a1)
+    d = (f'M {x1o:.1f} {y1o:.1f} A {r2:.0f} {r2:.0f} 0 {large} 1 {x2o:.1f} {y2o:.1f} '
+         f'L {x1i:.1f} {y1i:.1f} A {r1:.0f} {r1:.0f} 0 {large} 0 {x2i:.1f} {y2i:.1f} Z')
+    return (f'<path d="{d}" fill="{fill}" fill-opacity="{op}" '
+            f'stroke="#ffffff" stroke-width="1.5"/>')
+
+
+def _svg_pie(pairs, title, show_legend, show_values, show_border,
+             variant="pie") -> str:
     pos = [(n, v) for n, v in pairs if isinstance(v, (int, float)) and v > 0]
     if not pos:
-        return _note("Pie needs positive values to chart.", show_border)
+        return _note("Pie/Doughnut needs positive values to chart.", show_border)
     total = sum(v for _, v in pos)
-    cx, cy, r = 188, (_H // 2) + (10 if title else 0), 104
+    pcts = _percentages([v for _, v in pos])
+    cx, cy, r = 190, (_H // 2) + (10 if title else 0), 104
+    inner = r * 0.55 if variant == "doughnut" else 0.0
+    explode = variant == "exploded"
     body = [_title(title)]
-    # subtle backing circle
     body.append(f'<circle cx="{cx}" cy="{cy}" r="{r + 4}" fill="{_C_PANEL}"/>')
     ang = -math.pi / 2
     for i, (name, v) in enumerate(pos):
         frac = v / total
         a2 = ang + frac * 2 * math.pi
-        x1, y1 = cx + r * math.cos(ang), cy + r * math.sin(ang)
-        x2, y2 = cx + r * math.cos(a2), cy + r * math.sin(a2)
-        large = 1 if frac > 0.5 else 0
+        mid = (ang + a2) / 2
+        ccx, ccy = cx, cy
+        if explode:
+            ccx, ccy = cx + 13 * math.cos(mid), cy + 13 * math.sin(mid)
         c = _PAL[i % len(_PAL)]
-        body.append(f'<path d="M {cx} {cy} L {x1:.1f} {y1:.1f} '
-                    f'A {r} {r} 0 {large} 1 {x2:.1f} {y2:.1f} Z" '
-                    f'fill="{c}" fill-opacity="0.92" stroke="#ffffff" stroke-width="2"/>')
+        large = 1 if frac > 0.5 else 0
+        if inner > 0:
+            body.append(_annular(ccx, ccy, inner, r, ang, a2, c, 0.92))
+        else:
+            x1, y1 = ccx + r * math.cos(ang), ccy + r * math.sin(ang)
+            x2, y2 = ccx + r * math.cos(a2), ccy + r * math.sin(a2)
+            body.append(f'<path d="M {ccx:.1f} {ccy:.1f} L {x1:.1f} {y1:.1f} '
+                        f'A {r} {r} 0 {large} 1 {x2:.1f} {y2:.1f} Z" '
+                        f'fill="{c}" fill-opacity="0.92" stroke="#ffffff" stroke-width="2"/>')
         if show_values and frac > 0.04:
-            mid = (ang + a2) / 2
-            lx, ly = cx + r * 0.62 * math.cos(mid), cy + r * 0.62 * math.sin(mid)
+            lr = (inner + r) / 2 if inner > 0 else r * 0.62
+            lx, ly = ccx + lr * math.cos(mid), ccy + lr * math.sin(mid)
             body.append(f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="middle" '
                         f'font-size="10" font-weight="600" fill="#ffffff">'
-                        f'{frac * 100:.0f}%</text>')
+                        f'{pcts[i]}%</text>')
         ang = a2
+    if variant == "doughnut":
+        body.append(f'<text x="{cx}" y="{cy - 1}" text-anchor="middle" '
+                    f'font-size="16" font-weight="700" fill="{_C_TITLE}">'
+                    f'{_esc(_fmt(total))}</text>')
+        body.append(f'<text x="{cx}" y="{cy + 14}" text-anchor="middle" '
+                    f'font-size="9.5" fill="{_C_LABEL}">Total</text>')
     if show_legend:
         ly = 64 if title else 48
         for i, (name, v) in enumerate(pos):
             c = _PAL[i % len(_PAL)]
             label = name if len(name) <= 22 else name[:21] + "\u2026"
             body.append(
-                f'<rect x="350" y="{ly - 10}" width="12" height="12" rx="3" fill="{c}"/>'
-                f'<text x="368" y="{ly}" font-size="11.5" fill="{_C_TITLE}">'
+                f'<rect x="360" y="{ly - 10}" width="12" height="12" rx="3" fill="{c}"/>'
+                f'<text x="378" y="{ly}" font-size="11.5" fill="{_C_TITLE}">'
                 f'{_esc(label)}</text>'
-                f'<text x="368" y="{ly + 15}" font-size="10" fill="{_C_LABEL}">'
-                f'{_esc(_fmt(v))} ({v / total * 100:.0f}%)</text>')
+                f'<text x="378" y="{ly + 15}" font-size="10" fill="{_C_LABEL}">'
+                f'{_esc(_fmt(v))} ({pcts[i]}%)</text>')
             ly += 36
+    return _shell("".join(body), show_border)
+
+
+def _svg_hbar(pairs, title, show_values, show_grid, show_border) -> str:
+    px0, px1 = 124, _W - 30
+    py0 = 52 if title else 24
+    py1 = _H - 28
+    vals = [v for _, v in pairs]
+    lo, hi = _bounds(min(vals + [0.0]), max(vals + [0.0]))
+    zero_x = px0 + (0 - lo) / (hi - lo) * (px1 - px0) if hi > lo else px0
+    n = len(pairs)
+    slot = (py1 - py0) / max(n, 1)
+    bh = min(slot * 0.6, 38)
+    body = [_title(title), _panel(px0, py0, px1, py1)]
+    for tk in _ticks(lo, hi):
+        x = px0 + (tk - lo) / (hi - lo) * (px1 - px0) if hi > lo else px0
+        if show_grid:
+            body.append(f'<line x1="{x:.1f}" y1="{py0}" x2="{x:.1f}" y2="{py1}" '
+                        f'stroke="{_C_GRID}" stroke-width="1" stroke-dasharray="3 4"/>')
+        body.append(f'<text x="{x:.1f}" y="{py1 + 14:.1f}" text-anchor="middle" '
+                    f'font-size="9" fill="{_C_LABEL}">{_esc(_fmt(tk))}</text>')
+    body.append(f'<line x1="{px0}" y1="{py0}" x2="{px0}" y2="{py1}" '
+                f'stroke="{_C_AXIS}" stroke-width="1"/>')
+    body.append(f'<line x1="{px0}" y1="{py1}" x2="{px1}" y2="{py1}" '
+                f'stroke="{_C_AXIS}" stroke-width="1"/>')
+    for i, (label, v) in enumerate(pairs):
+        cy = py0 + slot * i + slot / 2
+        x = px0 + (v - lo) / (hi - lo) * (px1 - px0) if hi > lo else px0
+        left, w = (min(x, zero_x), abs(x - zero_x))
+        c = _PAL[i % len(_PAL)]
+        body.append(f'<rect x="{left:.1f}" y="{cy - bh / 2:.1f}" width="{max(w, 0.8):.1f}" '
+                    f'height="{bh:.1f}" rx="4" fill="{c}" fill-opacity="0.92"/>')
+        lab = label if len(label) <= 18 else label[:17] + "\u2026"
+        body.append(f'<text x="{px0 - 8}" y="{cy + 3:.1f}" text-anchor="end" '
+                    f'font-size="9.5" fill="{_C_VALUE}">{_esc(lab)}</text>')
+        if show_values:
+            body.append(f'<text x="{left + w + 5:.1f}" y="{cy + 3:.1f}" text-anchor="start" '
+                        f'font-size="9.5" font-weight="600" fill="{_C_TITLE}">'
+                        f'{_esc(_fmt(v))}</text>')
+    return _shell("".join(body), show_border)
+
+
+def _svg_sunburst(groups, title, show_legend, show_border) -> str:
+    """groups: list of (group_name, [(tag_name, value), ...]); 2-ring sunburst."""
+    flat = [(gn, tn, v) for gn, items in groups for tn, v in items
+            if isinstance(v, (int, float)) and v > 0]
+    if not flat:
+        return _note("Sunburst needs positive values to chart.", show_border)
+    gtot: dict = {}
+    gorder: list = []
+    for gn, tn, v in flat:
+        if gn not in gtot:
+            gtot[gn] = 0.0
+            gorder.append(gn)
+        gtot[gn] += v
+    total = sum(gtot.values())
+    cx, cy = 200, (_H // 2) + (10 if title else 0)
+    r_in, r_mid, r_out = 34, 80, 118
+    body = [_title(title)]
+    body.append(f'<circle cx="{cx}" cy="{cy}" r="{r_out + 4}" fill="{_C_PANEL}"/>')
+    ang = -math.pi / 2
+    for gi, gn in enumerate(gorder):
+        gc = _PAL[gi % len(_PAL)]
+        ga2 = ang + (gtot[gn] / total) * 2 * math.pi
+        body.append(_annular(cx, cy, r_in, r_mid, ang, ga2, gc, 0.95))
+        gmid = (ang + ga2) / 2
+        if (gtot[gn] / total) > 0.06:
+            lx, ly = cx + ((r_in + r_mid) / 2) * math.cos(gmid), cy + ((r_in + r_mid) / 2) * math.sin(gmid)
+            body.append(f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="middle" '
+                        f'font-size="8.5" fill="#ffffff">{_esc(gn[:10])}</text>')
+        sub = ang
+        items = [(tn, v) for g2, tn, v in flat if g2 == gn]
+        for j, (tn, v) in enumerate(items):
+            tfrac = v / total
+            sa2 = sub + tfrac * 2 * math.pi
+            tc = _lighten(gc, min(0.18 + 0.16 * j, 0.62))
+            body.append(_annular(cx, cy, r_mid, r_out, sub, sa2, tc, 0.95))
+            tmid = (sub + sa2) / 2
+            if tfrac > 0.05:
+                lx, ly = cx + ((r_mid + r_out) / 2) * math.cos(tmid), cy + ((r_mid + r_out) / 2) * math.sin(tmid)
+                body.append(f'<text x="{lx:.1f}" y="{ly:.1f}" text-anchor="middle" '
+                            f'font-size="8" fill="{_C_TITLE}">{_esc(tn[:8])}</text>')
+            sub = sa2
+        ang = ga2
+    if show_legend:
+        ly = 64 if title else 48
+        for gi, gn in enumerate(gorder):
+            gc = _PAL[gi % len(_PAL)]
+            body.append(
+                f'<rect x="372" y="{ly - 10}" width="12" height="12" rx="3" fill="{gc}"/>'
+                f'<text x="390" y="{ly}" font-size="11" fill="{_C_TITLE}">'
+                f'{_esc(gn[:24])}</text>')
+            ly += 22
     return _shell("".join(body), show_border)
 
 
@@ -360,6 +507,20 @@ def _tag_values(db, ids, window) -> dict:
     return out
 
 
+def _tag_devices(db, ids) -> dict:
+    """{tag_id: device_name} for the sunburst hierarchy (device -> tag)."""
+    if not ids or db is None:
+        return {}
+    try:
+        rows = db.execute(text(
+            "SELECT t.id, COALESCE(d.name, 'Ungrouped') "
+            "FROM tags t LEFT JOIN devices d ON d.id = t.device_id "
+            "WHERE t.id = ANY(:ids)"), {"ids": list(ids)}).fetchall()
+        return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
+
+
 # --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
@@ -425,19 +586,35 @@ def render_chart(block: dict, tags_list, db=None, window=None) -> str:
                              show_legend=show_legend, show_grid=show_grid,
                              show_border=show_border, tz=tz, tz_abbr=tz_abbr)
 
-        # bar / pie: one value per tag (binding value, else queried)
+        # value charts: bar / hbar / pie / doughnut / exploded / sunburst
         need = [m["id"] for m in meta if not isinstance(m["value"], (int, float))]
         qvals = _tag_values(db, need, window) if need else {}
-        pairs = []
+        valued = []  # (id, name, value)
         for m in meta:
             v = m["value"] if isinstance(m["value"], (int, float)) else qvals.get(m["id"])
             if isinstance(v, (int, float)):
-                pairs.append((m["name"], float(v)))
-        if not pairs:
+                valued.append((m["id"], m["name"], float(v)))
+        if not valued:
             return _note("No numeric tag values to chart for this period.", show_border)
-        if ctype == "pie":
+        pairs = [(n, v) for _, n, v in valued]
+        if ctype == "hbar":
+            return _svg_hbar(pairs, title, show_values=show_values,
+                             show_grid=show_grid, show_border=show_border)
+        if ctype in ("pie", "doughnut", "exploded"):
             return _svg_pie(pairs, title, show_legend=show_legend,
-                            show_values=show_values, show_border=show_border)
+                            show_values=show_values, show_border=show_border,
+                            variant=ctype)
+        if ctype == "sunburst":
+            devmap = _tag_devices(db, [i for i, _, _ in valued])
+            order, gd = [], {}
+            for i, n, v in valued:
+                dn = devmap.get(i, "Ungrouped")
+                if dn not in gd:
+                    gd[dn] = []
+                    order.append(dn)
+                gd[dn].append((n, v))
+            return _svg_sunburst([(dn, gd[dn]) for dn in order], title,
+                                 show_legend=show_legend, show_border=show_border)
         return _svg_bar(pairs, title, show_values=show_values,
                         show_grid=show_grid, show_border=show_border)
     except Exception as e:  # never break a report render over a chart
