@@ -266,18 +266,15 @@ def list_signatures(
     return [_out(r) for r in _existing(db, record_type, record_id)]
 
 
-@router.get("/api/signatures/verify", response_model=VerifyOut)
-def verify_signatures(
-    record_type: str,
-    record_id: int,
-    user: Annotated[CurrentUser, Depends(get_current_user)],
-    db: Annotated[Session, Depends(get_session)],
-):
-    """Recompute the per-record chain and re-check the bound content hash.
+def signing_state(db: Session, record_type: str, record_id: int) -> dict:
+    """Reusable signing status for a record — the computation behind
+    GET /api/signatures/verify, returned as a plain dict so other modules
+    (e.g. report-revision activation) can gate on it.
 
-    chain_intact      = every row's chain_hash recomputes from its predecessor
-    content_unchanged = the current record content still hashes to what was signed
-                        (False => the record changed after signing; signatures stale)
+      chain_intact      — every row's chain_hash recomputes from its predecessor
+      content_unchanged — the current record content still hashes to what was signed
+      fully_signed      — all meanings applied, in order
+      next_meaning      — the next meaning required, or None when complete
     """
     rows = _existing(db, record_type, record_id)
 
@@ -307,10 +304,52 @@ def verify_signatures(
     applied = [r["meaning"] for r in rows]
     fully = len(applied) >= len(MEANINGS)
     nxt = None if fully else MEANINGS[len(applied)]
+    return {
+        "rows": rows,
+        "chain_intact": chain_intact,
+        "content_unchanged": content_unchanged,
+        "fully_signed": fully,
+        "next_meaning": nxt,
+    }
 
+
+def report_signoff_required(db: Session) -> bool:
+    """True when system_settings 'esig.require_report_signoff' is truthy.
+
+    Default FALSE (key absent) — activation behaves exactly as before until an
+    admin explicitly enables enforcement (matches the writability opt-in model).
+    """
+    row = db.execute(
+        text("SELECT value FROM system_settings WHERE key = :k"),
+        {"k": "esig.require_report_signoff"},
+    ).first()
+    return bool(row) and str(row[0]).strip().lower() in ("true", "1", "yes", "on")
+
+
+def signoff_block_reason(state: dict) -> str:
+    """Human-readable reason an activation is blocked, given a signing_state dict."""
+    if not state["fully_signed"]:
+        return f"electronic signature incomplete - next required: '{state['next_meaning']}'"
+    if not state["chain_intact"]:
+        return "signature chain integrity check failed"
+    if not state["content_unchanged"]:
+        return ("report content changed after signing - draft a new revision "
+                "and re-sign before activating")
+    return "ok"
+
+
+@router.get("/api/signatures/verify", response_model=VerifyOut)
+def verify_signatures(
+    record_type: str,
+    record_id: int,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Recompute the per-record chain and re-check the bound content hash."""
+    st = signing_state(db, record_type, record_id)
     return VerifyOut(
         record_type=record_type, record_id=record_id,
-        signatures=[_out(r) for r in rows],
-        chain_intact=chain_intact, content_unchanged=content_unchanged,
-        fully_signed=fully, next_meaning=nxt,
+        signatures=[_out(r) for r in st["rows"]],
+        chain_intact=st["chain_intact"], content_unchanged=st["content_unchanged"],
+        fully_signed=st["fully_signed"], next_meaning=st["next_meaning"],
     )

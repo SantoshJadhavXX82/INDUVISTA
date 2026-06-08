@@ -29,6 +29,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.utils.audit import audit, AuditEvent
 from app.config import settings
+from app.api.signatures import signing_state, report_signoff_required, signoff_block_reason  # Phase B-ESIG.2
 from app.services.report_render import build_live_context, render_report
 from app.services.report_formats import render_html, build_report_data, to_json, to_xml
 from app.services.report_blocks import compile_blocks, build_block_context, collect_block_tag_ids
@@ -1167,6 +1168,18 @@ def activate_report_revision(def_id: int, rev_id: int, request: Request,
     Phase B5: activation requires the 'approver' role (or higher). Drafting and
     editing remain at engineer+; only the act of making a revision live is gated.
     """
+    # Phase B-ESIG.2 - block activation unless the revision carries a complete,
+    # intact, content-bound e-signature chain. Enabled via system_settings
+    # 'esig.require_report_signoff' (default off preserves prior behavior).
+    if report_signoff_required(db):
+        _st = signing_state(db, "report_revision", rev_id)
+        if not (_st["fully_signed"] and _st["chain_intact"] and _st["content_unchanged"]):
+            _why = signoff_block_reason(_st)
+            audit(AuditEvent(action="report.revision.activate.denied",
+                             target_type="report_definition", target_id=def_id,
+                             summary=f"Activation blocked (e-sig): {_why}",
+                             status="denied", error_message=_why), request)
+            raise HTTPException(409, f"Activation blocked: {_why}")
     rev, err = activate_revision(db, def_id, rev_id, user.username, settings.app_timezone)
     if err == "not_found":
         raise HTTPException(404, f"Revision {rev_id} not found for report {def_id}.")
@@ -1307,3 +1320,4 @@ def delete_batch(batch_id: int, request: Request,
     audit(AuditEvent(action="report.batch.delete", target_type="report_batch",
                      target_id=batch_id, summary=f"Deleted batch {batch_id}"), request)
     return Response(status_code=204)
+
