@@ -52,12 +52,14 @@ function TriCheck({ state, onClick, disabled }:
 }
 
 export function TagTreePicker({
-  open, onClose, onConfirm, alreadyBound,
+  open, onClose, onConfirm, alreadyBound, single, title,
 }: {
   open: boolean;
   onClose: () => void;
   onConfirm: (tags: { id: number; name: string }[]) => void;
   alreadyBound: Set<number>;
+  single?: boolean;
+  title?: string;
 }) {
   const tagsQ = useQuery({
     queryKey: ["tag-tree-all"],
@@ -117,6 +119,7 @@ export function TagTreePicker({
   };
   const toggleOne = (t: TagFull) => {
     if (alreadyBound.has(t.id)) return;
+    if (single) { onConfirm([{ id: t.id, name: t.name }]); setSel(new Set()); onClose(); return; }
     setSel((prev) => { const n = new Set(prev); n.has(t.id) ? n.delete(t.id) : n.add(t.id); return n; });
   };
 
@@ -136,8 +139,8 @@ export function TagTreePicker({
         {/* header */}
         <div className="flex items-center gap-2 px-4 py-3"
           style={{ borderBottom: "0.5px solid var(--separator)" }}>
-          <span className="text-[14px] font-semibold" style={{ color: "var(--text-primary)" }}>Select tags</span>
-          <span className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>browse by device · multi-select</span>
+          <span className="text-[14px] font-semibold" style={{ color: "var(--text-primary)" }}>{title ?? "Select tags"}</span>
+          <span className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>{single ? "browse by device · pick one" : "browse by device · multi-select"}</span>
           <button onClick={cancel} className="ml-auto" style={{ color: "var(--text-secondary)" }}><X className="h-4 w-4" /></button>
         </div>
 
@@ -192,13 +195,15 @@ export function TagTreePicker({
         {/* footer */}
         <div className="flex items-center gap-2 px-4 py-3" style={{ borderTop: "0.5px solid var(--separator)" }}>
           <span className="text-[12px]" style={{ color: "var(--ios-gray-1)" }}>
-            {sel.size} selected
+            {single ? "click a tag to choose" : `${sel.size} selected`}
           </span>
           <div className="ml-auto flex gap-2">
             <Button variant="ghost" size="sm" onClick={cancel}>Cancel</Button>
-            <Button size="sm" onClick={confirm} disabled={sel.size === 0}>
-              Add {sel.size > 0 ? sel.size : ""} tag{sel.size === 1 ? "" : "s"}
-            </Button>
+            {!single && (
+              <Button size="sm" onClick={confirm} disabled={sel.size === 0}>
+                Add {sel.size > 0 ? sel.size : ""} tag{sel.size === 1 ? "" : "s"}
+              </Button>
+            )}
           </div>
         </div>
       </div>
@@ -237,8 +242,8 @@ function Leaf({
       style={{ paddingLeft: 8 + depth * 18 }}>
       <span className="w-3.5 shrink-0" />
       <TriCheck state={state} onClick={onCheck} disabled={disabled} />
-      <span className="text-[12.5px] truncate" style={{ color: "var(--text-primary)" }}>{label}</span>
-      <span className="text-[10.5px] truncate" style={{ color: "var(--ios-gray-1)" }}>{info}</span>
+      <span className="text-[12.5px] truncate cursor-pointer" style={{ color: "var(--text-primary)" }} onClick={onCheck}>{label}</span>
+      <span className="text-[10.5px] truncate cursor-pointer" style={{ color: "var(--ios-gray-1)" }} onClick={onCheck}>{info}</span>
       {boundAlready && (
         <span className="text-[9.5px] ml-1 px-1 rounded shrink-0"
           style={{ backgroundColor: "var(--bg-grouped,#eee)", color: "var(--ios-gray-1)" }}>bound</span>

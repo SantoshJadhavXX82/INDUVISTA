@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field, Select, type TagLite } from "@/pages/triggers-shared";
 import { StreamTableEditor } from "@/components/reports/StreamTableEditor";
+import { TagTreePicker } from "@/components/reports/TagTreePicker";
 
 export type Block = { id: string; type: string; [k: string]: any };
 type Column = { key: string; label: string; kind: "data" | "formula"; formula?: string; fmt?: string };
@@ -783,9 +784,15 @@ function KpiItemsEditor({
   const add = () => onChange([...items, { tag_id: allTags[0]?.id ?? 0, label: "", unit: "", decimals: undefined }]);
   const tagOptions = allTags.map((t) => String(t.id));
   const tagLabels = allTags.map((t) => t.name);
+  const [pick, setPick] = useState<{ i: number; field: "tag_id" | "status_tag_id" } | null>(null);
+  const nameOf = (id: any) => allTags.find((t) => t.id === id)?.name;
 
   return (
     <div className="space-y-2">
+      <TagTreePicker single open={pick !== null} alreadyBound={new Set()}
+        title={pick?.field === "status_tag_id" ? "Select status tag" : "Select tag"}
+        onClose={() => setPick(null)}
+        onConfirm={(tags) => { if (pick && tags[0]) update(pick.i, { [pick.field]: tags[0].id }); setPick(null); }} />
       {items.length === 0 && (
         <div className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>No tiles yet.</div>
       )}
@@ -793,12 +800,24 @@ function KpiItemsEditor({
         <div key={i} className="rounded-md p-2 grid gap-2"
           style={{ border: "0.5px solid var(--separator)", gridTemplateColumns: "1.2fr 1.2fr 1fr 0.8fr 0.5fr auto" }}>
           <Field label="Tag">
-            <Select value={String(it.tag_id ?? "")} options={tagOptions} labels={tagLabels}
-              onChange={(v) => update(i, { tag_id: Number(v) })} />
+            <button type="button" onClick={() => setPick({ i, field: "tag_id" })}
+              className="w-full text-left text-[12px] px-2 py-1 rounded-md truncate"
+              style={{ border: "0.5px solid var(--separator)", background: "var(--bg-elevated,#fff)", color: "var(--text-primary)" }}>
+              {nameOf(it.tag_id) ?? "Choose tag…"}
+            </button>
           </Field>
           <Field label="Status tag">
-            <Select value={String(it.status_tag_id ?? "")} options={["", ...tagOptions]} labels={["\u2014 none \u2014", ...tagLabels]}
-              onChange={(v) => update(i, { status_tag_id: v ? Number(v) : undefined })} />
+            <div className="flex items-center gap-1">
+              <button type="button" onClick={() => setPick({ i, field: "status_tag_id" })}
+                className="flex-1 text-left text-[12px] px-2 py-1 rounded-md truncate"
+                style={{ border: "0.5px solid var(--separator)", background: "var(--bg-elevated,#fff)", color: "var(--text-primary)" }}>
+                {it.status_tag_id != null ? (nameOf(it.status_tag_id) ?? `tag ${it.status_tag_id}`) : "— none —"}
+              </button>
+              {it.status_tag_id != null && (
+                <button type="button" title="Clear" onClick={() => update(i, { status_tag_id: undefined })}
+                  className="text-[13px] px-1" style={{ color: "var(--ios-gray-1)" }}>×</button>
+              )}
+            </div>
           </Field>
           <Field label="Label">
             <Input value={it.label ?? ""} onChange={(e) => update(i, { label: e.target.value })} />
