@@ -288,11 +288,16 @@ def _compile_block(b: dict, idx: int, q: bool = False, l: bool = False) -> str:
             label = _esc(it.get("label", ""))
             unit = _esc(it.get("unit", ""))
             dec = it.get("decimals")
+            sid = it.get("status_tag_id")
             if dec is None or dec == "":
                 inner = "tag(%d).display" % tid
             else:
                 inner = "(tag(%d).value | fmt(%d))" % (tid, int(dec))
-            val = "{{ %s }}" % (("vwrap(tag(%d), %s, %s, %s)" % (tid, inner, l, q)) if (q or l) else inner)
+            if sid:
+                decarg = int(dec) if dec not in (None, "") else None
+                val = "{{ vs(%d, %d, %r) }}" % (tid, int(sid), decarg)
+            else:
+                val = "{{ %s }}" % (("vwrap(tag(%d), %s, %s, %s)" % (tid, inner, l, q)) if (q or l) else inner)
             unit_html = f'<span class="kpi-unit">{unit}</span>' if unit else ""
             cells.append(
                 f'<div class="rpt-kpi"><div class="kpi-val">{val}{unit_html}</div>'
@@ -340,12 +345,18 @@ def _compile_block(b: dict, idx: int, q: bool = False, l: bool = False) -> str:
             for r in s.get("rows", []):
                 dec = r.get("decimals")
                 cells = r.get("cells", []) or []
+                scells = r.get("status_cells", []) or []
                 tds = []
                 for i in range(ncol):
                     cid = cells[i] if i < len(cells) else None
+                    scid = scells[i] if i < len(scells) else None
                     numcls = "num cband" if (band_cols and i % 2 == 1) else "num"
                     if cid in (None, ""):
                         tds.append('<td class="%s">&mdash;</td>' % numcls)
+                    elif scid not in (None, ""):
+                        decarg = int(dec) if dec not in (None, "") else None
+                        tds.append('<td class="%s">{{ vs(%d, %d, %r) }}</td>'
+                                   % (numcls, int(cid), int(scid), decarg))
                     elif dec is None or dec == "":
                         inner = "tag(%d).display" % int(cid)
                         expr = ("vwrap(tag(%d), %s, %s, %s)" % (int(cid), inner, l, q)) if (q or l) else inner

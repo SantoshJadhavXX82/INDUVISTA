@@ -31,6 +31,7 @@ type Col = { label: string; device_id: number | null };
 type Row = {
   label: string; unit: string; decimals: number | null;
   reg?: string; cells: (number | null)[]; cell_regs?: (string | null)[];
+  status_regs?: (string | null)[]; status_cells?: (number | null)[];
 };
 type Section = { name: string; rows: Row[] };
 
@@ -93,6 +94,12 @@ export function StreamTableEditor({ block, onPatch, page, advanced }: { block: a
     return out;
   };
 
+  const effArr = (arr: (string | null)[] | undefined, n: number): (string | null)[] => {
+    const out: (string | null)[] = new Array(n).fill(null);
+    if (Array.isArray(arr)) for (let i = 0; i < Math.min(n, arr.length); i++) out[i] = arr[i];
+    return out;
+  };
+
   const resolveCell = (reg: string | null, deviceId: number | null, existing: number | null | undefined): number | null => {
     if (deviceId == null) return null;
     const d = byDevReg[deviceId];
@@ -116,7 +123,13 @@ export function StreamTableEditor({ block, onPatch, page, advanced }: { block: a
       ...s,
       rows: s.rows.map((r) => {
         const cr = effRegs(r, nc);
-        return { ...r, cell_regs: cr, cells: nc.map((c, i) => resolveCell(cr[i], c.device_id, r.cells?.[i])) };
+        const out: Row = { ...r, cell_regs: cr, cells: nc.map((c, i) => resolveCell(cr[i], c.device_id, r.cells?.[i])) };
+        if (Array.isArray(r.status_regs)) {
+          const sr = effArr(r.status_regs, nc.length);
+          out.status_regs = sr;
+          out.status_cells = nc.map((c, i) => resolveCell(sr[i], c.device_id, r.status_cells?.[i]));
+        }
+        return out;
       }),
     }));
 
@@ -146,13 +159,17 @@ export function StreamTableEditor({ block, onPatch, page, advanced }: { block: a
   const setCol = (i: number, p: Partial<Col>) => commit(cols.map((c, j) => (j === i ? { ...c, ...p } : c)), sections);
   const addCol = () => {
     const ns = sections.map((s) => ({
-      ...s, rows: s.rows.map((r) => { const cr = effRegs(r, cols); cr.push(null); return { ...r, cell_regs: cr }; }),
+      ...s, rows: s.rows.map((r) => { const cr = effRegs(r, cols); cr.push(null);
+        const sr = Array.isArray(r.status_regs) ? effArr(r.status_regs, cols.length) : undefined; if (sr) sr.push(null);
+        return { ...r, cell_regs: cr, ...(sr ? { status_regs: sr } : {}) }; }),
     }));
     commit([...cols, { label: `FC ${String.fromCharCode(65 + cols.length)}`, device_id: devices[0]?.id ?? null }], ns);
   };
   const delCol = (i: number) => {
     const ns = sections.map((s) => ({
-      ...s, rows: s.rows.map((r) => { const cr = effRegs(r, cols); cr.splice(i, 1); return { ...r, cell_regs: cr }; }),
+      ...s, rows: s.rows.map((r) => { const cr = effRegs(r, cols); cr.splice(i, 1);
+        const sr = Array.isArray(r.status_regs) ? effArr(r.status_regs, cols.length) : undefined; if (sr) sr.splice(i, 1);
+        return { ...r, cell_regs: cr, ...(sr ? { status_regs: sr } : {}) }; }),
     }));
     commit(cols.filter((_, j) => j !== i), ns);
   };
@@ -198,6 +215,23 @@ export function StreamTableEditor({ block, onPatch, page, advanced }: { block: a
     }
     setRow(si, ri, patch);
   };
+
+  const pickStatusCell = (si: number, ri: number, ci: number, val: string) => {
+    const row = sections[si].rows[ri];
+    const sr = effArr(row.status_regs ?? cols.map(() => null), cols.length);
+    sr[ci] = val;
+    if (val && val !== BLANK) {
+      cols.forEach((c, j) => {
+        if (j === ci || c.device_id == null || sr[j]) return;
+        const mapped = autoMap(val, c.device_id);
+        if (mapped) sr[j] = mapped;
+      });
+    }
+    setRow(si, ri, { status_regs: sr });
+  };
+
+  const toggleStatus = (si: number, ri: number, on: boolean) =>
+    setRow(si, ri, on ? { status_regs: cols.map(() => null) } : { status_regs: undefined, status_cells: undefined });
 
   const lbl = { fontSize: 11, color: "var(--ios-gray-1)" } as const;
 
@@ -304,6 +338,10 @@ export function StreamTableEditor({ block, onPatch, page, advanced }: { block: a
                           onChange={(e) => setRow(si, ri, { decimals: e.target.value === "" ? null : Number(e.target.value) })} />
                       </Field>
                       <span style={{ fontSize: 10, color: indColor, whiteSpace: "nowrap" }}>{ind}</span>
+                      <Button variant="ghost" size="sm" title="Pair a status-flag tag per column"
+                        onClick={() => toggleStatus(si, ri, !Array.isArray(r.status_regs))}>
+                        {Array.isArray(r.status_regs) ? "\u2212 flag" : "+ flag"}
+                      </Button>
                       <Button variant="ghost" size="sm" onClick={() => delRow(si, ri)}><Trash2 className="h-3.5 w-3.5" /></Button>
                     </div>
                     <div className="grid gap-2 mt-1" style={{ gridTemplateColumns: `repeat(${Math.max(cols.length, 1)}, 1fr)` }}>
@@ -317,6 +355,20 @@ export function StreamTableEditor({ block, onPatch, page, advanced }: { block: a
                         );
                       })}
                     </div>
+                    {Array.isArray(r.status_regs) && (
+                      <div className="grid gap-2 mt-1" style={{ gridTemplateColumns: `repeat(${Math.max(cols.length, 1)}, 1fr)` }}>
+                        {cols.map((c, ci) => {
+                          const opt = regOptionsFor(c.device_id);
+                          const sr = effArr(r.status_regs, cols.length);
+                          return (
+                            <Field key={ci} label={`${c.label || `Col ${ci + 1}`} status flag`}>
+                              <Select value={sr[ci] ?? ""} options={opt.options} labels={opt.labels}
+                                onChange={(v) => pickStatusCell(si, ri, ci, v)} />
+                            </Field>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                 );
               })}

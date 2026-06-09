@@ -124,6 +124,32 @@ def render_html(template_html: str, context: dict[str, Any],
     env.globals["header_block"] = lambda: Markup(render_header_band(_rep))
     env.globals["signoff_block"] = lambda: Markup(render_signoff_band(_so))
 
+    # value + status: render "1234.56 (!)" from a value tag + a paired status
+    # tag. value/status accept a tag id (int) or a name (str); the status SYMBOL
+    # comes from a named set on the status tag (e.g. raw 1 -> "!", raw 0 -> "").
+    _tag_lookup = context.get("tag")
+
+    def _vs(value, status=None, dec=None):
+        from markupsafe import escape as _esc
+        tv = _tag_lookup(value) if _tag_lookup else None
+        if tv is None:
+            vtxt = "\u2014"
+        elif dec not in (None, ""):
+            try:
+                vtxt = f"{float(tv.value):.{int(dec)}f}"
+            except (TypeError, ValueError):
+                vtxt = tv.display
+        else:
+            vtxt = tv.display
+        out = str(_esc(vtxt))
+        if status not in (None, "", 0):
+            ts = _tag_lookup(status) if _tag_lookup else None
+            stxt = ts.display if ts is not None else ""
+            if stxt and stxt != "\u2014":
+                out += " (" + str(_esc(stxt)) + ")"
+        return Markup(out)
+    env.globals["vs"] = _vs
+
     # Fmt Phase 2 — quality markers (color + text marker).
     from app.services.report_render import qwrap
     env.globals["qwrap"] = qwrap

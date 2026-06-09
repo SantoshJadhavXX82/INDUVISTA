@@ -791,10 +791,14 @@ function KpiItemsEditor({
       )}
       {items.map((it, i) => (
         <div key={i} className="rounded-md p-2 grid gap-2"
-          style={{ border: "0.5px solid var(--separator)", gridTemplateColumns: "1.3fr 1.3fr 0.9fr 0.6fr auto" }}>
+          style={{ border: "0.5px solid var(--separator)", gridTemplateColumns: "1.2fr 1.2fr 1fr 0.8fr 0.5fr auto" }}>
           <Field label="Tag">
             <Select value={String(it.tag_id ?? "")} options={tagOptions} labels={tagLabels}
               onChange={(v) => update(i, { tag_id: Number(v) })} />
+          </Field>
+          <Field label="Status tag">
+            <Select value={String(it.status_tag_id ?? "")} options={["", ...tagOptions]} labels={["\u2014 none \u2014", ...tagLabels]}
+              onChange={(v) => update(i, { status_tag_id: v ? Number(v) : undefined })} />
           </Field>
           <Field label="Label">
             <Input value={it.label ?? ""} onChange={(e) => update(i, { label: e.target.value })} />

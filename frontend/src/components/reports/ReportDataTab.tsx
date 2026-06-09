@@ -9,7 +9,7 @@
  * latest value. Quality is derived from the project `st` standard (st >= 128 =
  * good) in the backend aggregation layer.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Save, X, ListTree } from "lucide-react";
 import { api } from "@/lib/api";
@@ -55,11 +55,15 @@ export function ReportDataTab({
   const bindingsQ = useQuery({
     queryKey: ["report-bindings", defId],
     queryFn: () => api.get<Binding[]>(`/report-config/definitions/${defId}/bindings`),
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
   });
 
   const [rows, setRows] = useState<Row[]>([]);
+  const seededForRef = useRef<number | null>(null);
   useEffect(() => {
-    if (bindingsQ.data) {
+    if (bindingsQ.data && seededForRef.current !== defId) {
+      seededForRef.current = defId;
       setRows(bindingsQ.data.map((b) => ({
         tag_id: b.tag_id,
         tag_name: b.tag_name ?? `tag ${b.tag_id}`,
@@ -69,7 +73,7 @@ export function ReportDataTab({
         decimals: b.decimal_places == null ? "" : String(b.decimal_places),
       })));
     }
-  }, [bindingsQ.data]);
+  }, [bindingsQ.data, defId]);
 
   const [filter, setFilter] = useState("");
   const bound = useMemo(() => new Set(rows.map((r) => r.tag_id)), [rows]);
@@ -116,6 +120,7 @@ export function ReportDataTab({
       }),
     }),
     onSuccess: () => {
+      seededForRef.current = null;
       qc.invalidateQueries({ queryKey: ["report-bindings", defId] });
       onSaved();
     },
