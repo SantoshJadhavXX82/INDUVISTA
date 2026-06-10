@@ -103,3 +103,7 @@ scripts/ui_smoke_fail.png
 *.db-wal
 *.db-journal
 storage/sf_buffer.db*
+
+# local installer prerequisites - do not commit
+/Installer_Pre-requisite/
+
