@@ -26,6 +26,10 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Gate } from "@/lib/rbac";
 import { SectionCard } from "@/components/ui/section-card";
 import { formatFloat } from "@/lib/format";
+import { authHeaders } from "@/lib/authFetch";
+import { blockExample } from "@/lib/blockExamples";
+import { decodeQuality } from "@/lib/calcQuality";
+import { BlockIcon } from "@/lib/blockIcons";
 
 import {
   useCalcDefinitions, useBlockTypes, useComputedDevices,
@@ -78,7 +82,8 @@ function useCurrentValues() {
   return useQuery<CurrentValuesResponse>({
     queryKey: ["calc-current-values"],
     queryFn: async () => {
-      const res = await fetch("/api/calc/current-values");
+      const _t = localStorage.getItem("induvista:token");
+      const res = await fetch("/api/calc/current-values", _t ? { headers: { Authorization: `Bearer ${_t}` } } : undefined);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return res.json();
     },
@@ -115,7 +120,7 @@ export default function CalcDefinitionsAdmin() {
     mutationFn: async (d: CalcDefinition) => {
       const res = await fetch(`/api/computed-tags/${d.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ enabled: !d.enabled }),
       });
       if (!res.ok) {
@@ -129,7 +134,7 @@ export default function CalcDefinitionsAdmin() {
 
   const deleteMutation = useMutation({
     mutationFn: async (d: CalcDefinition) => {
-      const res = await fetch(`/api/computed-tags/${d.id}`, { method: "DELETE" });
+      const res = await fetch(`/api/computed-tags/${d.id}`, { method: "DELETE", headers: authHeaders() });
       if (!res.ok && res.status !== 204) {
         throw new Error(`Delete failed (HTTP ${res.status}): ${await res.text()}`);
       }
@@ -317,6 +322,12 @@ export default function CalcDefinitionsAdmin() {
               Enabled only
             </label>
           </div>
+
+          <CalcHealthBanner
+            defs={defs.data ?? []}
+            active={filterStatus}
+            onSelect={setFilterStatus}
+          />
 
           {allDevices.length === 0 ? (
             <div className="text-center py-10 border border-dashed border-border rounded">
@@ -607,6 +618,8 @@ function CalcDefRow({
     : "bg-slate-50";
 
   const rateLabel = formatRate(def.execution_rate_ms);
+  const _ageMs = def.last_executed_at ? Date.now() - new Date(def.last_executed_at).getTime() : null;
+  const isStale = def.enabled && _ageMs != null && _ageMs > Math.max(def.execution_rate_ms * 5, 15000);
   const lastRun = def.last_executed_at ? relativeTime(def.last_executed_at) : "—";
 
   const isExternal = def.output_tag_id != null;
@@ -631,8 +644,10 @@ function CalcDefRow({
     const tooltip = displayedValue.ts
       ? `last written ${relativeTime(displayedValue.ts)} (quality ${displayedValue.quality ?? "?"})${isExternal ? " — read from external target" : ""}`
       : `quality ${displayedValue.quality ?? "?"}`;
+    const q = decodeQuality(displayedValue.quality);
     return (
-      <span className="font-mono tabular-nums" title={tooltip}>
+      <span className="inline-flex items-center justify-end gap-1.5 font-mono tabular-nums" title={tooltip}>
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${q.dot}`} aria-hidden />
         {formatted}
       </span>
     );
@@ -664,8 +679,9 @@ function CalcDefRow({
           </div>
         </td>
         <td className="px-3 py-1.5 cursor-pointer" onClick={onToggle}>
-          <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded border ${catCls}`}
+          <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border ${catCls}`}
                 title={type?.description ?? ""}>
+            <BlockIcon code={def.block_type} category={type?.category} className="h-3 w-3" />
             {type?.label ?? def.block_type}
           </span>
         </td>
@@ -681,7 +697,10 @@ function CalcDefRow({
             {status}
           </span>
         </td>
-        <td className="px-3 py-1.5 text-right text-muted-foreground tabular-nums cursor-pointer" onClick={onToggle}>
+        <td className={`px-3 py-1.5 text-right tabular-nums cursor-pointer ${isStale ? "text-amber-600 font-medium" : "text-muted-foreground"}`}
+            onClick={onToggle}
+            title={isStale ? `overdue: expected every ${rateLabel}` : undefined}>
+          {isStale && <AlertTriangle className="inline h-2.5 w-2.5 mr-1" />}
           {lastRun}
         </td>
         <td className="px-3 py-1.5">
@@ -733,6 +752,13 @@ function CalcDefRow({
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
                   Block config
                 </div>
+                {blockExample(def.block_type) && (
+                  <div className="text-[11px] font-mono bg-secondary/40 border border-border rounded px-2 py-1.5 mb-2 overflow-x-auto whitespace-pre"
+                       title="Reference form - the actual operands are in the config below">
+                    <span className="text-muted-foreground">{def.name} = </span>
+                    {blockExample(def.block_type)}
+                  </div>
+                )}
                 <pre className="text-[11px] font-mono bg-card border border-border rounded p-2 overflow-x-auto">
                   {JSON.stringify(def.block_config, null, 2)}
                 </pre>
@@ -887,6 +913,66 @@ function DiagnosticBanner({
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+
+function CalcHealthBanner({
+  defs, active, onSelect,
+}: {
+  defs: CalcDefinition[];
+  active: string;
+  onSelect: (status: string) => void;
+}) {
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { ok: 0, overrun: 0, error: 0, killed: 0, pending: 0, disabled: 0 };
+    for (const d of defs) {
+      if (!d.enabled) { c.disabled += 1; continue; }
+      const s = d.last_status ?? "pending";
+      c[s] = (c[s] ?? 0) + 1;
+    }
+    return c;
+  }, [defs]);
+
+  if (defs.length === 0) return null;
+
+  const chips = [
+    { key: "ok", label: "OK" },
+    { key: "overrun", label: "Overrun" },
+    { key: "error", label: "Error" },
+    { key: "killed", label: "Killed" },
+    { key: "pending", label: "Pending" },
+  ];
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 mb-3">
+      {chips.map((chip) => {
+        const n = counts[chip.key] ?? 0;
+        const isActive = active === chip.key;
+        const cls = STATUS_STYLES[chip.key] ?? STATUS_STYLES.pending;
+        return (
+          <button
+            key={chip.key}
+            type="button"
+            onClick={() => onSelect(isActive ? "all" : chip.key)}
+            className={`inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded border ${cls} ${isActive ? "ring-2 ring-offset-1 ring-slate-400" : ""} ${n === 0 ? "opacity-40" : "hover:brightness-95"}`}
+            title={`${n} ${chip.label}${isActive ? " (click to clear filter)" : ""}`}
+          >
+            {statusIcon(chip.key)}
+            <span className="font-semibold tabular-nums">{n}</span>
+            {chip.label}
+          </button>
+        );
+      })}
+      {counts.disabled > 0 && (
+        <span className="inline-flex items-center gap-1 text-[10px] px-2 py-1 rounded border bg-slate-100 text-slate-600 border-slate-300"
+              title={`${counts.disabled} disabled`}>
+          <Power className="h-2.5 w-2.5 opacity-40" />
+          <span className="font-semibold tabular-nums">{counts.disabled}</span>
+          disabled
+        </span>
+      )}
     </div>
   );
 }

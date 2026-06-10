@@ -19,6 +19,7 @@
  * so the simulator can never diverge from production behavior.
  */
 import { useEffect, useMemo, useState } from "react";
+import { authHeaders } from "@/lib/authFetch";
 import { RotateCcw, Loader2 } from "lucide-react";
 import { blockInputs, GOOD_NON_SPECIFIC } from "@/lib/blockPreview";
 import { formatFloat } from "@/lib/format";
@@ -105,7 +106,7 @@ export function StatefulBlockSimulator({
 
       const res = await fetch("/api/computed-tags/preview", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           block_type: blockCode,
           block_config: blockConfig,

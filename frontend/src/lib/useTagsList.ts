@@ -21,7 +21,8 @@ export interface TagListItem {
 
 
 async function fetchTags(): Promise<TagListItem[]> {
-  const res = await fetch("/api/tags");
+  const _t = localStorage.getItem("induvista:token");
+  const res = await fetch("/api/tags", _t ? { headers: { Authorization: `Bearer ${_t}` } } : undefined);
   if (!res.ok) {
     throw new Error(`Failed to fetch tags: HTTP ${res.status}`);
   }

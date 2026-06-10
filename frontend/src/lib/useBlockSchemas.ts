@@ -8,14 +8,13 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import type { BlockSchemaMap } from "@/types/calcBlockSchemas";
+import { api } from "@/lib/api";
 
 
 async function fetchBlockSchemas(): Promise<BlockSchemaMap> {
-  const res = await fetch("/api/calc/block-schemas");
-  if (!res.ok) {
-    throw new Error(`Failed to fetch block schemas: HTTP ${res.status}`);
-  }
-  return res.json();
+  // Use the shared api client so the bearer token is attached. A raw fetch
+  // sent no Authorization header, so the RBAC middleware returned HTTP 401.
+  return api.get<BlockSchemaMap>("/calc/block-schemas");
 }
 
 

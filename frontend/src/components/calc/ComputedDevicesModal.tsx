@@ -16,6 +16,7 @@
  * confirm.
  */
 import { useEffect, useMemo, useState } from "react";
+import { authHeaders } from "@/lib/authFetch";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   X, Plus, Pencil, Trash2, Power, Loader2, AlertTriangle, Check, RefreshCw,
@@ -98,7 +99,7 @@ export function ComputedDevicesModal({ open, onClose }: ComputedDevicesModalProp
       };
       const res = await fetch("/api/computed-devices", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
       });
       if (!res.ok) {
@@ -125,7 +126,7 @@ export function ComputedDevicesModal({ open, onClose }: ComputedDevicesModalProp
       };
       const res = await fetch(`/api/computed-devices/${editingId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
       });
       if (!res.ok) {
@@ -146,7 +147,7 @@ export function ComputedDevicesModal({ open, onClose }: ComputedDevicesModalProp
     mutationFn: async (d: ComputedDevice) => {
       const res = await fetch(`/api/computed-devices/${d.id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ enabled: !d.enabled }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
@@ -163,6 +164,7 @@ export function ComputedDevicesModal({ open, onClose }: ComputedDevicesModalProp
     mutationFn: async (d: ComputedDevice) => {
       const res = await fetch(`/api/computed-devices/${d.id}`, {
         method: "DELETE",
+        headers: authHeaders(),
       });
       if (!res.ok && res.status !== 204) {
         throw new Error(`HTTP ${res.status}: ${await res.text()}`);

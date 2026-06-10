@@ -28,7 +28,7 @@
 
 services:
   postgres:
-    image: timescale/timescaledb:latest-pg16
+    image: timescale/timescaledb:2.26.4-pg16
     container_name: svj_postgres
     restart: unless-stopped
     # synchronous_commit=off: commits return without waiting for the WAL fsync.
@@ -287,3 +287,4 @@ services:
 
 volumes:
   svj_postgres_data:
+

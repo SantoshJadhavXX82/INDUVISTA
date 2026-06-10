@@ -11,6 +11,7 @@
  * output_tag_id field to its new value (or NULL).
  */
 import { useEffect, useMemo, useState } from "react";
+import { authHeaders } from "@/lib/authFetch";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { X, AlertTriangle, Loader2, Settings, Plus, ArrowRight } from "lucide-react";
 import { HelpTip } from "@/components/ui/help-tip";
@@ -179,7 +180,7 @@ export function CreateCalcModal({
         }
         const res = await fetch(`/api/computed-tags/${existingCalc.id}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          headers: authHeaders({ "Content-Type": "application/json" }),
           body: JSON.stringify(body),
         });
         if (!res.ok) {
@@ -209,7 +210,7 @@ export function CreateCalcModal({
       };
       const res = await fetch("/api/computed-tags", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(body),
       });
       if (!res.ok) {

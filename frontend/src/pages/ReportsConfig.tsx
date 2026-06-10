@@ -46,6 +46,7 @@ import { ReportBlocksEditor, ReportStyleEditor, type Block } from "@/components/
 type Prov = {
   name: string; id: string; value: string; unit: string;
   quality: string; st: string; age: string; origin: string; deriv: string;
+  device: string;
 };
 
 // Injected ONLY into the preview iframe (never the saved report/PDF): turns a
@@ -56,7 +57,7 @@ const LINEAGE_BRIDGE =
   'var el=e.target&&e.target.closest?e.target.closest(".rpt-prov"):null;if(!el)return;' +
   'var d=el.dataset||{};parent.postMessage({__induvista_lineage:true,prov:{' +
   'name:d.pName||"",id:d.pId||"",value:d.pValue||"",unit:d.pUnit||"",' +
-  'quality:d.pQuality||"",st:d.pSt||"",age:d.pAge||"",origin:d.pOrigin||"",deriv:d.pDeriv||""' +
+  'quality:d.pQuality||"",st:d.pSt||"",age:d.pAge||"",origin:d.pOrigin||"",deriv:d.pDeriv||"",device:d.pDevice||""' +
   '}},"*");});})();</script>';
 
 const QUALITY_COLOR: Record<string, string> = {
@@ -88,6 +89,7 @@ function LineageDrawer({ prov, onClose }: { prov: Prov; onClose: () => void }) {
         </div>
         <div className="grid gap-3">
           <Row label="Source tag">{prov.name}{prov.id ? ` (#${prov.id})` : ""}</Row>
+          <Row label="Device">{prov.device || "—"}</Row>
           <Row label="Value">{prov.value || "—"}{prov.unit ? ` ${prov.unit}` : ""}</Row>
           <Row label="Quality">
             <span className="inline-flex items-center gap-1.5">
