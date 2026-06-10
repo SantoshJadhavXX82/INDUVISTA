@@ -713,3 +713,150 @@ def render_chart(block: dict, tags_list, db=None, window=None) -> str:
                         show_grid=show_grid, show_border=show_border)
     except Exception as e:  # never break a report render over a chart
         return _note(f"Chart could not be rendered ({type(e).__name__}).", show_border)
+
+
+# ============================ STATS BLOCK ================================== #
+# Self-contained like render_chart: computes live/min/max/average/std-dev per
+# tag over a window and returns an HTML table. Added tags are resolved directly
+# (no report binding needed).
+
+_STAT_LABELS = {"live": "Live", "min": "Min", "max": "Max",
+                "average": "Average", "std": "Std Dev"}
+
+
+def _stats_units(db, ids) -> dict:
+    if db is None or not ids:
+        return {}
+    try:
+        rows = db.execute(text(
+            "SELECT id, engineering_unit FROM tags WHERE id = ANY(:ids)"),
+            {"ids": list(ids)}).fetchall()
+        return {r[0]: (r[1] or "") for r in rows}
+    except Exception:
+        return {}
+
+
+def _stats_for_tag(db, tid, start, end) -> dict:
+    out = {"live": None, "min": None, "max": None, "average": None, "std": None,
+           "st": None, "n": 0, "error": False}
+    if db is None or tid is None:
+        return out
+    try:
+        r = db.execute(text(
+            "SELECT min(value_double), max(value_double), avg(value_double), "
+            "stddev_samp(value_double), count(value_double) FROM tag_values "
+            "WHERE tag_id = :t AND time >= :s AND time < :e AND value_double IS NOT NULL"),
+            {"t": tid, "s": start, "e": end}).first()
+        if r is not None:
+            out["min"] = None if r[0] is None else float(r[0])
+            out["max"] = None if r[1] is None else float(r[1])
+            out["average"] = None if r[2] is None else float(r[2])
+            out["std"] = None if r[3] is None else float(r[3])
+            out["n"] = int(r[4] or 0)
+        lv = db.execute(text(
+            "SELECT value_double, st FROM tag_values WHERE tag_id = :t "
+            "AND time >= :s AND time < :e AND value_double IS NOT NULL "
+            "ORDER BY time DESC LIMIT 1"),
+            {"t": tid, "s": start, "e": end}).first()
+        if lv is not None and lv[0] is not None:
+            out["live"] = float(lv[0])
+            out["st"] = lv[1]
+    except Exception:
+        out["error"] = True
+    return out
+
+
+_STAT_COLORS = {"bad": "#dc2626", "warn": "#d97706"}
+
+
+def _stat_cell(vtxt, status: str) -> str:
+    """Value cell; bad/warn get a status-colored edge box (shows in PDF too)."""
+    col = _STAT_COLORS.get(status)
+    if not col:
+        return _esc(vtxt)
+    tip = "bad / not communicating" if status == "bad" else "uncertain quality"
+    return (f'<span title="{tip}" style="display:inline-block;border:1.5px solid {col};'
+            f'border-radius:4px;padding:0 6px;color:{col};font-weight:600">{_esc(vtxt)}</span>')
+
+
+def render_stats(block: dict, db=None, window=None) -> str:
+    """Render a stats table. Fault-isolated: a single problem tag renders as a
+    status-flagged (red/amber bordered) cell and NEVER breaks the block/report."""
+    items = block.get("items", []) or []
+    title = block.get("title") or ""
+    show_border = block.get("show_border", True) is not False
+    if not items:
+        return _note("No tags added to this stats block.", show_border)
+    try:
+        if (window and isinstance(window, (tuple, list)) and len(window) == 2
+                and window[0] and window[1]):
+            start, end = window[0], window[1]
+        else:
+            try:
+                mins = int(block.get("window_minutes", 60) or 60)
+            except Exception:
+                mins = 60
+            end = _dt.datetime.now(_dt.timezone.utc)
+            start = end - _dt.timedelta(minutes=max(mins, 1))
+
+        ids = [it.get("tag_id") for it in items if it.get("tag_id")]
+        try:
+            names = _tag_names(db, ids) if db is not None else {}
+        except Exception:
+            names = {}
+        try:
+            units = _stats_units(db, ids)
+        except Exception:
+            units = {}
+
+        cache: dict = {}
+        rows_html = []
+        for it in items:
+            try:
+                tid = it.get("tag_id")
+                stat = (it.get("stat") or "live").lower()
+                dec = it.get("decimals")
+                label = it.get("label") or names.get(tid) or (f"tag {tid}" if tid else "\u2014")
+                if tid not in cache:
+                    cache[tid] = _stats_for_tag(db, tid, start, end)
+                info = cache[tid]
+                val = info.get(stat)
+                if info.get("error") or tid is None or val is None:
+                    status = "bad"                       # error / no data / not communicating
+                else:
+                    st = info.get("st")
+                    status = ("bad" if (st is not None and st < 64)
+                              else "warn" if (st is not None and st < 128)
+                              else "good")
+                if val is None:
+                    vtxt = "error" if info.get("error") else "no data"
+                elif dec not in (None, ""):
+                    try:
+                        vtxt = f"{float(val):.{int(dec)}f}"
+                    except Exception:
+                        vtxt = _fmt(val)
+                else:
+                    vtxt = _fmt(val)
+                unit = "" if val is None else units.get(tid, "")
+                rows_html.append(
+                    f'<tr><td class="rpt-stats-name">{_esc(label)}</td>'
+                    f'<td class="rpt-stats-stat">{_esc(_STAT_LABELS.get(stat, stat))}</td>'
+                    f'<td class="rpt-stats-val">{_stat_cell(vtxt, status)}</td>'
+                    f'<td class="rpt-stats-unit">{_esc(unit)}</td></tr>')
+            except Exception:
+                lbl = it.get("label") or (f"tag {it.get('tag_id')}" if it.get("tag_id") else "\u2014")
+                rows_html.append(
+                    f'<tr><td class="rpt-stats-name">{_esc(lbl)}</td>'
+                    f'<td class="rpt-stats-stat">\u2014</td>'
+                    f'<td class="rpt-stats-val">{_stat_cell("error", "bad")}</td>'
+                    f'<td class="rpt-stats-unit"></td></tr>')
+
+        border = "1px solid #e3e8ef" if show_border else "none"
+        cap = f'<div class="rpt-stats-title">{_esc(title)}</div>' if title else ""
+        head = ('<thead><tr><th>Tag</th><th>Statistic</th>'
+                '<th class="rpt-stats-val">Value</th><th>Unit</th></tr></thead>')
+        return (f'<div class="rpt-stats" style="border:{border};border-radius:8px;'
+                f'padding:8px 10px;margin:10px 0">{cap}'
+                f'<table class="rpt-stats-tbl">{head}<tbody>{"".join(rows_html)}</tbody></table></div>')
+    except Exception as e:
+        return _note(f"Stats block could not be rendered ({type(e).__name__}).", show_border)

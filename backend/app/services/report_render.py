@@ -262,6 +262,7 @@ def provenance_title(ctx, deriv: str | None = None) -> str:
     unit = getattr(ctx, "unit", None)
     st = getattr(ctx, "quality", None)
     src = getattr(ctx, "source", None)
+    dev = getattr(ctx, "device_name", None)
     state = quality_state(ctx)
     if val is not None:
         shown = f"{val:g}" + (f" {unit}" if unit else "")
@@ -272,6 +273,7 @@ def provenance_title(ctx, deriv: str | None = None) -> str:
     qual = _QUALITY_WORD.get(state, "Good")
     lines = [
         f"Source: {name}" + (f" (#{tid})" if tid is not None else ""),
+        *([f"Device: {dev}"] if dev else []),
         f"Value: {shown}",
         f"Quality: {qual}" + (f" (st {st})" if st is not None else ""),
         f"Captured: {_age_phrase(getattr(ctx, 'age_seconds', None))}",
@@ -296,6 +298,7 @@ def _prov_data_attrs(ctx, deriv=None) -> str:
     unit = getattr(ctx, "unit", None)
     st = getattr(ctx, "quality", None)
     src = getattr(ctx, "source", None)
+    dev = getattr(ctx, "device_name", None)
     state = quality_state(ctx)
     if deriv is None:
         deriv = getattr(ctx, "derivation", None)
@@ -309,6 +312,7 @@ def _prov_data_attrs(ctx, deriv=None) -> str:
         "st": "" if st is None else str(st),
         "age": _age_phrase(getattr(ctx, "age_seconds", None)),
         "origin": _ORIGIN_LABEL.get(src, src or "unknown"),
+        "device": dev or "",
         "deriv": deriv or "",
     }
     return "".join(f' data-p-{k}="{escape(v)}"' for k, v in pairs.items() if v != "")
@@ -366,6 +370,7 @@ def vwrap(ctx, formatted, lineage=False, quality=True, deriv=None):
 class TagCtx:
     id: int | None = None
     name: str = ""
+    device_name: str | None = None
     value: float | None = None          # value_double
     text: str | None = None             # value_text
     unit: str | None = None
@@ -418,13 +423,14 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
 
     if tag_ids:
         rows = db.execute(text("""
-            SELECT t.id, t.name, t.description, t.named_set_id,
+            SELECT t.id, t.name, t.description, t.named_set_id, d.name AS device_name,
                    COALESCE(eu.code, t.engineering_unit) AS unit,
                    lv.value_double, lv.value_text, lv.st, lv.source, lv.st_reason,
                    CASE WHEN lv.time IS NULL THEN NULL
                         ELSE EXTRACT(EPOCH FROM (NOW() - lv.time))::float END AS age_seconds
             FROM tags t
             LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
+            LEFT JOIN devices d ON d.id = t.device_id
             LEFT JOIN latest_tag_values lv ON lv.tag_id = t.id
             WHERE t.id = ANY(:ids) AND t.deleted_at IS NULL
         """), {"ids": tag_ids}).mappings().all()
@@ -444,6 +450,7 @@ def build_live_context(db: Session, tag_ids: list[int], tz_name: str) -> dict[st
                     quality=st, quality_good=(st is not None and st >= GOOD_ST),
                     age_seconds=r["age_seconds"], source=r["source"],
                     st_reason=r["st_reason"],
+                    device_name=r["device_name"],
                     named_set_id=r["named_set_id"],
                     states=states_by_set.get(r["named_set_id"]),
                 )
@@ -562,6 +569,38 @@ def render_report(
     env.globals["prov_quality"] = prov_quality
     env.globals["prov_age"] = prov_age
     env.globals["prov_origin"] = prov_origin
+
+    # Globals parity with report_formats.render_html so the PDF render has the
+    # same {{ vs(...) }} / {{ header_block() }} / {{ signoff_block() }} helpers
+    # as HTML/preview (they were HTML-only, hence 'vs is undefined' in PDFs).
+    from markupsafe import Markup as _vsMK, escape as _vsesc
+    from app.services.report_formats import render_header_band, render_signoff_band
+    _rep = context.get("report") or {}
+    _so = context.get("signoff")
+    env.globals["header_block"] = lambda: _vsMK(render_header_band(_rep))
+    env.globals["signoff_block"] = lambda: _vsMK(render_signoff_band(_so))
+
+    _tag_lookup = context.get("tag")
+
+    def _vs(value, status=None, dec=None):
+        tv = _tag_lookup(value) if _tag_lookup else None
+        if tv is None:
+            vtxt = "—"
+        elif dec not in (None, ""):
+            try:
+                vtxt = f"{float(tv.value):.{int(dec)}f}"
+            except (TypeError, ValueError):
+                vtxt = tv.display
+        else:
+            vtxt = tv.display
+        out = str(_vsesc(vtxt))
+        if status not in (None, "", 0):
+            ts = _tag_lookup(status) if _tag_lookup else None
+            stxt = ts.display if ts is not None else ""
+            if stxt and stxt != "—":
+                out += " (" + str(_vsesc(stxt)) + ")"
+        return _vsMK(out)
+    env.globals["vs"] = _vs
 
     template = env.from_string(template_html)
     body = template.render(**context)

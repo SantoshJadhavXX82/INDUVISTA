@@ -157,6 +157,23 @@ def upgrade() -> None:
     """)
 
     # ------------------------------------------------------------------
+    # 4b. Ensure the 'Calculations' manual sentinel device exists.
+    #     0034 seeds it from the first channel, but on a FRESH database no
+    #     channel exists when 0034 runs, so it is skipped there. The COMPUTED
+    #     channel created just above is the first channel on a fresh install,
+    #     so host the sentinel here. Idempotent (NOT EXISTS) and a no-op on
+    #     databases that already have the device.
+    # ------------------------------------------------------------------
+    op.execute("""
+        INSERT INTO devices (channel_id, name, protocol, enabled)
+        SELECT c.id, 'Calculations', 'manual', false
+        FROM channels c
+        WHERE NOT EXISTS (SELECT 1 FROM devices WHERE name = 'Calculations')
+        ORDER BY c.id
+        LIMIT 1
+    """)
+
+    # ------------------------------------------------------------------
     # 5. Migrate existing computed devices to the new channel.
     # ------------------------------------------------------------------
     op.execute("""

@@ -16,12 +16,13 @@ import { api } from "@/lib/api";
 import { SectionCard } from "@/components/ui/section-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, type TagLite } from "@/pages/triggers-shared";
+import { type TagLite } from "@/pages/triggers-shared";
 import { TagTreePicker } from "@/components/reports/TagTreePicker";
 
 type Binding = {
   tag_id: number;
   tag_name: string | null;
+  device_name: string | null;
   position: number;
   display_name: string | null;
   data_function: string;
@@ -32,16 +33,14 @@ type Binding = {
 type Row = {
   tag_id: number;
   tag_name: string;
+  device_name: string;
   display_name: string;
   data_function: string;
   quality_rule: string;
   decimals: string; // text; "" => null
 };
 
-const FUNCS = ["latest", "first", "last", "average", "min", "max", "sum", "count", "delta", "availability", "missing_pct"];
-const FUNC_LABELS = ["Latest", "First", "Last", "Average", "Min", "Max", "Total (sum)", "Count", "Delta (last−first)", "Availability %", "Missing %"];
-const QUALITY = ["all", "good_only", "good_uncertain"];
-const QUALITY_LABELS = ["Include all", "Good only", "Good + uncertain"];
+// (live-only: aggregate Function/Quality selectors removed; bindings default latest/all)
 
 export function ReportDataTab({
   defId, allTags, onSaved, onError,
@@ -59,6 +58,15 @@ export function ReportDataTab({
     staleTime: Infinity,
   });
 
+  // Resolve each bound tag's device (same /tags source the tree picker uses)
+  const tagsDevQ = useQuery({
+    queryKey: ["tags-device-map"],
+    queryFn: () => api.get<{ id: number; device_name: string | null }[]>("/tags?limit=1000"),
+    staleTime: 60_000,
+  });
+  const deviceOf = (id: number) =>
+    (tagsDevQ.data ?? []).find((t) => t.id === id)?.device_name ?? "";
+
   const [rows, setRows] = useState<Row[]>([]);
   const seededForRef = useRef<number | null>(null);
   useEffect(() => {
@@ -67,6 +75,7 @@ export function ReportDataTab({
       setRows(bindingsQ.data.map((b) => ({
         tag_id: b.tag_id,
         tag_name: b.tag_name ?? `tag ${b.tag_id}`,
+        device_name: b.device_name ?? "",
         display_name: b.display_name ?? "",
         data_function: b.data_function ?? "latest",
         quality_rule: b.quality_rule ?? "all",
@@ -89,7 +98,7 @@ export function ReportDataTab({
   const removeRow = (i: number) => setRows((s) => s.filter((_, j) => j !== i));
   const addTag = (t: TagLite) => {
     setRows((s) => [...s, {
-      tag_id: t.id, tag_name: t.name, display_name: "",
+      tag_id: t.id, tag_name: t.name, display_name: "", device_name: "",
       data_function: "latest", quality_rule: "all", decimals: "",
     }]);
     setFilter("");
@@ -99,7 +108,7 @@ export function ReportDataTab({
     setRows((s) => {
       const have = new Set(s.map((r) => r.tag_id));
       const adds = tags.filter((t) => !have.has(t.id)).map((t) => ({
-        tag_id: t.id, tag_name: t.name, display_name: "",
+        tag_id: t.id, tag_name: t.name, display_name: "", device_name: "",
         data_function: "latest", quality_rule: "all", decimals: "",
       }));
       return [...s, ...adds];
@@ -127,7 +136,7 @@ export function ReportDataTab({
     onError: (e: any) => onError(e?.detail || "Saving bindings failed."),
   });
 
-  const grid = "minmax(0,1.6fr) minmax(0,1.4fr) minmax(0,1.3fr) 64px minmax(0,1.4fr) 32px";
+  const grid = "minmax(0,1.7fr) minmax(0,1.4fr) 84px minmax(0,1.6fr) 32px";
 
   return (
     <SectionCard
@@ -150,16 +159,15 @@ export function ReportDataTab({
         <div className="rounded-lg overflow-hidden" style={{ border: "0.5px solid var(--card-edge,#ddd)" }}>
           <div className="grid items-center gap-2 px-2.5 py-1.5 text-[11px] font-semibold"
             style={{ gridTemplateColumns: grid, color: "var(--ios-gray-1)", backgroundColor: "var(--bg,#fafafa)" }}>
-            <div>Tag</div><div>Function</div><div>Quality</div><div>Dec</div><div>Display name</div><div></div>
+            <div>Tag</div><div>Device</div><div>Decimals</div><div>Display name</div><div></div>
           </div>
           {rows.map((r, i) => (
             <div key={r.tag_id} className="grid items-center gap-2 px-2.5 py-1.5"
               style={{ gridTemplateColumns: grid, borderTop: "0.5px solid var(--separator,#eee)" }}>
               <div className="text-[12.5px] truncate" title={r.tag_name}>{r.tag_name}</div>
-              <Select value={r.data_function} options={FUNCS} labels={FUNC_LABELS}
-                onChange={(v) => setRow(i, { data_function: v })} />
-              <Select value={r.quality_rule} options={QUALITY} labels={QUALITY_LABELS}
-                onChange={(v) => setRow(i, { quality_rule: v })} />
+              <div className="text-[12px] truncate" style={{ color: "var(--ios-gray-1)" }}
+                title={r.device_name || deviceOf(r.tag_id)}>{r.device_name || deviceOf(r.tag_id) || "—"}</div>
+              {/* live-only: aggregate Function/Quality selectors removed */}
               <Input value={r.decimals} placeholder="—"
                 onChange={(e) => setRow(i, { decimals: e.target.value.replace(/[^0-9]/g, "") })} />
               <Input value={r.display_name} placeholder={r.tag_name}

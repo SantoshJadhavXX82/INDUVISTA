@@ -33,7 +33,7 @@ from __future__ import annotations
 import html
 import re
 from typing import Any
-from app.services.report_charts import render_chart  # TC-3 chart rendering
+from app.services.report_charts import render_chart, render_stats  # TC-3 chart rendering
 
 # simpleeval is the sandboxed evaluator (added to requirements with the render deps)
 try:
@@ -309,6 +309,10 @@ def _compile_block(b: dict, idx: int, q: bool = False, l: bool = False) -> str:
         # The SVG is rendered at context-build time into context["charts"][bid].
         return f'<div class="rpt-chart">{{{{ charts["{bid}"] | safe }}}}</div>'
 
+    if t == "stats":
+        # Stats table precomputed into context["stats"][bid] (render_stats).
+        return f'{{{{ stats["{bid}"] | safe }}}}'
+
     if t == "columns":
         n = int(b.get("count", 2))
         panels = b.get("panels", [])
@@ -410,6 +414,12 @@ _BASE_CSS = """
   .rpt-cols{display:grid;gap:12px;margin:8px 0}
   .rpt-col{border:1px solid #e2e6ea;border-radius:6px;padding:10px}
   .rpt-chart{margin:10px 0;max-width:100%}  .rpt-chart svg{max-width:100%;height:auto}
+  .rpt-stats{font-size:11px}
+  .rpt-stats-title{font-weight:600;margin-bottom:4px}
+  .rpt-stats-tbl{width:100%;border-collapse:collapse}
+  .rpt-stats-tbl th{text-align:left;border-bottom:1px solid #e3e8ef;padding:3px 6px;color:#64748b;font-weight:600}
+  .rpt-stats-tbl td{border-bottom:1px solid #eef2f7;padding:3px 6px}
+  .rpt-stats-tbl .rpt-stats-val{text-align:right;font-variant-numeric:tabular-nums}
   .rpt-stream{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0}
   .rpt-stream td{padding:2px 6px;vertical-align:top}
   .rpt-stream .rpt-stream-head td{text-decoration:underline;text-align:right}
@@ -800,6 +810,7 @@ def build_block_context(blocks: list[dict], tags_list: list, db=None, window=Non
 
     tables: dict[str, Any] = {}
     charts: dict[str, str] = {}
+    stats: dict[str, str] = {}
 
     def walk(bs: list[dict]) -> None:
         for i, b in enumerate(bs or []):
@@ -819,9 +830,11 @@ def build_block_context(blocks: list[dict], tags_list: list, db=None, window=Non
                     tables[bid] = {"rows": safe_rows, "aggregates": {}}
             elif t == "chart":
                 charts[bid] = render_chart(b, tags_list, db, window)
+            elif t == "stats":
+                stats[bid] = render_stats(b, db, window)
             elif t == "columns":
                 for panel in b.get("panels", []):
                     walk(panel)
 
     walk(blocks)
-    return {"tables": tables, "charts": charts}
+    return {"tables": tables, "charts": charts, "stats": stats}

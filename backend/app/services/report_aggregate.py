@@ -197,10 +197,11 @@ def build_period_context(db: Session, bindings: Sequence[Mapping[str, Any]],
     meta: dict[int, Mapping[str, Any]] = {}
     if tag_ids:
         rows = db.execute(text("""
-            SELECT t.id, t.name, t.description, t.named_set_id,
+            SELECT t.id, t.name, t.description, t.named_set_id, d.name AS device_name,
                    COALESCE(eu.code, t.engineering_unit) AS unit
             FROM tags t
             LEFT JOIN engineering_units eu ON eu.id = t.engineering_unit_id
+            LEFT JOIN devices d ON d.id = t.device_id
             WHERE t.id = ANY(:ids) AND t.deleted_at IS NULL
         """), {"ids": tag_ids}).mappings().all()
         meta = {r["id"]: r for r in rows}
@@ -235,6 +236,7 @@ def build_period_context(db: Session, bindings: Sequence[Mapping[str, Any]],
             age_seconds=None, description=(m["description"] if m else None),
             named_set_id=(m["named_set_id"] if m else None),
             states=(states_by_set.get(m["named_set_id"]) if m else None),
+            device_name=(m["device_name"] if m else None),
         )
         ordered.append(ctx)
         tags_by_key[ctx.name] = ctx

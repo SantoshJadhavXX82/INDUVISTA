@@ -167,6 +167,7 @@ def _render_one(fmt: str, dm, ctx: dict[str, Any], default_style: dict | None = 
         _bc = build_block_context(blocks, ctx.get("tags_list") or [])
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
+        ctx["stats"] = _bc["stats"]
     if fmt == "pdf":
         if not tmpl.strip():
             raise ValueError("pdf requested but report has no template")

@@ -799,6 +799,7 @@ def render_definition(
         _bc = build_block_context(blocks, ctx.get("tags_list") or [], db=db, window=window)
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
+        ctx["stats"] = _bc["stats"]
 
     out_bytes: bytes = b""
     media = "application/pdf"
@@ -915,6 +916,7 @@ def preview_definition(def_id: int, body: PreviewBody,
         _bc = build_block_context(blocks, ctx.get("tags_list") or [], db=db, window=_window)
         ctx["tables"] = _bc["tables"]
         ctx["charts"] = _bc["charts"]
+        ctx["stats"] = _bc["stats"]
     else:
         template_str = body.template_html or ""
         if not template_str.strip():
@@ -1044,12 +1046,13 @@ class BindingsBody(BaseModel):
 def get_bindings(def_id: int, db: Annotated[Session, Depends(get_session)]):
     """Full per-tag binding config for the report, in display order."""
     rows = db.execute(text("""
-        SELECT rt.tag_id, t.name AS tag_name, rt.position, rt.alias, rt.display_name,
+        SELECT rt.tag_id, t.name AS tag_name, d.name AS device_name, rt.position, rt.alias, rt.display_name,
                rt.unit_id, rt.data_function, rt.quality_rule, rt.missing_action,
                rt.bad_action, rt.decimal_places, rt.value_format, rt.low_limit,
                rt.high_limit, rt.group_name, rt.required
         FROM report_tags rt
         LEFT JOIN tags t ON t.id = rt.tag_id
+        LEFT JOIN devices d ON d.id = t.device_id
         WHERE rt.report_id = :r
         ORDER BY rt.position, rt.tag_id
     """), {"r": def_id}).mappings().all()

@@ -16,7 +16,7 @@ import { useState } from "react";
 import {
   Plus, Trash2, ChevronUp, ChevronDown, Copy, ChevronRight, GripVertical,
   Heading, PanelTop, PanelBottom, Palette, Type, Table, Gauge, Table2,
-  BarChart3, Columns, Minus, SeparatorHorizontal, Code, Square,
+  BarChart3, Columns, Minus, SeparatorHorizontal, Code, Square, Sigma,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,6 +38,7 @@ const PALETTE: { type: string; label: string; hint: string }[] = [
   { type: "tag_table", label: "Tag table", hint: "One row per bound tag + calc columns" },
   { type: "stream_table", label: "Stream table", hint: "Compare devices side-by-side (FC A / FC B)" },
   { type: "kpi_row", label: "KPI row", hint: "Big single-value tiles" },
+  { type: "stats", label: "Stats", hint: "Live / min / max / avg / std-dev per tag" },
   { type: "chart", label: "Chart", hint: "Line, bar, pie or area of the report's tags" },
   { type: "spacer", label: "Spacer", hint: "Vertical gap" },
   { type: "page_break", label: "Page break", hint: "Start a new page" },
@@ -67,6 +68,7 @@ function defaults(type: string): Block {
       { key: "unit", label: "Unit", kind: "data" },
     ] as Column[] };
     case "kpi_row": return { id, type, items: [] };
+    case "stats": return { id, type, title: "", window_minutes: 60, items: [] };
     case "stream_table": return { id, type, title: "", columns: [
       { label: "FC A", device_id: null }, { label: "FC B", device_id: null },
     ], sections: [{ name: "SECTION", rows: [] }] };
@@ -86,6 +88,7 @@ const BLOCK_ICON: Record<string, { Icon: any; color: string }> = {
   text: { Icon: Type, color: "#64748B" },
   tag_table: { Icon: Table, color: "#16A34A" },
   kpi_row: { Icon: Gauge, color: "#EA580C" },
+  stats: { Icon: Sigma, color: "#0EA5E9" },
   stream_table: { Icon: Table2, color: "#4F46E5" },
   chart: { Icon: BarChart3, color: "#DB2777" },
   columns: { Icon: Columns, color: "#0D9488" },
@@ -115,6 +118,7 @@ function summarize(b: any): string {
     case "stream_table": return `${(b.columns || []).length} cols · ${(b.sections || []).length} sections`;
     case "tag_table": return `${(b.columns || []).length} columns`;
     case "kpi_row": return `${(b.items || []).length} tiles`;
+    case "stats": return `${(b.items || []).length} stats`;
     case "spacer": return `${b.height_mm ?? ""}mm`;
     default: return b.type;
   }
@@ -373,6 +377,9 @@ function BlockBody({
 
   if (block.type === "kpi_row") {
     return <KpiItemsEditor items={block.items ?? []} onChange={(items) => onPatch({ items })} allTags={allTags} />;
+  }
+  if (block.type === "stats") {
+    return <StatsBlockEditor block={block} onPatch={onPatch} allTags={allTags} />;
   }
 
   if (block.type === "chart") {
@@ -772,6 +779,74 @@ function ColumnsEditor({ columns, onChange }: { columns: Column[]; onChange: (c:
         <Button variant="outline" size="sm" onClick={addData}><Plus className="h-3.5 w-3.5" /><span className="ml-1">Data column</span></Button>
         <Button variant="outline" size="sm" onClick={addFormula}><Plus className="h-3.5 w-3.5" /><span className="ml-1">Formula column</span></Button>
       </div>
+    </div>
+  );
+}
+
+function StatsBlockEditor({
+  block, onPatch, allTags,
+}: { block: any; onPatch: (p: any) => void; allTags: TagLite[] }) {
+  const items: any[] = block.items ?? [];
+  const [pick, setPick] = useState<number | null>(null);
+  const nameOf = (id: any) => allTags.find((t) => t.id === id)?.name;
+  const setItems = (next: any[]) => onPatch({ items: next });
+  const update = (i: number, patch: any) =>
+    setItems(items.map((it, j) => (j === i ? { ...it, ...patch } : it)));
+  const remove = (i: number) => setItems(items.filter((_, j) => j !== i));
+  const add = () =>
+    setItems([...items, { tag_id: undefined, stat: "live", label: "", decimals: undefined }]);
+
+  return (
+    <div className="space-y-2">
+      <TagTreePicker single open={pick !== null} alreadyBound={new Set()}
+        title="Select tag"
+        onClose={() => setPick(null)}
+        onConfirm={(tags) => { if (pick !== null && tags[0]) update(pick, { tag_id: tags[0].id }); setPick(null); }} />
+      <div className="grid gap-2" style={{ gridTemplateColumns: "minmax(0,1fr) 120px" }}>
+        <Field label="Title (optional)">
+          <Input value={block.title ?? ""} placeholder="Process statistics"
+            onChange={(e) => onPatch({ title: e.target.value })} />
+        </Field>
+        <Field label="Window (minutes)">
+          <Input type="number" value={block.window_minutes != null ? String(block.window_minutes) : ""} placeholder="60"
+            onChange={(e) => onPatch({ window_minutes: e.target.value !== "" ? Number(e.target.value) : undefined })} />
+        </Field>
+      </div>
+      {items.length === 0 && (
+        <div className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>No tags yet.</div>
+      )}
+      {items.map((it, i) => (
+        <div key={i} className="rounded-md p-2 grid gap-2 items-end"
+          style={{ border: "0.5px solid var(--separator)", gridTemplateColumns: "1.5fr 1.1fr 1.1fr 0.6fr auto" }}>
+          <Field label="Tag">
+            <button type="button" onClick={() => setPick(i)}
+              className="w-full text-left text-[12px] px-2 py-1 rounded-md truncate"
+              style={{ border: "0.5px solid var(--separator)", background: "var(--bg-elevated,#fff)", color: "var(--text-primary)" }}>
+              {nameOf(it.tag_id) ?? "Choose tag\u2026"}
+            </button>
+          </Field>
+          <Field label="Statistic">
+            <Select value={it.stat ?? "live"}
+              options={["live", "min", "max", "average", "std"]}
+              labels={["Live", "Min", "Max", "Average", "Std Dev"]}
+              onChange={(v) => update(i, { stat: v })} />
+          </Field>
+          <Field label="Label">
+            <Input value={it.label ?? ""} placeholder={nameOf(it.tag_id) ?? "auto"}
+              onChange={(e) => update(i, { label: e.target.value })} />
+          </Field>
+          <Field label="Dec">
+            <Input type="number" value={it.decimals != null ? String(it.decimals) : ""} placeholder="auto"
+              onChange={(e) => update(i, { decimals: e.target.value !== "" ? Number(e.target.value) : undefined })} />
+          </Field>
+          <div className="flex items-end pb-1">
+            <IconBtn title="Remove" onClick={() => remove(i)} danger><Trash2 className="h-3.5 w-3.5" /></IconBtn>
+          </div>
+        </div>
+      ))}
+      <Button variant="outline" size="sm" onClick={add} disabled={allTags.length === 0}>
+        <Plus className="h-3.5 w-3.5" /><span className="ml-1">Add tag</span>
+      </Button>
     </div>
   );
 }

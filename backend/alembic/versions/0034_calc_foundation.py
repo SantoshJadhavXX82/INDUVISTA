@@ -96,14 +96,13 @@ def upgrade() -> None:
     # channel since devices.channel_id is NOT NULL FK to channels.
     op.execute("""
         INSERT INTO devices (channel_id, name, protocol, enabled)
-        SELECT
-            (SELECT id FROM channels ORDER BY id LIMIT 1),
-            'Calculations',
-            'manual',
-            false
+        SELECT c.id, 'Calculations', 'manual', false
+        FROM channels c
         WHERE NOT EXISTS (
             SELECT 1 FROM devices WHERE name = 'Calculations'
         )
+        ORDER BY c.id
+        LIMIT 1
     """)
 
     # ---- 3. calc_definitions table ---------------------------------------

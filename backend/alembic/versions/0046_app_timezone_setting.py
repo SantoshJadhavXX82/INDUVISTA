@@ -27,6 +27,20 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Recreate the system_settings key/value store on a FRESH database.
+    # This table originated in an early phase (pre-squash); after migrations
+    # 0012-0023 were squashed, its CREATE was lost from alembic history, so a
+    # clean install never gets it and the seed below fails with
+    # "relation system_settings does not exist". IF NOT EXISTS makes this a
+    # no-op on existing deployments that already have the table.
+    op.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key        TEXT PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+
     # Idempotent seed: only inserts if the row doesn't exist. Existing
     # deployments that already have an app.timezone row (e.g. from a
     # hotfix) keep their current value.

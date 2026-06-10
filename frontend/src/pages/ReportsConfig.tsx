@@ -19,7 +19,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Plus, Trash2, Save, FileDown, Clock, FolderOutput, Tags as TagsIcon,
   Loader2, FileText, CheckCircle2, AlertCircle, LayoutGrid, Settings as SettingsIcon, Settings2, Boxes,
-  Calendar, History, Palette, X,
+  History, Palette, X,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { TOKEN_KEY } from "@/lib/auth";
@@ -36,7 +36,6 @@ import {
 import ReportTriggers from "@/pages/ReportTriggers";
 import ReportDestinations from "@/pages/ReportDestinations";
 import { BatchControl } from "@/components/reports/BatchControl";
-import { ReportPeriodTab } from "@/components/reports/ReportPeriodTab";
 import { ReportDataTab } from "@/components/reports/ReportDataTab";
 import { ReportRevisionsTab } from "@/components/reports/ReportRevisionsTab";
 import { ReportBlocksEditor, ReportStyleEditor, type Block } from "@/components/reports/ReportBlocksEditor";
@@ -476,7 +475,6 @@ function Editor({
   const linkedDests = new Set(def.destination_ids ?? []);
   const TABS: { id: Tab; label: string; icon: ReactNode }[] = [
     { id: "content", label: "Content", icon: <LayoutGrid className="h-3.5 w-3.5" /> },
-    { id: "period", label: "Period", icon: <Calendar className="h-3.5 w-3.5" /> },
     { id: "data", label: "Data", icon: <TagsIcon className="h-3.5 w-3.5" /> },
     { id: "triggers", label: "Triggers", icon: <Clock className="h-3.5 w-3.5" /> },
     { id: "destinations", label: "Destinations", icon: <FolderOutput className="h-3.5 w-3.5" /> },
@@ -660,11 +658,6 @@ function Editor({
         </div>
         {lineage && <LineageDrawer prov={lineage} onClose={() => setLineage(null)} />}
       </SectionCard>
-      )}
-
-      {/* ---- PERIOD tab (data window) ---- */}
-      {tab === "period" && (
-        <ReportPeriodTab defId={def.id} onSaved={onSaved} onError={onError} />
       )}
 
       {/* ---- DATA tab (tag bindings) ---- */}
