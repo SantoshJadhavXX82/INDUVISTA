@@ -158,6 +158,8 @@ app.include_router(_alarms_import.router)
 from app.api import alarms_export as _alarms_export, calc_output_tags, calc_current_values, audit_log
 from app.api import calc_schemas
 from app.api import calc_input_status
+from app.api import calc_flow
+from app.api import calc_rename
 from app.api import computed_devices
 from app.api import computed_tags
 from app.api.preview import router as preview_router
@@ -165,6 +167,8 @@ from app.utils.audit import ensure_audit_schema
 app.include_router(_alarms_export.router)
 app.include_router(calc_schemas.router)
 app.include_router(calc_input_status.router)
+app.include_router(calc_flow.router)
+app.include_router(calc_rename.router)
 from app.api import opc_sources as _opc_sources
 app.include_router(_opc_sources.router)
 app.include_router(calc_output_tags.router)

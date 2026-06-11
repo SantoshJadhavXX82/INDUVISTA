@@ -52,6 +52,93 @@ function filterTags(tags: TagListItem[], filter?: TagFilter): TagListItem[] {
   });
 }
 
+/** Group tags by device for hierarchical pickers. Devices A-Z,
+ *  tags A-Z within each device. */
+function groupByDevice(tags: TagListItem[]): [string, TagListItem[]][] {
+  const map = new Map<string, TagListItem[]>();
+  for (const t of tags) {
+    const dev = t.device_name ?? `Device #${t.device_id}`;
+    if (!map.has(dev)) map.set(dev, []);
+    map.get(dev)!.push(t);
+  }
+  return Array.from(map.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([dev, list]) =>
+      [dev, [...list].sort((a, b) => a.name.localeCompare(b.name))] as [string, TagListItem[]]
+    );
+}
+
+/** Cascading Device -> Tag picker. Pick the device first; the tag
+ *  list then shows ONLY that device's tags. value 0/absent =
+ *  unselected; onChange(null) = cleared. */
+function DeviceTagPicker({
+  tags, value, onChange, isOptionDisabled, compact = false,
+}: {
+  tags: TagListItem[];
+  value: number;
+  onChange: (tagId: number | null) => void;
+  isOptionDisabled?: (t: TagListItem) => boolean;
+  compact?: boolean;
+}) {
+  const groups = useMemo(() => groupByDevice(tags), [tags]);
+  const byId = useMemo(() => new Map(tags.map((t) => [t.id, t])), [tags]);
+  const selectedTag = value > 0 ? byId.get(value) : undefined;
+  const [deviceChoice, setDeviceChoice] = useState<string>("");
+  // The device follows the bound tag when one is selected; otherwise
+  // it's the user's explicit choice.
+  const device = selectedTag
+    ? (selectedTag.device_name ?? `Device #${selectedTag.device_id}`)
+    : deviceChoice;
+  const deviceTags = groups.find(([d]) => d === device)?.[1] ?? [];
+  const selCls = compact
+    ? "h-7 text-xs bg-card border border-border rounded px-2"
+    : inputCls;
+  return (
+    <div className="flex flex-col gap-1 flex-1 min-w-0">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="text-[9px] uppercase tracking-wider text-muted-foreground w-11 text-right flex-shrink-0">
+          Device
+        </span>
+        <select
+          className={`${selCls} flex-1 min-w-0`}
+          value={device}
+          onChange={(e) => {
+            setDeviceChoice(e.target.value);
+            if (value > 0) onChange(null);
+          }}
+          title="Device"
+        >
+          <option value="">- device -</option>
+          {groups.map(([dev, list]) => (
+            <option key={dev} value={dev}>{dev} ({list.length})</option>
+          ))}
+        </select>
+      </div>
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className="text-[9px] uppercase tracking-wider text-muted-foreground w-11 text-right flex-shrink-0">
+          Tag
+        </span>
+        <select
+          className={`${selCls} flex-1 min-w-0`}
+          value={value > 0 ? String(value) : ""}
+          onChange={(e) =>
+            onChange(e.target.value === "" ? null : Number(e.target.value))
+          }
+          disabled={!device}
+          title={device ? "Tag" : "Pick a device first"}
+        >
+          <option value="">{device ? "- select tag -" : "- pick device first -"}</option>
+          {deviceTags.map((t) => (
+            <option key={t.id} value={t.id} disabled={isOptionDisabled?.(t) ?? false}>
+              {t.name} ({t.data_type}, #{t.id})
+            </option>
+          ))}
+        </select>
+      </div>
+    </div>
+  );
+}
+
 function fieldLabel(field: FieldDef) {
   return (
     <span className={labelCls}>
@@ -95,26 +182,18 @@ export function TagRefField({ field, blockConfig, onChange }: FieldProps) {
   return (
     <div>
       {fieldLabel(field)}
-      <select
-        className={inputCls}
-        value={currentTagId === "" ? "" : String(currentTagId)}
-        onChange={(e) => {
-          const v = e.target.value;
-          if (v === "") {
+      <DeviceTagPicker
+        tags={available}
+        value={currentTagId === "" ? 0 : Number(currentTagId)}
+        onChange={(id) => {
+          if (id == null) {
             const { [field.key]: _removed, ...rest } = blockConfig;
             onChange(rest);
           } else {
-            onChange({ ...blockConfig, [field.key]: Number(v) });
+            onChange({ ...blockConfig, [field.key]: id });
           }
         }}
-      >
-        <option value="">— select tag —</option>
-        {available.map((t) => (
-          <option key={t.id} value={t.id}>
-            {t.name} ({t.data_type}, #{t.id})
-          </option>
-        ))}
-      </select>
+      />
       {tags.isLoading && <p className="text-[10px] text-muted-foreground">Loading tags…</p>}
       {fieldHelp(field)}
     </div>
@@ -174,18 +253,11 @@ export function TagRefListField({ field, blockConfig, onChange }: FieldProps) {
         {tagIds.map((tid, i) => (
           <div key={i} className="flex items-center gap-1">
             <span className="text-[10px] text-muted-foreground w-5 text-right">{i + 1}.</span>
-            <select
-              className={inputCls}
-              value={String(tid)}
-              onChange={(e) => updateRow(i, Number(e.target.value))}
-            >
-              <option value="0">— select tag —</option>
-              {available.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name} ({t.data_type}, #{t.id})
-                </option>
-              ))}
-            </select>
+            <DeviceTagPicker
+              tags={available}
+              value={tid}
+              onChange={(id) => updateRow(i, id ?? 0)}
+            />
             <button
               type="button"
               onClick={() => removeRow(i)}
@@ -720,25 +792,13 @@ export function TagOrConstantListField({ field, blockConfig, onChange }: FieldPr
                   <span className="text-[10px] uppercase tracking-wider text-muted-foreground w-9">
                     Tag:
                   </span>
-                  <select
-                    className="h-7 text-xs bg-card border border-border rounded px-2 flex-1"
-                    value={item.tag === 0 ? "" : String(item.tag)}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      updateRow(idx, { tag: v === "" ? 0 : Number(v) });
-                    }}
-                  >
-                    <option value="">— select tag —</option>
-                    {available.map((t) => (
-                      <option
-                        key={t.id}
-                        value={t.id}
-                        disabled={t.id !== item.tag && pickedTagIds.includes(t.id)}
-                      >
-                        {t.name} ({t.data_type}, #{t.id})
-                      </option>
-                    ))}
-                  </select>
+                  <DeviceTagPicker
+                    tags={available}
+                    value={item.tag}
+                    onChange={(id) => updateRow(idx, { tag: id ?? 0 })}
+                    isOptionDisabled={(t) => t.id !== item.tag && pickedTagIds.includes(t.id)}
+                    compact
+                  />
                 </>
               ) : (
                 <>

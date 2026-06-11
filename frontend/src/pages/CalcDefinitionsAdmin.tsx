@@ -12,12 +12,12 @@
  * Header includes a "Manage Computed Devices" button that opens
  * ComputedDevicesModal for device CRUD.
  */
-import { useMemo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Calculator, RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
   CheckCircle2, XCircle, Clock, Zap, Power, Plus, Pencil, Trash2, Loader2,
-  Settings, FolderOpen, Folder, ArrowRight,
+  Settings, FolderOpen, Folder, ArrowRight, Copy, Workflow,
 } from "lucide-react";
 
 import { Card, CardContent } from "@/components/ui/card";
@@ -42,6 +42,7 @@ import type {
 import { CreateCalcModal } from "@/components/calc/CreateCalcModal";
 import { InputStatusPanel } from "@/components/calc/InputStatusPanel";
 import { ComputedDevicesModal } from "@/components/calc/ComputedDevicesModal";
+import { CalcFlowModal } from "@/components/calc/CalcFlowModal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
 
@@ -112,6 +113,8 @@ export default function CalcDefinitionsAdmin() {
   const [modalOpen, setModalOpen] = useState(false);
   const [devicesModalOpen, setDevicesModalOpen] = useState(false);
   const [editingCalc, setEditingCalc] = useState<CalcDefinition | null>(null);
+  const [duplicatingCalc, setDuplicatingCalc] = useState<CalcDefinition | null>(null);
+  const [flowCalc, setFlowCalc] = useState<CalcDefinition | null>(null);
   const [initialDeviceId, setInitialDeviceId] = useState<number | null>(null);
 
   const [pendingToggle, setPendingToggle] = useState<CalcDefinition | null>(null);
@@ -149,18 +152,28 @@ export default function CalcDefinitionsAdmin() {
 
   function handleEdit(def: CalcDefinition) {
     setEditingCalc(def);
+    setDuplicatingCalc(null);
+    setInitialDeviceId(null);
+    setModalOpen(true);
+  }
+
+  function handleDuplicate(def: CalcDefinition) {
+    setEditingCalc(null);
+    setDuplicatingCalc(def);
     setInitialDeviceId(null);
     setModalOpen(true);
   }
 
   function handleCreateGlobal() {
     setEditingCalc(null);
+    setDuplicatingCalc(null);
     setInitialDeviceId(null);
     setModalOpen(true);
   }
 
   function handleCreateInDevice(deviceId: number) {
     setEditingCalc(null);
+    setDuplicatingCalc(null);
     setInitialDeviceId(deviceId);
     setModalOpen(true);
   }
@@ -168,6 +181,7 @@ export default function CalcDefinitionsAdmin() {
   function handleModalClose() {
     setModalOpen(false);
     setEditingCalc(null);
+    setDuplicatingCalc(null);
     setInitialDeviceId(null);
   }
 
@@ -364,6 +378,8 @@ export default function CalcDefinitionsAdmin() {
                   onToggleExpanded={setExpandedId}
                   onCreateHere={() => handleCreateInDevice(device.id)}
                   onEdit={handleEdit}
+                  onDuplicate={handleDuplicate}
+                  onFlow={(d) => setFlowCalc(d)}
                   onToggleEnabled={(d) => setPendingToggle(d)}
                   onDelete={(d) => setPendingDelete(d)}
                   toggling={toggleMutation.isPending ? toggleMutation.variables?.id : null}
@@ -402,12 +418,15 @@ export default function CalcDefinitionsAdmin() {
         open={modalOpen}
         onClose={handleModalClose}
         existingCalc={editingCalc}
+        duplicateFrom={duplicatingCalc}
         initialDeviceId={initialDeviceId}
       />
       <ComputedDevicesModal
         open={devicesModalOpen}
         onClose={() => setDevicesModalOpen(false)}
       />
+
+      <CalcFlowModal calc={flowCalc} onClose={() => setFlowCalc(null)} />
 
       <ConfirmDialog
         open={!!pendingToggle}
@@ -498,6 +517,8 @@ interface DeviceGroupProps {
   onToggleExpanded: (id: number | null) => void;
   onCreateHere: () => void;
   onEdit: (d: CalcDefinition) => void;
+  onDuplicate: (d: CalcDefinition) => void;
+  onFlow: (d: CalcDefinition) => void;
   onToggleEnabled: (d: CalcDefinition) => void;
   onDelete: (d: CalcDefinition) => void;
   toggling: number | null | undefined;
@@ -507,7 +528,7 @@ interface DeviceGroupProps {
 function DeviceGroup({
   device, defs, collapsed, onToggleCollapse,
   typeByCode, valueLookup, expandedId, onToggleExpanded,
-  onCreateHere, onEdit, onToggleEnabled, onDelete,
+  onCreateHere, onEdit, onDuplicate, onFlow, onToggleEnabled, onDelete,
   toggling, deleting,
 }: DeviceGroupProps) {
   return (
@@ -586,6 +607,8 @@ function DeviceGroup({
                     }
                     onToggleEnabled={() => onToggleEnabled(d)}
                     onEdit={() => onEdit(d)}
+                    onDuplicate={() => onDuplicate(d)}
+                    onFlow={() => onFlow(d)}
                     onDelete={() => onDelete(d)}
                     toggling={toggling === d.id}
                     deleting={deleting === d.id}
@@ -605,9 +628,31 @@ function DeviceGroup({
 // Per-tag row + detail panel
 // ---------------------------------------------------------------------------
 
-function CalcDefRow({
+/** Perf: on the 2s value poll, re-render a row ONLY when its own
+ *  data changed. Function props are intentionally ignored - the
+ *  parent recreates them each render but their behavior is stable
+ *  (rows whose expanded/toggling state changes re-render via the
+ *  compared props and get fresh closures). Rows still refresh on
+ *  every definitions refetch (new def objects every 5s). */
+function sameVal(a?: CurrentValueRecord, b?: CurrentValueRecord): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.value === b.value && a.quality === b.quality && a.ts === b.ts;
+}
+
+const CalcDefRow = memo(CalcDefRowInner, (prev, next) =>
+  prev.def === next.def &&
+  prev.type === next.type &&
+  prev.expanded === next.expanded &&
+  prev.toggling === next.toggling &&
+  prev.deleting === next.deleting &&
+  sameVal(prev.currentValue, next.currentValue) &&
+  sameVal(prev.externalValue, next.externalValue),
+);
+
+function CalcDefRowInner({
   def, type, expanded, currentValue, externalValue, onToggle,
-  onToggleEnabled, onEdit, onDelete, toggling, deleting,
+  onToggleEnabled, onEdit, onDuplicate, onFlow, onDelete, toggling, deleting,
 }: {
   def: CalcDefinition;
   type: BlockType | undefined;
@@ -617,6 +662,8 @@ function CalcDefRow({
   onToggle: () => void;
   onToggleEnabled: () => void;
   onEdit: () => void;
+  onDuplicate: () => void;
+  onFlow: () => void;
   onDelete: () => void;
   toggling: boolean;
   deleting: boolean;
@@ -734,6 +781,24 @@ function CalcDefRow({
             </button>
             <button
               type="button"
+              onClick={(e) => { e.stopPropagation(); onFlow(); }}
+              title="Flow diagram"
+              className="h-6 w-6 inline-flex items-center justify-center rounded
+                         hover:bg-secondary text-muted-foreground hover:text-foreground"
+            >
+              <Workflow className="h-3 w-3" />
+            </button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onDuplicate(); }}
+              title="Duplicate"
+              className="h-6 w-6 inline-flex items-center justify-center rounded
+                         hover:bg-secondary text-muted-foreground hover:text-foreground"
+            >
+              <Copy className="h-3 w-3" />
+            </button>
+            <button
+              type="button"
               onClick={(e) => { e.stopPropagation(); onEdit(); }}
               title="Edit"
               className="h-6 w-6 inline-flex items-center justify-center rounded
@@ -798,7 +863,7 @@ function CalcDefRow({
                 )}
                 <table className="text-xs">
                   <tbody>
-                    <tr><td className="pr-3 text-muted-foreground">Last status</td><td>{def.last_status ?? "pending"}</td></tr>
+                    <tr><td className="pr-3 text-muted-foreground">Last status / Run</td><td>{def.last_status ?? "pending"}</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Last duration</td><td className="tabular-nums">{def.last_duration_ms != null ? `${def.last_duration_ms.toFixed(3)} ms` : "—"}</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Tag id</td><td className="tabular-nums">{def.id}</td></tr>
                     <tr><td className="pr-3 text-muted-foreground">Device</td><td className="text-[10px]">{def.device_name} (#{def.device_id})</td></tr>
@@ -827,7 +892,7 @@ function CalcDefRow({
                       <td className="pr-3 text-muted-foreground">Internal value</td>
                       <td className="tabular-nums font-mono text-[10px]">
                         {currentValue?.value != null
-                          ? currentValue.value.toString()
+                          ? formatFloat(currentValue.value)
                           : <span className="text-muted-foreground">—</span>}
                         {currentValue?.ts && (
                           <span className="ml-2 text-[10px] text-muted-foreground">
@@ -841,7 +906,7 @@ function CalcDefRow({
                         <td className="pr-3 text-muted-foreground">External value</td>
                         <td className="tabular-nums font-mono text-[10px]">
                           {externalValue?.value != null
-                            ? externalValue.value.toString()
+                            ? formatFloat(externalValue.value)
                             : <span className="text-muted-foreground">—</span>}
                           {externalValue?.ts && (
                             <span className="ml-2 text-[10px] text-muted-foreground">

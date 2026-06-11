@@ -17,6 +17,8 @@ export interface TagListItem {
   name: string;
   data_type: string;
   device_id: number;
+  /** Provided by /api/tags; used to group pickers by device. */
+  device_name?: string;
 }
 
 

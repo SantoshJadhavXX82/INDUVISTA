@@ -22,6 +22,7 @@ import {
   CALC_DEFINITIONS_QUERY_KEY,
 } from "@/lib/useCalcDefinitions";
 import { CalcBlockForm } from "./CalcBlockForm";
+import { CalcFlowPreview } from "./CalcFlowPreview";
 import { ComputedDevicesModal } from "./ComputedDevicesModal";
 import type { BlockConfigDraft } from "@/types/calcBlockSchemas";
 import type { CalcDefinition } from "@/types/calcDefinitions";
@@ -34,6 +35,8 @@ interface CreateCalcModalProps {
   existingCalc?: CalcDefinition | null;
   /** Pre-select this device when opening in create mode. */
   initialDeviceId?: number | null;
+  /** Duplicate mode: prefill from this calc but CREATE a new one. */
+  duplicateFrom?: CalcDefinition | null;
 }
 
 
@@ -59,7 +62,7 @@ type OutputMode = "internal" | "external";
 
 
 export function CreateCalcModal({
-  open, onClose, existingCalc, initialDeviceId,
+  open, onClose, existingCalc, initialDeviceId, duplicateFrom,
 }: CreateCalcModalProps) {
   const isEditMode = !!existingCalc;
   const types = useBlockTypes();
@@ -111,13 +114,29 @@ export function CreateCalcModal({
         setOutputTagId("");
       }
       setSubmitError(null);
+    } else if (duplicateFrom) {
+      // Duplicate mode: prefill from the source calc; submit stays
+      // in CREATE mode (isEditMode is false).
+      setDeviceId(duplicateFrom.device_id);
+      setTagName(`${duplicateFrom.name}_copy`);
+      setDataType(duplicateFrom.data_type);
+      setDescription(duplicateFrom.description ?? "");
+      setBlockCode(duplicateFrom.block_type);
+      setBlockConfig({ ...duplicateFrom.block_config });
+      setRateMs(duplicateFrom.execution_rate_ms);
+      setEnabled(duplicateFrom.enabled);
+      // External targets are exclusive to one calc - duplicates
+      // start internal; re-route afterwards if needed.
+      setOutputMode("internal");
+      setOutputTagId("");
+      setSubmitError(null);
     } else {
       reset();
       if (initialDeviceId != null) {
         setDeviceId(initialDeviceId);
       }
     }
-  }, [open, existingCalc, initialDeviceId]);
+  }, [open, existingCalc, duplicateFrom, initialDeviceId]);
 
   function reset() {
     setDeviceId("");
@@ -164,6 +183,24 @@ export function CreateCalcModal({
       const output_tag_id = resolveOutputTagId();
 
       if (isEditMode && existingCalc) {
+        // Rename first when the tag name changed. Safe: references
+        // are by tag ID, so other blocks follow automatically.
+        const newName = tagName.trim();
+        if (newName && newName !== existingCalc.name) {
+          const rres = await fetch(`/api/computed-tags/${existingCalc.id}/rename`, {
+            method: "POST",
+            headers: authHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify({ name: newName }),
+          });
+          if (!rres.ok) {
+            let d = "";
+            try {
+              const b = await rres.json();
+              d = typeof b === "string" ? b : (b.detail ?? JSON.stringify(b));
+            } catch { d = await rres.text(); }
+            throw new Error(`Rename failed (HTTP ${rres.status}): ${d || "(no body)"}`);
+          }
+        }
         // PATCH only what's editable. Include output_tag_id always
         // (so switching from external back to internal works - we
         // explicitly send null). Include data_type only when changed
@@ -228,6 +265,7 @@ export function CreateCalcModal({
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: CALC_DEFINITIONS_QUERY_KEY });
       qc.invalidateQueries({ queryKey: ["computed-devices"] });
+      qc.invalidateQueries({ queryKey: ["tags-list"] });
       reset();
       onClose();
     },
@@ -349,8 +387,8 @@ export function CreateCalcModal({
                   <div className="flex items-center justify-between mb-0.5">
                     <label className="text-[11px] uppercase tracking-wider text-muted-foreground">
                       Computed Device <span className="text-destructive">*</span>
-                      {isEditMode && (
-                        <span className="ml-2 normal-case tracking-normal">(locked)</span>
+                      {isEditMode && existingCalc && tagName.trim() !== existingCalc.name && (
+                        <span className="ml-2 normal-case tracking-normal text-sky-700">· renaming</span>
                       )}
                     </label>
                     {!isEditMode && (
@@ -395,18 +433,20 @@ export function CreateCalcModal({
                         <span className="ml-2 normal-case tracking-normal">(locked)</span>
                       )}
                     </label>
-                    {isEditMode ? (
-                      <div className="text-xs px-2 py-1.5 bg-card border border-border rounded font-mono">
-                        {existingCalc?.name}
-                      </div>
-                    ) : (
-                      <input
-                        type="text"
-                        className="h-7 text-xs bg-card border border-border rounded px-2 w-full font-mono"
-                        value={tagName}
-                        onChange={(e) => setTagName(e.target.value)}
-                        placeholder="e.g. SUM_FlowRates_Hourly"
-                      />
+                    <input
+                      type="text"
+                      className="h-7 text-xs bg-card border border-border rounded px-2 w-full font-mono"
+                      value={tagName}
+                      onChange={(e) => setTagName(e.target.value)}
+                      placeholder="e.g. SUM_FlowRates_Hourly"
+                    />
+                    {isEditMode && existingCalc && tagName.trim() !== existingCalc.name && tagName.trim() !== "" && (
+                      <p className="mt-1 text-[10px] text-sky-800 bg-sky-50
+                                    border border-sky-300 rounded px-1.5 py-1 leading-snug">
+                        Will rename “{existingCalc.name}” → “{tagName.trim()}”. Safe:
+                        other blocks reference this tag by ID, so every reference
+                        updates automatically.
+                      </p>
                     )}
                   </div>
                   <div>
@@ -496,6 +536,19 @@ export function CreateCalcModal({
                       isEditMode={isEditMode}
                     />
                   </div>
+                )}
+
+                {/* 5b. Live data-flow preview (#6) */}
+                {blockCode && (
+                  <CalcFlowPreview
+                    blockCode={blockCode}
+                    blockConfig={blockConfig as Record<string, unknown>}
+                    outputLabel={
+                      outputMode === "external" && selectedOutputCandidate
+                        ? `${selectedOutputCandidate.device_name} / ${selectedOutputCandidate.name}`
+                        : (tagName || "(this tag)")
+                    }
+                  />
                 )}
 
                 {/* 6. Rate + enabled */}
