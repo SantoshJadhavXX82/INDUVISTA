@@ -40,6 +40,7 @@ import type {
 } from "@/types/calcDefinitions";
 
 import { CreateCalcModal } from "@/components/calc/CreateCalcModal";
+import { InputStatusPanel } from "@/components/calc/InputStatusPanel";
 import { ComputedDevicesModal } from "@/components/calc/ComputedDevicesModal";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
@@ -382,6 +383,13 @@ export default function CalcDefinitionsAdmin() {
 
       <div className="px-1 text-[11px] space-y-1" style={{ color: "var(--text-secondary)" }}>
         <p>
+          The <strong>dot</strong> next to each value is the output's data quality
+          (green good, amber uncertain, red bad) - whether the value is usable, and
+          is independent of <strong>Status</strong> (whether the calc ran). A bad
+          value with an "ok" status usually means a bad or stale input, or an
+          out-of-range result; expand the row for the reason.
+        </p>
+        <p>
           <strong>Current value</strong> column polls every 2 seconds from{" "}
           <code className="text-[10px]">/api/calc/current-values</code>.
           {" "}For calcs with external output, the Value cell shows the
@@ -555,8 +563,10 @@ function DeviceGroup({
                   <th className="text-left px-3 py-2 font-medium">Tag name</th>
                   <th className="text-left px-3 py-2 font-medium">Block type</th>
                   <th className="text-right px-3 py-2 font-medium">Rate</th>
-                  <th className="text-right px-3 py-2 font-medium">Value</th>
-                  <th className="text-center px-3 py-2 font-medium">Status</th>
+                  <th className="text-right px-3 py-2 font-medium"
+                      title="Latest output value; the dot is its data quality (is the value usable?)">Value</th>
+                  <th className="text-center px-3 py-2 font-medium"
+                      title="Execution status - did the calc engine run the block? Independent of the value's quality dot">Run</th>
                   <th className="text-right px-3 py-2 font-medium">Last run</th>
                   <th className="text-center px-3 py-2 font-medium">Actions</th>
                 </tr>
@@ -647,7 +657,8 @@ function CalcDefRow({
     const q = decodeQuality(displayedValue.quality);
     return (
       <span className="inline-flex items-center justify-end gap-1.5 font-mono tabular-nums" title={tooltip}>
-        <span className={`inline-block h-1.5 w-1.5 rounded-full ${q.dot}`} aria-hidden />
+        <span className={`inline-block h-1.5 w-1.5 rounded-full ${q.dot}`}
+              title={`Value quality: ${q.label}${q.raw != null ? ` (st ${q.raw})` : ""} - is the output usable? Independent of Status (did the calc run).`} />
         {formatted}
       </span>
     );
@@ -747,6 +758,7 @@ function CalcDefRow({
       {expanded && (
         <tr className="border-t border-border bg-secondary/15">
           <td colSpan={9} className="p-4">
+            <InputStatusPanel defId={def.id} />
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
                 <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
