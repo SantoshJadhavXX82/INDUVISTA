@@ -107,3 +107,7 @@ storage/sf_buffer.db*
 # local installer prerequisites - do not commit
 /Installer_Pre-requisite/
 
+
+# local installers - never commit
+/Installer_Pre-requisite/
+
