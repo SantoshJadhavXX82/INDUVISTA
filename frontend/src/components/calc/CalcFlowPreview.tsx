@@ -21,6 +21,7 @@
  * inputs[]); parameter keys (preset_ms, tolerance, weights, ...) are
  * intentionally not treated as tags.
  */
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowRight, AlertTriangle } from "lucide-react";
 
@@ -122,7 +123,10 @@ export function CalcFlowPreview({
   const tags = useTagsList();
   const live = useLiveValues(operands.some((o) => o.kind === "tag"));
 
-  const tagById = new Map((tags.data ?? []).map((t) => [t.id, t]));
+  const tagById = useMemo(
+    () => new Map((tags.data ?? []).map((t) => [t.id, t])),
+    [tags.data],
+  );
   const values = live.data?.values ?? {};
   const example = blockExample(blockCode);
 

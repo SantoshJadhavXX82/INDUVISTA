@@ -51,6 +51,7 @@ function useInputStatus(defId: number, enabled: boolean) {
     enabled,
     refetchInterval: 2000,
     staleTime: 1000,
+    gcTime: 30_000,   // drop cached row data 30s after collapse
   });
 }
 

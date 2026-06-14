@@ -12,7 +12,7 @@
  * Header includes a "Manage Computed Devices" button that opens
  * ComputedDevicesModal for device CRUD.
  */
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Calculator, RefreshCw, AlertTriangle, ChevronDown, ChevronRight,
@@ -43,8 +43,24 @@ import { CreateCalcModal } from "@/components/calc/CreateCalcModal";
 import { InputStatusPanel } from "@/components/calc/InputStatusPanel";
 import { ComputedDevicesModal } from "@/components/calc/ComputedDevicesModal";
 import { CalcFlowModal } from "@/components/calc/CalcFlowModal";
+import { PageErrorBoundary } from "@/components/PageErrorBoundary";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
+
+// localStorage persistence for page UI state (filters + collapsed
+// device groups). Failures (private mode, quota) are non-fatal.
+const FILTERS_KEY = "induvista:calc:filters";
+const COLLAPSED_KEY = "induvista:calc:collapsed";
+
+function loadJSON<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    return { ...fallback, ...JSON.parse(raw) };
+  } catch {
+    return fallback;
+  }
+}
 
 const STATUS_STYLES: Record<string, string> = {
   ok:       "bg-emerald-50 text-emerald-800 border-emerald-300",
@@ -95,20 +111,40 @@ function useCurrentValues() {
 }
 
 
-export default function CalcDefinitionsAdmin() {
+function CalcDefinitionsAdminInner() {
   const defs = useCalcDefinitions();
   const devices = useComputedDevices();
   const types = useBlockTypes();
   const values = useCurrentValues();
   const qc = useQueryClient();
 
-  const [filterCategory, setFilterCategory] = useState<string>("all");
-  const [filterStatus, setFilterStatus] = useState<string>("all");
-  const [filterEnabledOnly, setFilterEnabledOnly] = useState(false);
-  const [filterSearch, setFilterSearch] = useState("");
+  const persistedFilters = loadJSON(FILTERS_KEY, {
+    category: "all", status: "all", enabledOnly: false, search: "",
+  });
+  const [filterCategory, setFilterCategory] = useState<string>(persistedFilters.category);
+  const [filterStatus, setFilterStatus] = useState<string>(persistedFilters.status);
+  const [filterEnabledOnly, setFilterEnabledOnly] = useState<boolean>(persistedFilters.enabledOnly);
+  const [filterSearch, setFilterSearch] = useState<string>(persistedFilters.search);
 
-  const [collapsed, setCollapsed] = useState<Record<number, boolean>>({});
+  const [collapsed, setCollapsed] = useState<Record<number, boolean>>(
+    () => loadJSON(COLLAPSED_KEY, {} as Record<number, boolean>),
+  );
   const [expandedId, setExpandedId] = useState<number | null>(null);
+
+  // Persist filters + collapsed groups across reloads.
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILTERS_KEY, JSON.stringify({
+        category: filterCategory, status: filterStatus,
+        enabledOnly: filterEnabledOnly, search: filterSearch,
+      }));
+    } catch { /* storage unavailable - non-fatal */ }
+  }, [filterCategory, filterStatus, filterEnabledOnly, filterSearch]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLLAPSED_KEY, JSON.stringify(collapsed));
+    } catch { /* storage unavailable - non-fatal */ }
+  }, [collapsed]);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [devicesModalOpen, setDevicesModalOpen] = useState(false);
@@ -531,6 +567,19 @@ function DeviceGroup({
   onCreateHere, onEdit, onDuplicate, onFlow, onToggleEnabled, onDelete,
   toggling, deleting,
 }: DeviceGroupProps) {
+  const counts = useMemo(() => {
+    const c = { ok: 0, bad: 0, overrun: 0, pending: 0, off: 0 };
+    for (const d of defs) {
+      if (!d.enabled) { c.off += 1; continue; }
+      const s = d.last_status ?? "pending";
+      if (s === "ok") c.ok += 1;
+      else if (s === "overrun") c.overrun += 1;
+      else if (s === "pending") c.pending += 1;
+      else c.bad += 1; // error + killed
+    }
+    return c;
+  }, [defs]);
+
   return (
     <div className="border border-border rounded">
       <div className="flex items-center justify-between px-3 py-2 bg-secondary/20 border-b border-border">
@@ -548,6 +597,26 @@ function DeviceGroup({
           <span className="text-[10px] text-muted-foreground">
             ({defs.length} of {device.computed_tag_count})
           </span>
+          {counts.ok > 0 && (
+            <span className="text-[9px] px-1 py-0.5 rounded border bg-emerald-50 text-emerald-800 border-emerald-300 tabular-nums"
+                  title="listed tags with last run ok">{counts.ok} ok</span>
+          )}
+          {counts.overrun > 0 && (
+            <span className="text-[9px] px-1 py-0.5 rounded border bg-amber-50 text-amber-800 border-amber-300 tabular-nums"
+                  title="listed tags overrunning their execution budget">{counts.overrun} ovr</span>
+          )}
+          {counts.bad > 0 && (
+            <span className="text-[9px] px-1 py-0.5 rounded border bg-red-50 text-red-800 border-red-300 tabular-nums"
+                  title="listed tags in error / killed state">{counts.bad} err</span>
+          )}
+          {counts.pending > 0 && (
+            <span className="text-[9px] px-1 py-0.5 rounded border bg-slate-100 text-slate-600 border-slate-300 tabular-nums"
+                  title="listed tags that have not run yet">{counts.pending} pend</span>
+          )}
+          {counts.off > 0 && (
+            <span className="text-[9px] px-1 py-0.5 rounded border bg-slate-100 text-slate-500 border-slate-300 tabular-nums"
+                  title="listed tags currently disabled">{counts.off} off</span>
+          )}
           {!device.enabled && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-300">
               device disabled
@@ -1080,4 +1149,13 @@ function statusIcon(status: string) {
     case "killed":  return <XCircle className="h-2.5 w-2.5" />;
     default:        return <Clock className="h-2.5 w-2.5" />;
   }
+}
+
+
+export default function CalcDefinitionsAdmin() {
+  return (
+    <PageErrorBoundary page="Calc tags">
+      <CalcDefinitionsAdminInner />
+    </PageErrorBoundary>
+  );
 }

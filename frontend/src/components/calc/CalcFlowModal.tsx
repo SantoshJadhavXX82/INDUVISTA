@@ -74,6 +74,7 @@ function useCalcFlow(defId: number | null) {
     enabled: defId != null,
     refetchInterval: 2000,
     staleTime: 1000,
+    gcTime: 30_000,   // drop cached diagrams 30s after close
   });
 }
 

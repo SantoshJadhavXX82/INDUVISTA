@@ -1,23 +1,20 @@
-"""Phase 16.0c - Current-value lookup for the calc-blocks UI.
+"""Current-value lookup for the calc-blocks UI.
 
-Returns the latest written value per tag. Reads from tag_values (the
-TimescaleDB hypertable) using DISTINCT ON, since that's where the
-calc evaluator writes its outputs (line 207 of calc_evaluator.py).
+Returns the latest value/quality per tag from latest_tag_values (one
+indexed row per tag, PK on tag_id) via the shared
+latest_values_by_tag() service - never a DISTINCT ON scan of the
+tag_values history hypertable (that anti-pattern made the evaluator
+fall behind its cadence under write load). Both the acquisition
+workers and the calc evaluator upsert into latest_tag_values, so it
+holds current values for calc-output tags too.
 
-We don't read latest_tag_values - that table is populated by the
-Modbus polling path and stays empty for calc-output tags, so it
-can't tell us calc results.
-
-Query shape matches the user's tag_values schema:
-    columns: time, tag_id, device_id, value_double, value_text, st, source
-
-For numeric calc outputs, value_double has the result and value_text
-is NULL. For boolean/text outputs the worker still writes to
-value_double (0.0/1.0 for booleans).
+Scoped to the tags the Calc tags page uses: each computed tag's
+anchor id plus any external output target.
 """
 
 from fastapi import APIRouter
 
+from sqlalchemy import text
 from app.db import SessionLocal
 from app.services.latest_values import latest_values_by_tag
 
@@ -27,31 +24,40 @@ router = APIRouter(tags=["calc"])
 
 @router.get("/api/calc/current-values")
 def get_current_values():
-    """Returns the latest value per tag from tag_values. Response shape:
-
+    """Returns the latest value per tag from latest_tag_values.
+    Response shape:
         {
           "values": {
             "<tag_id>": {
               "value": <num | null>,
               "value_text": <str | null>,
-              "quality": <int | null>,
+              "quality": <int | null>,    # the st byte (0..255)
               "ts": <iso8601 | null>,
               "source": <str | null>
             }
           },
-          "_source": "tag_values.time"
+          "_source": "latest_tag_values"
         }
-
-    The DISTINCT ON tag_id with ORDER BY time DESC uses the natural
-    hypertable index on (tag_id, time DESC) so this is fast even on a
-    large history.
+    Values come from latest_tag_values (PK lookup per tag), scoped to
+    the calc tags + external output targets this page renders.
     """
     with SessionLocal() as db:
         try:
             # Current values come from latest_tag_values (one indexed row per
             # tag) via the shared reader, never a DISTINCT ON scan of the
             # tag_values history hypertable.
-            rows = latest_values_by_tag(db)
+            #
+            # Scope to the tags this page uses: each computed tag's anchor
+            # id, plus any external output target. Keeps the payload to
+            # calc-relevant tags instead of every tag in the plant.
+            id_rows = db.execute(text(
+                "SELECT id AS tag_id FROM computed_tags "
+                "UNION "
+                "SELECT output_tag_id AS tag_id FROM computed_tags "
+                "WHERE output_tag_id IS NOT NULL"
+            )).mappings().all()
+            calc_tag_ids = [r["tag_id"] for r in id_rows]
+            rows = latest_values_by_tag(db, tag_ids=calc_tag_ids)
         except Exception as e:
             return {
                 "values": {},

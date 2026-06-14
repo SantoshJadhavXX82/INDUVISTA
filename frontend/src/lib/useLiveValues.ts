@@ -12,6 +12,7 @@
  * they use the "Sample inputs" override grid.
  */
 import { useQuery } from "@tanstack/react-query";
+import { authHeaders } from "@/lib/authFetch";
 
 
 export interface LiveTagValue {
@@ -22,7 +23,7 @@ export interface LiveTagValue {
 
 
 async function fetchLiveValues(): Promise<LiveTagValue[]> {
-  const res = await fetch("/api/live");
+  const res = await fetch("/api/live", { headers: authHeaders() });
   if (!res.ok) {
     throw new Error(`Failed to fetch live values: HTTP ${res.status}`);
   }
