@@ -244,3 +244,65 @@ def get_flow(def_id: int, depth: int = Query(default=6, ge=1, le=10)) -> dict:
             return node
 
         return build(def_id, frozenset({def_id}), depth)
+
+
+@router.get("/api/calc/definitions/{def_id}/used-by")
+def get_used_by(def_id: int) -> dict:
+    """Calcs that consume THIS computed tag's output as an input -
+    i.e. what is affected if this calc is deleted (its output tag goes
+    stale for them) or renamed (cosmetic only; references are by id).
+
+    Shape:
+        {
+          "def_id": 12,
+          "output_tag_id": 4567,
+          "consumers": [
+            {"id": 20, "name": "...", "block_type": "...",
+             "enabled": true, "device_name": "...", "via_label": "left"}
+          ]
+        }
+    via_label is the operand role through which the consumer references
+    this tag (first matching operand).
+    """
+    with SessionLocal() as db:
+        calcs = db.execute(text(
+            "SELECT ct.id, ct.block_type, ct.block_config, ct.enabled,"
+            "       ct.output_tag_id, t.name, d.name AS device_name"
+            "  FROM computed_tags ct"
+            "  JOIN tags t ON t.id = ct.id"
+            "  LEFT JOIN devices d ON d.id = t.device_id"
+        )).mappings().all()
+
+        by_id = {c["id"]: c for c in calcs}
+        if def_id not in by_id:
+            raise HTTPException(status_code=404,
+                                detail=f"Computed tag {def_id} not found")
+
+        me = by_id[def_id]
+        out_tag = me["output_tag_id"] if me["output_tag_id"] is not None else me["id"]
+
+        consumers: list[dict] = []
+        for c in calcs:
+            if c["id"] == def_id:
+                continue
+            via = None
+            for okind, oval, olabel in _operands(c["block_type"], _cfg(c["block_config"])):
+                if okind == "tag" and oval == out_tag:
+                    via = olabel
+                    break
+            if via is not None:
+                consumers.append({
+                    "id": c["id"],
+                    "name": c["name"],
+                    "block_type": c["block_type"],
+                    "enabled": c["enabled"],
+                    "device_name": c["device_name"],
+                    "via_label": via,
+                })
+
+        consumers.sort(key=lambda x: ((x["device_name"] or ""), x["name"] or ""))
+        return {
+            "def_id": def_id,
+            "output_tag_id": out_tag,
+            "consumers": consumers,
+        }

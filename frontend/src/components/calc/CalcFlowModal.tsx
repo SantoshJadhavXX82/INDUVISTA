@@ -17,7 +17,7 @@
  */
 import { useQuery } from "@tanstack/react-query";
 import {
-  X, ArrowRight, AlertTriangle, Loader2, RefreshCw, Repeat2,
+  X, ArrowRight, AlertTriangle, Loader2, RefreshCw, Repeat2, CornerDownRight,
 } from "lucide-react";
 
 import { decodeQuality } from "@/lib/calcQuality";
@@ -74,7 +74,6 @@ function useCalcFlow(defId: number | null) {
     enabled: defId != null,
     refetchInterval: 2000,
     staleTime: 1000,
-    gcTime: 30_000,   // drop cached diagrams 30s after close
   });
 }
 
@@ -183,6 +182,94 @@ function FlowNode({ node, depth = 0 }: { node: FlowCalcNode; depth?: number }) {
   );
 }
 
+interface UsedByConsumer {
+  id: number;
+  name: string;
+  block_type: string;
+  enabled: boolean;
+  device_name: string | null;
+  via_label: string;
+}
+
+interface UsedByResponse {
+  def_id: number;
+  output_tag_id: number;
+  consumers: UsedByConsumer[];
+}
+
+function useUsedBy(defId: number | null) {
+  return useQuery<UsedByResponse>({
+    queryKey: ["calc-used-by", defId],
+    queryFn: async () => {
+      const res = await fetch(`/api/calc/definitions/${defId}/used-by`, {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+    enabled: defId != null,
+    staleTime: 10_000,
+    gcTime: 30_000,
+  });
+}
+
+/** Downstream consumers: which calcs use THIS calc's output as an input.
+ *  Answers "is it safe to delete/rename this?" at a glance. */
+function UsedBySection({ calc }: { calc: CalcDefinition }) {
+  const used = useUsedBy(calc.id);
+  const consumers = used.data?.consumers ?? [];
+  return (
+    <div className="mt-4 pt-3 border-t border-border">
+      <div className="text-[11px] font-medium text-muted-foreground inline-flex items-center gap-1.5 mb-2">
+        <CornerDownRight className="h-3 w-3" />
+        Used by (downstream)
+      </div>
+      {used.isLoading && (
+        <div className="text-[11px] text-muted-foreground">Checking…</div>
+      )}
+      {used.isError && (
+        <div className="text-[11px] text-red-700">Could not load downstream usage.</div>
+      )}
+      {used.data && consumers.length === 0 && (
+        <div className="text-[11px] text-emerald-800 bg-emerald-50 border border-emerald-200
+                        rounded px-2 py-1.5 inline-block">
+          Not used by any other computed tag — safe to delete or rename.
+        </div>
+      )}
+      {consumers.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1.5">
+            {consumers.length} computed tag{consumers.length > 1 ? "s" : ""} consume this output.
+            Deleting this calc leaves {consumers.length > 1 ? "them" : "it"} with a stale input;
+            renaming is safe (references are by ID).
+          </div>
+          <div className="flex flex-wrap gap-1.5 pt-1">
+            {consumers.map((c) => (
+              <span
+                key={c.id}
+                className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border text-[11px] ${
+                  c.enabled
+                    ? "bg-card border-border"
+                    : "bg-secondary/40 border-border text-muted-foreground"
+                }`}
+                title={`${c.name} (#${c.id}) — ${c.block_type} — via ${c.via_label}${
+                  c.enabled ? "" : " — disabled"
+                }`}
+              >
+                <BlockIcon code={c.block_type} className="h-3 w-3" />
+                {c.device_name ? `${c.device_name} / ` : ""}
+                {c.name}
+                <span className="text-[9px] text-muted-foreground">via {c.via_label}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export function CalcFlowModal({
   calc, onClose,
 }: {
@@ -226,6 +313,8 @@ export function CalcFlowModal({
             </div>
           )}
           {flow.data && <FlowNode node={flow.data} />}
+
+          <UsedBySection calc={calc} />
         </div>
 
         <div className="px-4 py-2 border-t border-border text-[10px] text-muted-foreground

@@ -255,6 +255,25 @@ function CalcDefinitionsAdminInner() {
     });
   }, [defs.data, filterCategory, filterStatus, filterEnabledOnly, filterSearch, typeByCode]);
 
+  const [sort, setSort] = useState<SortState>(() => {
+    try {
+      const r = localStorage.getItem("induvista:calc:sort");
+      if (r) { const p = JSON.parse(r); if (p && p.key && p.dir) return p as SortState; }
+    } catch { /* storage unavailable - non-fatal */ }
+    return DEFAULT_SORT;
+  });
+  useEffect(() => {
+    try { localStorage.setItem("induvista:calc:sort", JSON.stringify(sort)); }
+    catch { /* storage unavailable - non-fatal */ }
+  }, [sort]);
+  function handleSort(key: SortKey) {
+    setSort((prev) =>
+      prev.key !== key ? { key, dir: "asc" }
+      : prev.dir === "asc" ? { key, dir: "desc" }
+      : DEFAULT_SORT,
+    );
+  }
+
   const groupedByDevice = useMemo(() => {
     const map = new Map<number, CalcDefinition[]>();
     for (const d of filtered) {
@@ -262,10 +281,10 @@ function CalcDefinitionsAdminInner() {
       map.get(d.device_id)!.push(d);
     }
     for (const arr of map.values()) {
-      arr.sort((a, b) => a.name.localeCompare(b.name));
+      arr.sort((a, b) => compareDefs(a, b, sort.key, sort.dir));
     }
     return map;
-  }, [filtered]);
+  }, [filtered, sort]);
 
   const allDevices = useMemo(() => {
     return [...(devices.data ?? [])].sort((a, b) => a.name.localeCompare(b.name));
@@ -404,6 +423,8 @@ function CalcDefinitionsAdminInner() {
                   key={device.id}
                   device={device}
                   defs={groupedByDevice.get(device.id) ?? []}
+                  sort={sort}
+                  onSort={handleSort}
                   collapsed={collapsed[device.id] ?? false}
                   onToggleCollapse={() =>
                     setCollapsed({ ...collapsed, [device.id]: !(collapsed[device.id] ?? false) })
@@ -543,6 +564,8 @@ function CalcDefinitionsAdminInner() {
 // ---------------------------------------------------------------------------
 
 interface DeviceGroupProps {
+  sort: SortState;
+  onSort: (key: SortKey) => void;
   device: ComputedDevice;
   defs: CalcDefinition[];
   collapsed: boolean;
@@ -562,7 +585,7 @@ interface DeviceGroupProps {
 }
 
 function DeviceGroup({
-  device, defs, collapsed, onToggleCollapse,
+  device, defs, collapsed, onToggleCollapse, sort, onSort,
   typeByCode, valueLookup, expandedId, onToggleExpanded,
   onCreateHere, onEdit, onDuplicate, onFlow, onToggleEnabled, onDelete,
   toggling, deleting,
@@ -649,15 +672,14 @@ function DeviceGroup({
               <thead>
                 <tr className="text-muted-foreground text-[10px] uppercase tracking-wider border-b border-border">
                   <th className="w-4 p-0"></th>
-                  <th className="text-right px-2 py-2 font-medium">ID</th>
-                  <th className="text-left px-3 py-2 font-medium">Tag name</th>
+                  <SortHeader label="ID" sortKey="id" align="right" sort={sort} onSort={onSort} />
+                  <SortHeader label="Tag name" sortKey="name" align="left" sort={sort} onSort={onSort} />
                   <th className="text-left px-3 py-2 font-medium">Block type</th>
-                  <th className="text-right px-3 py-2 font-medium">Rate</th>
+                  <SortHeader label="Rate" sortKey="rate" align="right" sort={sort} onSort={onSort} />
                   <th className="text-right px-3 py-2 font-medium"
                       title="Latest output value; the dot is its data quality (is the value usable?)">Value</th>
-                  <th className="text-center px-3 py-2 font-medium"
-                      title="Execution status - did the calc engine run the block? Independent of the value's quality dot">Run</th>
-                  <th className="text-right px-3 py-2 font-medium">Last run</th>
+                  <SortHeader label="Run" sortKey="run" align="center" sort={sort} onSort={onSort} />
+                  <SortHeader label="Last run" sortKey="lastrun" align="right" sort={sort} onSort={onSort} />
                   <th className="text-center px-3 py-2 font-medium">Actions</th>
                 </tr>
               </thead>
@@ -1120,6 +1142,94 @@ function CalcHealthBanner({
         </span>
       )}
     </div>
+  );
+}
+
+
+type SortKey = "id" | "name" | "rate" | "run" | "lastrun";
+interface SortState { key: SortKey; dir: "asc" | "desc"; }
+const DEFAULT_SORT: SortState = { key: "name", dir: "asc" };
+
+function compareDefs(a: CalcDefinition, b: CalcDefinition, key: SortKey, dir: "asc" | "desc"): number {
+  let r = 0;
+  switch (key) {
+    case "id": r = a.id - b.id; break;
+    case "rate": r = a.execution_rate_ms - b.execution_rate_ms; break;
+    case "run":
+      r = (a.last_status ?? "pending").localeCompare(b.last_status ?? "pending");
+      break;
+    case "lastrun": {
+      const ta = a.last_executed_at ? new Date(a.last_executed_at).getTime() : 0;
+      const tb = b.last_executed_at ? new Date(b.last_executed_at).getTime() : 0;
+      r = ta - tb;
+      break;
+    }
+    case "name":
+    default: r = a.name.localeCompare(b.name); break;
+  }
+  if (r === 0) r = a.name.localeCompare(b.name);   // stable tiebreak
+  return dir === "asc" ? r : -r;
+}
+
+function SortHeader({ label, sortKey, align, sort, onSort }: {
+  label: string;
+  sortKey: SortKey;
+  align: "left" | "right" | "center";
+  sort: SortState;
+  onSort: (k: SortKey) => void;
+}) {
+  const active = sort.key === sortKey;
+  const arrow = !active ? "" : sort.dir === "asc" ? " ▲" : " ▼";
+  const thAlign = align === "right" ? "text-right" : align === "center" ? "text-center" : "text-left";
+  const justify = align === "right" ? "justify-end" : align === "center" ? "justify-center" : "justify-start";
+  return (
+    <th className={`${thAlign} px-3 py-2 font-medium`}>
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`inline-flex items-center ${justify} w-full hover:text-foreground ${active ? "text-foreground" : ""}`}
+        title={`Sort by ${label}`}
+      >
+        {label}{arrow}
+      </button>
+    </th>
+  );
+}
+
+
+function DeleteUsedByWarning({ calcId }: { calcId: number | null }) {
+  const [consumers, setConsumers] = useState<
+    { id: number; name: string; device_name: string | null; enabled: boolean }[] | null
+  >(null);
+  useEffect(() => {
+    if (calcId == null) { setConsumers(null); return; }
+    let cancelled = false;
+    setConsumers(null);
+    fetch(`/api/calc/definitions/${calcId}/used-by`, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then((d) => { if (!cancelled) setConsumers(d.consumers ?? []); })
+      .catch(() => { if (!cancelled) setConsumers([]); });
+    return () => { cancelled = true; };
+  }, [calcId]);
+
+  if (!consumers || consumers.length === 0) return null;
+  return (
+    <>
+      <br />
+      <span className="block mt-2 text-amber-800 bg-amber-50 border border-amber-200
+                       rounded px-2 py-1.5 text-xs">
+        {consumers.length} computed tag{consumers.length > 1 ? "s" : ""} consume this
+        output and will be left with a stale input:{" "}
+        {consumers.map((c, i) => (
+          <span key={c.id}>
+            {i > 0 ? ", " : ""}
+            <strong>{c.device_name ? `${c.device_name} / ` : ""}{c.name}</strong>
+            {c.enabled ? "" : " (disabled)"}
+          </span>
+        ))}
+        .
+      </span>
+    </>
   );
 }
 
