@@ -539,6 +539,7 @@ function CalcDefinitionsAdminInner() {
               </>
             )}
             <br />
+            <DeleteUsedByWarning calcId={pendingDelete?.id ?? null} />
             <span className="text-destructive">This cannot be undone.</span>
           </>
         }

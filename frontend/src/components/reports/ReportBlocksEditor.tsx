@@ -857,8 +857,6 @@ function KpiItemsEditor({
   const update = (i: number, patch: any) => onChange(items.map((it, j) => (j === i ? { ...it, ...patch } : it)));
   const remove = (i: number) => onChange(items.filter((_, j) => j !== i));
   const add = () => onChange([...items, { tag_id: allTags[0]?.id ?? 0, label: "", unit: "", decimals: undefined }]);
-  const tagOptions = allTags.map((t) => String(t.id));
-  const tagLabels = allTags.map((t) => t.name);
   const [pick, setPick] = useState<{ i: number; field: "tag_id" | "status_tag_id" } | null>(null);
   const nameOf = (id: any) => allTags.find((t) => t.id === id)?.name;
 
