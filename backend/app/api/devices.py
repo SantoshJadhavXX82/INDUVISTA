@@ -1509,3 +1509,92 @@ def _scan_enron(device_row, body: ScanRangeRequest) -> ScanRangeResponse:
         chunks=chunks,
         rows=rows,
     )
+
+
+@router.post("/devices/{device_id}/duplicate")
+def duplicate_device(
+    device_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Shallow-duplicate a device under a new "(copy)" name on the same
+    channel. Connection settings are copied; pairing/redundancy refs are
+    cleared (duty_role reset to "none" to keep
+    ck_devices_duty_role_consistency satisfied) and the copy is created
+    DISABLED so it never starts polling until reviewed. Register blocks
+    and tags are not copied."""
+    src = db.execute(
+        text("SELECT * FROM devices WHERE id = :id"), {"id": device_id}
+    ).mappings().first()
+    if src is None:
+        raise HTTPException(404, f"device {device_id} not found")
+
+    existing = set(db.execute(
+        text("SELECT name FROM devices WHERE channel_id = :c"),
+        {"c": src["channel_id"]},
+    ).scalars().all())
+    base = src["name"]
+    new_name = f"{base} (copy)"
+    n = 2
+    while new_name in existing:
+        new_name = f"{base} (copy {n})"
+        n += 1
+
+    params = {
+        "channel_id": src["channel_id"],
+        "name": new_name,
+        "description": src.get("description"),
+        "protocol": src.get("protocol"),
+        "host": src.get("host"),
+        "port": src.get("port"),
+        "unit_id": src.get("unit_id"),
+        "duty_role": "none",                 # reset: no redundant peer on a copy
+        "stale_after_sec": src.get("stale_after_sec"),
+        "scan_interval_ms": src.get("scan_interval_ms"),
+        "secondary_host": src.get("secondary_host"),
+        "secondary_port": src.get("secondary_port"),
+        "secondary_unit_id": src.get("secondary_unit_id"),
+        "redundant_device_id": None,         # references another row - do not copy
+        "duty_status_tag_id": None,          # references another row - do not copy
+        "manual_override": False,
+        "enabled": False,                    # copy starts disabled; review then enable
+        "request_timeout_ms": src.get("request_timeout_ms"),
+        "retry_count": src.get("retry_count"),
+        "reconnect_initial_ms": src.get("reconnect_initial_ms"),
+        "reconnect_max_ms": src.get("reconnect_max_ms"),
+    }
+    try:
+        new_id = db.execute(text("""
+            INSERT INTO devices (
+                channel_id, name, description, protocol,
+                host, port, unit_id,
+                duty_role, stale_after_sec, scan_interval_ms,
+                secondary_host, secondary_port, secondary_unit_id,
+                redundant_device_id, duty_status_tag_id,
+                manual_override, enabled,
+                request_timeout_ms, retry_count,
+                reconnect_initial_ms, reconnect_max_ms
+            ) VALUES (
+                :channel_id, :name, :description, :protocol,
+                :host, :port, :unit_id,
+                :duty_role, :stale_after_sec, :scan_interval_ms,
+                :secondary_host, :secondary_port, :secondary_unit_id,
+                :redundant_device_id, :duty_status_tag_id,
+                :manual_override, :enabled,
+                :request_timeout_ms, :retry_count,
+                :reconnect_initial_ms, :reconnect_max_ms
+            ) RETURNING id
+        """), params).scalar_one()
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(409, f"Could not duplicate device: {getattr(e, 'orig', e)}")
+
+    audit(AuditEvent(
+        action="device.duplicate",
+        target_type="device",
+        target_id=new_id,
+        target_label=new_name,
+        summary=f"Duplicated device {device_id} ('{base}') -> {new_id} ('{new_name}'), created disabled",
+    ), request)
+    return {"id": new_id, "name": new_name, "enabled": False}

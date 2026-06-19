@@ -582,3 +582,72 @@ def bulk_create_register_blocks(
     ), request)
 
     return results
+
+
+@router.post("/register-blocks/{block_id}/duplicate")
+def duplicate_register_block(
+    block_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Duplicate a register block on the same device under a new "(copy)"
+    name. The start address is shifted to start_address + count so it does
+    not collide with the original on uq_register_blocks_dev_fc_addr; if the
+    shifted range overlaps another block, a 409 explains. Adjust after."""
+    src = db.execute(
+        text("SELECT * FROM register_blocks WHERE id = :id"), {"id": block_id}
+    ).mappings().first()
+    if src is None:
+        raise HTTPException(404, f"register block {block_id} not found")
+
+    existing = set(db.execute(
+        text("SELECT name FROM register_blocks WHERE device_id = :d"),
+        {"d": src["device_id"]},
+    ).scalars().all())
+    base = src["name"]
+    new_name = f"{base} (copy)"
+    n = 2
+    while new_name in existing:
+        new_name = f"{base} (copy {n})"
+        n += 1
+
+    shifted = (src.get("start_address") or 0) + (src.get("count") or 0)
+    params = {
+        "device_id": src["device_id"],
+        "name": new_name,
+        "function_code": src.get("function_code"),
+        "start_address": shifted,
+        "count": src.get("count"),
+        "scan_interval_ms": src.get("scan_interval_ms"),
+        "phase_ms": src.get("phase_ms"),
+        "writable": src.get("writable"),
+        "addressing_mode": src.get("addressing_mode"),
+    }
+    try:
+        new_id = db.execute(text("""
+            INSERT INTO register_blocks (
+                device_id, name, function_code, start_address, count,
+                scan_interval_ms, phase_ms, writable, addressing_mode
+            ) VALUES (
+                :device_id, :name, :function_code, :start_address, :count,
+                :scan_interval_ms, :phase_ms, :writable, :addressing_mode
+            ) RETURNING id
+        """), params).scalar_one()
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            409,
+            "Could not duplicate: the copied block at start "
+            f"{shifted} (count {params['count']}) collides with an existing "
+            f"block. Edit the address and retry. ({getattr(e, 'orig', e)})",
+        )
+
+    audit(AuditEvent(
+        action="register_block.duplicate",
+        target_type="register_block",
+        target_id=new_id,
+        target_label=new_name,
+        summary=f"Duplicated register_block {block_id} ('{base}') -> {new_id} ('{new_name}') at start {shifted}",
+    ), request)
+    return {"id": new_id, "name": new_name, "start_address": shifted}

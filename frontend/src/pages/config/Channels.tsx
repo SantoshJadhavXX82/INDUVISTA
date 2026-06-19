@@ -7,7 +7,7 @@
  */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu } from "lucide-react";
+import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu, Copy } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -53,6 +53,11 @@ export default function Channels() {
     staleTime: 60_000,
   });
 
+  const duplicate = useMutation({
+    mutationFn: (id: number) => api.post(`/channels/${id}/duplicate`, {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+  });
+
   return (
     <div className="space-y-3">
       <div className="flex justify-between items-center">
@@ -75,6 +80,7 @@ export default function Channels() {
                 <TableHead>Transport</TableHead>
                 <TableHead>Description</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="w-10"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -116,6 +122,19 @@ export default function Channels() {
                     <Badge variant={c.enabled ? "success" : "secondary"} className="text-xs">
                       {c.enabled ? "enabled" : "disabled"}
                     </Badge>
+                  </TableCell>
+                  <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
+                    <button
+                      type="button"
+                      onClick={() => duplicate.mutate(c.id)}
+                      disabled={duplicate.isPending}
+                      title="Duplicate this network"
+                      className="h-7 w-7 inline-flex items-center justify-center rounded
+                                 hover:bg-secondary text-muted-foreground hover:text-foreground
+                                 disabled:opacity-40"
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </button>
                   </TableCell>
                 </TableRow>
               ))}

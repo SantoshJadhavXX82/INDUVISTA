@@ -436,3 +436,53 @@ def delete_channel(
         summary=f"Deleted channel '{existing['name']}' (transport={existing.get('transport')})",
         details={"before": _full_ch(existing)},
     ), request)
+
+
+@router.post("/channels/{channel_id}/duplicate")
+def duplicate_channel(
+    channel_id: int,
+    request: Request,
+    db: Annotated[Session, Depends(get_session)],
+):
+    """Duplicate a network/channel definition under a new "(copy)" name.
+    Copies the protocol connector, transport and description; devices on
+    the channel are not copied (a channel is just the network definition)."""
+    src = db.execute(
+        text("SELECT * FROM channels WHERE id = :id"), {"id": channel_id}
+    ).mappings().first()
+    if src is None:
+        raise HTTPException(404, f"channel {channel_id} not found")
+
+    existing = set(db.execute(text("SELECT name FROM channels")).scalars().all())
+    base = src["name"]
+    new_name = f"{base} (copy)"
+    n = 2
+    while new_name in existing:
+        new_name = f"{base} (copy {n})"
+        n += 1
+
+    params = {
+        "pc_id": src["protocol_connector_id"],
+        "name": new_name,
+        "description": src.get("description"),
+        "transport": src.get("transport"),
+    }
+    try:
+        new_id = db.execute(text("""
+            INSERT INTO channels (protocol_connector_id, name, description, transport)
+            VALUES (:pc_id, :name, :description, :transport)
+            RETURNING id
+        """), params).scalar_one()
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(409, f"Could not duplicate channel: {getattr(e, 'orig', e)}")
+
+    audit(AuditEvent(
+        action="channel.duplicate",
+        target_type="channel",
+        target_id=new_id,
+        target_label=new_name,
+        summary=f"Duplicated channel {channel_id} ('{base}') -> {new_id} ('{new_name}')",
+    ), request)
+    return {"id": new_id, "name": new_name}
