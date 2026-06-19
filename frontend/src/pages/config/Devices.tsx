@@ -21,7 +21,7 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu } from "lucide-react";
+import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu, Copy } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
@@ -123,6 +123,10 @@ export default function Devices() {
     queryFn: () => api.get<Device[]>("/devices"),
   });
 
+  const duplicate = useMutation({
+    mutationFn: (id: number) => api.post(`/devices/${id}/duplicate`, {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["devices"] }),
+  });
   const channels = useQuery({
     queryKey: ["channels"],
     queryFn: () => api.get<Channel[]>("/channels"),
@@ -153,6 +157,7 @@ export default function Devices() {
                 <TableHead className="text-right">Unit ID</TableHead>
                 <TableHead>Duty</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="w-10"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -233,6 +238,21 @@ export default function Devices() {
                       <Badge variant={d.enabled ? "success" : "secondary"} className="text-xs">
                         {d.enabled ? "enabled" : "disabled"}
                       </Badge>
+                    </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
+                      {!isSynthetic && (
+                        <button
+                          type="button"
+                          onClick={() => duplicate.mutate(d.id)}
+                          disabled={duplicate.isPending}
+                          title="Duplicate this device"
+                          className="h-7 w-7 inline-flex items-center justify-center rounded
+                                     hover:bg-secondary text-muted-foreground hover:text-foreground
+                                     disabled:opacity-40"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                     </TableCell>
                   </TableRow>
                 );

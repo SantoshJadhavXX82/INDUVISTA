@@ -8,7 +8,7 @@
  */
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, Trash2, AlertCircle, Upload, Download } from "lucide-react";
+import { Plus, Trash2, AlertCircle, Upload, Download, Copy } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { type BulkResult } from "@/types/api";
@@ -66,6 +66,10 @@ export default function RegisterBlocks() {
     queryFn: () => api.get<RegisterBlock[]>("/register-blocks"),
   });
 
+  const duplicate = useMutation({
+    mutationFn: (id: number) => api.post(`/register-blocks/${id}/duplicate`, {}),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["register-blocks"] }),
+  });
   const devices = useQuery({
     queryKey: ["devices"],
     queryFn: () => api.get<Device[]>("/devices"),
@@ -128,6 +132,7 @@ export default function RegisterBlocks() {
                 <TableHead className="text-right">Start</TableHead>
                 <TableHead className="text-right">Count</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead className="w-10"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -153,6 +158,19 @@ export default function RegisterBlocks() {
                           {b.enabled ? "enabled" : "disabled"}
                         </Badge>
                       </TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
+                        <button
+                          type="button"
+                          onClick={() => duplicate.mutate(b.id)}
+                          disabled={duplicate.isPending}
+                          title="Duplicate this block"
+                          className="h-7 w-7 inline-flex items-center justify-center rounded
+                                     hover:bg-secondary text-muted-foreground hover:text-foreground
+                                     disabled:opacity-40"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                      </TableCell>
                     </TableRow>
                   ));
                 }
@@ -170,7 +188,7 @@ export default function RegisterBlocks() {
 
                 return groups.flatMap((g) => [
                   <TableRow key={`hdr-${g.id}`} className="bg-muted/30 hover:bg-muted/30">
-                    <TableCell colSpan={6} className="py-1.5 text-xs font-semibold">
+                    <TableCell colSpan={7} className="py-1.5 text-xs font-semibold">
                       {g.name}
                       <span className="ml-2 font-normal text-muted-foreground tabular-nums">
                         {g.rows.length} block{g.rows.length === 1 ? "" : "s"}
@@ -192,6 +210,19 @@ export default function RegisterBlocks() {
                         <Badge variant={b.enabled ? "success" : "secondary"} className="text-xs">
                           {b.enabled ? "enabled" : "disabled"}
                         </Badge>
+                      </TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
+                        <button
+                          type="button"
+                          onClick={() => duplicate.mutate(b.id)}
+                          disabled={duplicate.isPending}
+                          title="Duplicate this block"
+                          className="h-7 w-7 inline-flex items-center justify-center rounded
+                                     hover:bg-secondary text-muted-foreground hover:text-foreground
+                                     disabled:opacity-40"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
                       </TableCell>
                     </TableRow>
                   )),
