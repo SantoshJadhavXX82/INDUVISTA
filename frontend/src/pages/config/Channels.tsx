@@ -8,6 +8,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu, Copy } from "lucide-react";
+import { toast } from "@/lib/toast";
 import { api, ApiError } from "@/lib/api";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -55,7 +56,12 @@ export default function Channels() {
 
   const duplicate = useMutation({
     mutationFn: (id: number) => api.post(`/channels/${id}/duplicate`, {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["channels"] });
+      toast.success("Network duplicated");
+    },
+    onError: (e: Error) =>
+      toast.error((e as { detail?: string }).detail ?? e.message),
   });
 
   return (

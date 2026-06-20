@@ -22,6 +22,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu, Copy } from "lucide-react";
+import { toast } from "@/lib/toast";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
@@ -125,7 +126,12 @@ export default function Devices() {
 
   const duplicate = useMutation({
     mutationFn: (id: number) => api.post(`/devices/${id}/duplicate`, {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["devices"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["devices"] });
+      toast.success("Device duplicated (created disabled)");
+    },
+    onError: (e: Error) =>
+      toast.error((e as { detail?: string }).detail ?? e.message),
   });
   const channels = useQuery({
     queryKey: ["channels"],

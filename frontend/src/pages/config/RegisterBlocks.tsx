@@ -9,6 +9,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, AlertCircle, Upload, Download, Copy } from "lucide-react";
+import { toast } from "@/lib/toast";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { type BulkResult } from "@/types/api";
@@ -68,7 +69,12 @@ export default function RegisterBlocks() {
 
   const duplicate = useMutation({
     mutationFn: (id: number) => api.post(`/register-blocks/${id}/duplicate`, {}),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["register-blocks"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["register-blocks"] });
+      toast.success("Register block duplicated");
+    },
+    onError: (e: Error) =>
+      toast.error((e as { detail?: string }).detail ?? e.message),
   });
   const devices = useQuery({
     queryKey: ["devices"],
