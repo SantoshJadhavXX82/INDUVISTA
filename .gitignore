@@ -81,23 +81,15 @@ opc_web_*/
 # Generated report preview HTML (output of smoke scripts; the .py generators are tracked)
 *.preview.html
 
-test-results-ui/
 
 *.bak_*
 
-*.bak_*
 
-*.bak_*
 
-*.bak_*
 
-*.bak_*
 
-*.bak_*
 
-*.bak_*
 
-*.bak_*
 scripts/ui_smoke_fail.png
 *.db-shm
 *.db-wal
@@ -107,10 +99,17 @@ storage/sf_buffer.db*
 # local installer prerequisites - do not commit
 /Installer_Pre-requisite/
 
-
 # local installers - never commit
-/Installer_Pre-requisite/
 
 
-/Installer_Pre-requisite/
-
+# Scratch dirs & one-off artifacts (repo hygiene pass)
+# all top-level scratch dirs use a leading underscore
+/_*/
+# database dumps never belong in the repo
+*.dump
+# scratch mermaid diagram exports
+*Mermaid*.pdf
+# generated report preview HTML
+*_report_preview.html
+# one-off root math/test scripts
+/test_*.mjs

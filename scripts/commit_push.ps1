@@ -63,7 +63,7 @@ if ($secretHits) {
 }
 
 # 2b) warn on large files about to be committed (GitHub hard limit is 100 MB).
-$big = git diff --cached --name-only | ForEach-Object {
+$big = git diff --cached --name-only --diff-filter=ACM | ForEach-Object {
     if (Test-Path $_) {
         $f = Get-Item $_
         if ($f.Length -gt 50MB) {
