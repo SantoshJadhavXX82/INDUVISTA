@@ -34,7 +34,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 import TrendChart, { type TrendChartHandle } from "@/components/TrendChart";
-import TagPicker from "@/components/TagPicker";
+import TagPicker from "@/components/TrendTagTreePicker";
 import { PageHeader } from "@/components/ui/page-header";
 import TimeRangePicker, {
   type TimeRange,
