@@ -1,49 +1,50 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import AppShell from "@/components/layout/AppShell";
 import { TimeFormatProvider } from "@/lib/timeFormat";
 // Phase 21 - auth gate
 import Login from "@/pages/Login";
 import RequireAuth from "@/components/RequireAuth";
-import ChangePassword from "@/pages/ChangePassword";
-import Users from "@/pages/Users";
-import Dashboard from "@/pages/Dashboard";
-import Diagnostics from "@/pages/Diagnostics";
-import TagExplorer from "@/pages/TagExplorer";
-import FrameInspector from "@/pages/FrameInspector";
-import RegisterBrowser from "@/pages/RegisterBrowser";
-import DataGaps from "@/pages/DataGaps";
-import Historian from "@/pages/Historian";
-import Reports from "@/pages/Reports";
-import Explorer from "@/pages/Explorer";
-import ReportsConfig from "@/pages/ReportsConfig";
-import About from "@/pages/About";
-import Help from "@/pages/Help";
-import Writes from "@/pages/Writes";
-import WriteConsole from "@/pages/WriteConsole";
-import ConfigLayout from "@/pages/config/ConfigLayout";
-import Channels from "@/pages/config/Channels";
-import Devices from "@/pages/config/Devices";
-import RegisterBlocks from "@/pages/config/RegisterBlocks";
-import GlobalLayout from "@/pages/global/GlobalLayout";
-import EngineeringUnits from "@/pages/EngineeringUnits";
-import Groups from "@/pages/Groups";
-import NamedSets from "@/pages/NamedSets";
-import DutyStandbyValues from "@/pages/global/DutyStandbyValues";
+const ChangePassword = lazy(() => import("@/pages/ChangePassword"));
+const Users = lazy(() => import("@/pages/Users"));
+const Dashboard = lazy(() => import("@/pages/Dashboard"));
+const Diagnostics = lazy(() => import("@/pages/Diagnostics"));
+const TagExplorer = lazy(() => import("@/pages/TagExplorer"));
+const FrameInspector = lazy(() => import("@/pages/FrameInspector"));
+const RegisterBrowser = lazy(() => import("@/pages/RegisterBrowser"));
+const DataGaps = lazy(() => import("@/pages/DataGaps"));
+const Historian = lazy(() => import("@/pages/Historian"));
+const Reports = lazy(() => import("@/pages/Reports"));
+const Explorer = lazy(() => import("@/pages/Explorer"));
+const ReportsConfig = lazy(() => import("@/pages/ReportsConfig"));
+const About = lazy(() => import("@/pages/About"));
+const Help = lazy(() => import("@/pages/Help"));
+const Writes = lazy(() => import("@/pages/Writes"));
+const WriteConsole = lazy(() => import("@/pages/WriteConsole"));
+const ConfigLayout = lazy(() => import("@/pages/config/ConfigLayout"));
+const Channels = lazy(() => import("@/pages/config/Channels"));
+const Devices = lazy(() => import("@/pages/config/Devices"));
+const RegisterBlocks = lazy(() => import("@/pages/config/RegisterBlocks"));
+const GlobalLayout = lazy(() => import("@/pages/global/GlobalLayout"));
+const EngineeringUnits = lazy(() => import("@/pages/EngineeringUnits"));
+const Groups = lazy(() => import("@/pages/Groups"));
+const NamedSets = lazy(() => import("@/pages/NamedSets"));
+const DutyStandbyValues = lazy(() => import("@/pages/global/DutyStandbyValues"));
 // Phase 27d MVP — General Settings (timezone picker)
-import Settings from "@/pages/Settings";
-import ModbusLayout from "@/pages/modbus/ModbusLayout";
+const Settings = lazy(() => import("@/pages/Settings"));
+const ModbusLayout = lazy(() => import("@/pages/modbus/ModbusLayout"));
 // Phase 13.2 — Trend module
-import Trend from "@/pages/Trend";
+const Trend = lazy(() => import("@/pages/Trend"));
 // Phase 14.5 - Alarms module
-import Alarms from "@/pages/Alarms";
-import AlarmSeveritiesAdmin from "@/pages/AlarmSeveritiesAdmin";
-import AlarmRuleTypesAdmin from "@/pages/AlarmRuleTypesAdmin";
+const Alarms = lazy(() => import("@/pages/Alarms"));
+const AlarmSeveritiesAdmin = lazy(() => import("@/pages/AlarmSeveritiesAdmin"));
+const AlarmRuleTypesAdmin = lazy(() => import("@/pages/AlarmRuleTypesAdmin"));
 // Phase 15.3 / 16.0b - Calc blocks admin
-import CalcDefinitionsAdmin from "@/pages/CalcDefinitionsAdmin";
+const CalcDefinitionsAdmin = lazy(() => import("@/pages/CalcDefinitionsAdmin"));
 // Phase 16.0g - Audit log viewer
-import AuditLog from "@/pages/AuditLog";
+const AuditLog = lazy(() => import("@/pages/AuditLog"));
 // Phase OPC-web.3 — backend-managed OPC UA sources page
-import OpcSources from "@/pages/OpcSources";
+const OpcSources = lazy(() => import("@/pages/OpcSources"));
 
 export default function App() {
   return (
@@ -69,6 +70,7 @@ export default function App() {
 
 function AuthedRoutes() {
   return (
+    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading…</div>}>
     <Routes>
         <Route path="/" element={<Navigate to="/diagnostics" replace />} />
         <Route path="/diagnostics" element={<Diagnostics />} />
@@ -142,5 +144,6 @@ function AuthedRoutes() {
           <Route path="blocks" element={<RegisterBlocks />} />
         </Route>
     </Routes>
+    </Suspense>
   );
 }
