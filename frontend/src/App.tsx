@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router";
 import AppShell from "@/components/layout/AppShell";
 import { TimeFormatProvider } from "@/lib/timeFormat";
+import { PageSkeleton } from "@/components/ui/skeleton";
 import { Toaster } from "@/components/ui/toaster";
 // Phase 21 - auth gate
 import Login from "@/pages/Login";
@@ -72,7 +73,7 @@ export default function App() {
 
 function AuthedRoutes() {
   return (
-    <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading…</div>}>
+    <Suspense fallback={<PageSkeleton />}>
     <Routes>
         <Route path="/" element={<Navigate to="/diagnostics" replace />} />
         <Route path="/diagnostics" element={<Diagnostics />} />
