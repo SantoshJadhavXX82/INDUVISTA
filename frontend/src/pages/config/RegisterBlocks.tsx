@@ -9,6 +9,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, AlertCircle, Upload, Download, Copy } from "lucide-react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { toast } from "@/lib/toast";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -59,6 +60,7 @@ type Device = { id: number; name: string };
 export default function RegisterBlocks() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<RegisterBlock | "new" | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<RegisterBlock | null>(null);
   const [activeDeviceId, setActiveDeviceId] = useState<number | null>(null);
   const [importing, setImporting] = useState(false);
 
@@ -72,6 +74,16 @@ export default function RegisterBlocks() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["register-blocks"] });
       toast.success("Register block duplicated");
+    },
+    onError: (e: Error) =>
+      toast.error((e as { detail?: string }).detail ?? e.message),
+  });
+  const del = useMutation({
+    mutationFn: (id: number) => api.delete(`/register-blocks/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["register-blocks"] });
+      toast.success("Register block deleted");
+      setPendingDelete(null);
     },
     onError: (e: Error) =>
       toast.error((e as { detail?: string }).detail ?? e.message),
@@ -164,18 +176,29 @@ export default function RegisterBlocks() {
                           {b.enabled ? "enabled" : "disabled"}
                         </Badge>
                       </TableCell>
-                      <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
-                        <button
-                          type="button"
-                          onClick={() => duplicate.mutate(b.id)}
-                          disabled={duplicate.isPending}
-                          title="Duplicate this block"
-                          className="h-7 w-7 inline-flex items-center justify-center rounded
-                                     hover:bg-secondary text-muted-foreground hover:text-foreground
-                                     disabled:opacity-40"
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </button>
+                      <TableCell onClick={(e) => e.stopPropagation()} className="w-16">
+                        <div className="flex items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => duplicate.mutate(b.id)}
+                            disabled={duplicate.isPending}
+                            title="Duplicate this block"
+                            className="h-7 w-7 inline-flex items-center justify-center rounded
+                                       hover:bg-secondary text-muted-foreground hover:text-foreground
+                                       disabled:opacity-40"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingDelete(b)}
+                            title="Delete this block"
+                            className="h-7 w-7 inline-flex items-center justify-center rounded
+                                       hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ));
@@ -217,18 +240,29 @@ export default function RegisterBlocks() {
                           {b.enabled ? "enabled" : "disabled"}
                         </Badge>
                       </TableCell>
-                      <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
-                        <button
-                          type="button"
-                          onClick={() => duplicate.mutate(b.id)}
-                          disabled={duplicate.isPending}
-                          title="Duplicate this block"
-                          className="h-7 w-7 inline-flex items-center justify-center rounded
-                                     hover:bg-secondary text-muted-foreground hover:text-foreground
-                                     disabled:opacity-40"
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </button>
+                      <TableCell onClick={(e) => e.stopPropagation()} className="w-16">
+                        <div className="flex items-center gap-0.5">
+                          <button
+                            type="button"
+                            onClick={() => duplicate.mutate(b.id)}
+                            disabled={duplicate.isPending}
+                            title="Duplicate this block"
+                            className="h-7 w-7 inline-flex items-center justify-center rounded
+                                       hover:bg-secondary text-muted-foreground hover:text-foreground
+                                       disabled:opacity-40"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingDelete(b)}
+                            title="Delete this block"
+                            className="h-7 w-7 inline-flex items-center justify-center rounded
+                                       hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   )),
@@ -356,6 +390,21 @@ export default function RegisterBlocks() {
           />
         )}
       </Drawer>
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete register block?"
+        description={
+          <>
+            This permanently deletes the register block{" "}
+            <b>{pendingDelete?.name}</b> and its tags. This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete block"
+        severity="destructive"
+        busy={del.isPending}
+        onConfirm={() => pendingDelete && del.mutate(pendingDelete.id)}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }

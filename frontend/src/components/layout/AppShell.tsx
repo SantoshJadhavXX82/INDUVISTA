@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import Nav from "@/components/layout/Nav";
 import MobileTabBar from "@/components/layout/MobileTabBar";
+import { CommandPalette } from "@/components/CommandPalette";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
 import { useIsMobile } from "@/lib/use-media-query";
 import { useAuth } from "@/lib/auth";
@@ -146,6 +147,7 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
         >{children}</main>
       </div>
       {isMobile && <MobileTabBar />}
+      <CommandPalette />
     </div>
   );
 }
