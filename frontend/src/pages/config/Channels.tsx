@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Drawer } from "@/components/ui/drawer";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HelpTip } from "@/components/ui/help-tip";
 import { help } from "@/lib/help-text";
 import {
@@ -42,6 +43,7 @@ type ProtocolConnector = { id: number; code: string };
 export default function Channels() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<Channel | "new" | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Channel | null>(null);
 
   const channels = useQuery({
     queryKey: ["channels"],
@@ -59,6 +61,17 @@ export default function Channels() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["channels"] });
       toast.success("Network duplicated");
+    },
+    onError: (e: Error) =>
+      toast.error((e as { detail?: string }).detail ?? e.message),
+  });
+
+  const del = useMutation({
+    mutationFn: (id: number) => api.delete(`/channels/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["channels"] });
+      toast.success("Network deleted");
+      setPendingDelete(null);
     },
     onError: (e: Error) =>
       toast.error((e as { detail?: string }).detail ?? e.message),
@@ -129,18 +142,29 @@ export default function Channels() {
                       {c.enabled ? "enabled" : "disabled"}
                     </Badge>
                   </TableCell>
-                  <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
-                    <button
-                      type="button"
-                      onClick={() => duplicate.mutate(c.id)}
-                      disabled={duplicate.isPending}
-                      title="Duplicate this network"
-                      className="h-7 w-7 inline-flex items-center justify-center rounded
-                                 hover:bg-secondary text-muted-foreground hover:text-foreground
-                                 disabled:opacity-40"
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                    </button>
+                  <TableCell onClick={(e) => e.stopPropagation()} className="w-16">
+                    <div className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        onClick={() => duplicate.mutate(c.id)}
+                        disabled={duplicate.isPending}
+                        title="Duplicate this network"
+                        className="h-7 w-7 inline-flex items-center justify-center rounded
+                                   hover:bg-secondary text-muted-foreground hover:text-foreground
+                                   disabled:opacity-40"
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPendingDelete(c)}
+                        title="Delete this network"
+                        className="h-7 w-7 inline-flex items-center justify-center rounded
+                                   hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -165,6 +189,22 @@ export default function Channels() {
           />
         )}
       </Drawer>
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete network?"
+        description={
+          <>
+            This permanently deletes the network{" "}
+            <b>{pendingDelete?.name}</b>. A network that still has devices
+            attached cannot be deleted.
+          </>
+        }
+        confirmLabel="Delete network"
+        severity="destructive"
+        busy={del.isPending}
+        onConfirm={() => pendingDelete && del.mutate(pendingDelete.id)}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
