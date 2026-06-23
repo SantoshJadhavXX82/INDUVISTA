@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
-import { Activity, Bell, ChevronDown, KeyRound, LogOut, Info } from "lucide-react";
+import { Activity, Bell, ChevronDown, KeyRound, LogOut, Info, Search } from "lucide-react";
 import { useNavigate } from "react-router";
 import { type HealthResponse } from "@/types/api";
 import { api } from "@/lib/api";
@@ -88,6 +88,37 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             borderBottom: "0.5px solid var(--separator)",
           }}
         >
+          {/* Command palette trigger — opens the Cmd/Ctrl+K palette.
+              Dispatches the shortcut the palette already listens for, so no
+              shared state is needed. Left-aligned (mr-auto); hidden on mobile
+              where the tab bar handles navigation. */}
+          <button
+            type="button"
+            onClick={() =>
+              window.dispatchEvent(
+                new KeyboardEvent("keydown", { key: "k", ctrlKey: true }),
+              )
+            }
+            title="Search pages (Ctrl/Cmd+K)"
+            className="mr-auto hidden sm:flex items-center gap-2 rounded-md px-2.5 py-1 text-xs transition-colors"
+            style={{
+              border: "0.5px solid var(--separator)",
+              color: "var(--text-secondary)",
+              backgroundColor: "var(--bg-grouped)",
+            }}
+          >
+            <Search style={{ width: 14, height: 14 }} strokeWidth={2} />
+            <span>Search</span>
+            <kbd
+              className="rounded px-1 text-[10px]"
+              style={{
+                backgroundColor: "var(--bg-elevated)",
+                border: "0.5px solid var(--separator)",
+              }}
+            >
+              ⌘K
+            </kbd>
+          </button>
           {/* Diagnostics cluster — de-emphasized (muted, smaller). Status only. */}
           <div className="hidden sm:flex items-center gap-2" style={{ color: "var(--text-secondary)" }}>
             {health.isError ? (
