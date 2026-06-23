@@ -22,6 +22,7 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Trash2, AlertCircle, Calculator, Network, Cpu, Copy } from "lucide-react";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { toast } from "@/lib/toast";
 import { api, ApiError } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -118,6 +119,7 @@ function isModbusDevice(
 export default function Devices() {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState<Device | "new" | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Device | null>(null);
 
   const devices = useQuery({
     queryKey: ["devices"],
@@ -129,6 +131,16 @@ export default function Devices() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["devices"] });
       toast.success("Device duplicated (created disabled)");
+    },
+    onError: (e: Error) =>
+      toast.error((e as { detail?: string }).detail ?? e.message),
+  });
+  const del = useMutation({
+    mutationFn: (id: number) => api.delete(`/devices/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["devices"] });
+      toast.success("Device deleted");
+      setPendingDelete(null);
     },
     onError: (e: Error) =>
       toast.error((e as { detail?: string }).detail ?? e.message),
@@ -245,20 +257,31 @@ export default function Devices() {
                         {d.enabled ? "enabled" : "disabled"}
                       </Badge>
                     </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()} className="w-10">
-                      {!isSynthetic && (
+                    <TableCell onClick={(e) => e.stopPropagation()} className="w-16">
+                      <div className="flex items-center gap-0.5">
+                        {!isSynthetic && (
+                          <button
+                            type="button"
+                            onClick={() => duplicate.mutate(d.id)}
+                            disabled={duplicate.isPending}
+                            title="Duplicate this device"
+                            className="h-7 w-7 inline-flex items-center justify-center rounded
+                                       hover:bg-secondary text-muted-foreground hover:text-foreground
+                                       disabled:opacity-40"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                         <button
                           type="button"
-                          onClick={() => duplicate.mutate(d.id)}
-                          disabled={duplicate.isPending}
-                          title="Duplicate this device"
+                          onClick={() => setPendingDelete(d)}
+                          title="Delete this device"
                           className="h-7 w-7 inline-flex items-center justify-center rounded
-                                     hover:bg-secondary text-muted-foreground hover:text-foreground
-                                     disabled:opacity-40"
+                                     hover:bg-destructive/10 text-muted-foreground hover:text-destructive"
                         >
-                          <Copy className="h-3.5 w-3.5" />
+                          <Trash2 className="h-3.5 w-3.5" />
                         </button>
-                      )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -286,6 +309,24 @@ export default function Devices() {
           />
         )}
       </Drawer>
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete device?"
+        description={
+          <>
+            This permanently deletes <b>{pendingDelete?.name}</b> and all of
+            its register blocks and tags. For a computed device, its
+            computed-tag definitions and history are removed too. This cannot
+            be undone.
+          </>
+        }
+        requireTextMatch={pendingDelete?.name}
+        confirmLabel="Delete device"
+        severity="destructive"
+        busy={del.isPending}
+        onConfirm={() => pendingDelete && del.mutate(pendingDelete.id)}
+        onCancel={() => setPendingDelete(null)}
+      />
     </div>
   );
 }
