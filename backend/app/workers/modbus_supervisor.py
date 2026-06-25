@@ -288,13 +288,40 @@ async def replay_loop(
 
             try:
                 await asyncio.to_thread(direct.write_history_only, batch)
+                n = await asyncio.to_thread(buffer.delete, batch)
+                rlog.info("Replayed %d sample(s); %d remaining", n, count - n)
             except Exception as e:
-                rlog.warning("Replay batch failed (%s); %d remain in buffer",
-                             e, len(batch))
-                continue
-
-            n = await asyncio.to_thread(buffer.delete, batch)
-            rlog.info("Replayed %d sample(s); %d remaining", n, count - n)
+                # Bulk write failed. Distinguish a transient Postgres outage
+                # from a genuinely un-writable ("poison") row so one bad sample
+                # can never freeze the whole backlog.
+                if not await asyncio.to_thread(direct.is_healthy):
+                    # PG went down mid-tick -> leave the batch buffered, no loss.
+                    rlog.warning("Replay batch failed (%s); PG unhealthy, %d remain",
+                                 e, len(batch))
+                    continue
+                # PG is healthy -> isolate the bad row(s) by draining one-by-one.
+                rlog.warning("Replay batch failed (%s); isolating bad row(s) one-by-one", e)
+                written = dead = 0
+                for s in batch:
+                    try:
+                        await asyncio.to_thread(direct.write_history_only, [s])
+                        await asyncio.to_thread(buffer.delete, [s])
+                        written += 1
+                    except Exception as row_err:
+                        if not await asyncio.to_thread(direct.is_healthy):
+                            rlog.warning("PG went unhealthy mid-isolation; "
+                                         "%d row(s) left buffered",
+                                         len(batch) - written - dead)
+                            break
+                        # Genuinely un-writable row: dead-letter it (log identity,
+                        # then drop from the buffer so it can't block the backlog).
+                        rlog.error("Dead-lettering un-writable sample "
+                                   "tag_id=%s time=%s st=%s: %s",
+                                   s.tag_id, s.time.isoformat(), s.st, row_err)
+                        await asyncio.to_thread(buffer.delete, [s])
+                        dead += 1
+                rlog.info("Isolated batch: wrote %d, dead-lettered %d; %d remaining",
+                          written, dead, await asyncio.to_thread(buffer.count))
         except Exception:
             rlog.exception("Replay tick failed")
     rlog.info("Stopped.")
