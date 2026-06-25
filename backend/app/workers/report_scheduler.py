@@ -364,8 +364,25 @@ def _tick(db, tz: ZoneInfo) -> int:
                 if MAX_CATCHUP_MIN > 0 and job.get("run_at") is None:
                     age_min = (now - due).total_seconds() / 60.0
                     if age_min > MAX_CATCHUP_MIN:
-                        log.info("report '%s': skipping stale due instant %s (%.0fm old)",
-                                 job["report_name"], due, age_min)
+                        # Missed-report detection: a scheduled occurrence came due
+                        # while the scheduler was down/behind and is now too stale to
+                        # run. Record it as a 'missed' job so it shows in the run
+                        # history (GET /jobs) — but do NOT generate or backfill it.
+                        log.warning("report '%s': MISSED due instant %s (%.0fm old > %.0fm); recording, not generating",
+                                    job["report_name"], due, age_min, MAX_CATCHUP_MIN)
+                        try:
+                            record_job(db, report_id=job["report_id"],
+                                       report_name=job["report_name"],
+                                       trigger_kind="timed", revision_id=None,
+                                       formats=None, status="missed", snapshot_at=due,
+                                       period_start=None, period_end=None,
+                                       error=(f"Missed: due {due.isoformat()} was "
+                                              f"{age_min:.0f}m stale (> {MAX_CATCHUP_MIN:.0f}m "
+                                              f"catch-up window); not generated."),
+                                       started_at=None, finished_at=None)
+                        except Exception:
+                            log.exception("report '%s': failed to record missed job",
+                                          job["report_name"])
                         _upsert_state(db, job["report_id"], job["trigger_id"],
                                       last_fired_at=due)
                         db.commit()

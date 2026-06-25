@@ -21,7 +21,8 @@ RUNNING = "running"
 SUCCEEDED = "succeeded"
 FAILED = "failed"
 PARTIAL = "partial"
-JOB_STATUSES = (QUEUED, RUNNING, SUCCEEDED, FAILED, PARTIAL)
+MISSED = "missed"
+JOB_STATUSES = (QUEUED, RUNNING, SUCCEEDED, FAILED, PARTIAL, MISSED)
 TRIGGER_KINDS = ("on_demand", "timed", "tag", "manual")
 
 _COLS = ("id, report_id, report_name, trigger_kind, revision_id, formats, status, "
