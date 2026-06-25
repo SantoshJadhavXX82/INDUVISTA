@@ -16,6 +16,7 @@ export type Trigger = {
   interval_minutes: number | null; day_of_week: number | null;
   days_of_week: string | null; cron_expr: string | null;
   at_time_min: number | null; at_minute: number | null;
+  run_at: string | null;
   day_of_month: number | null; month_of_year: number | null;
 }
 
@@ -55,6 +56,7 @@ export function humanizeTrigger(t: {
   at_time_min?: number | null; days_of_week?: string | null; day_of_week?: number | null;
   day_of_month?: number | null; month_of_year?: number | null;
   interval_minutes?: number | null; cron_expr?: string | null;
+  run_at?: string | null;
   tag_id?: number | null; tag_edge?: string | null;
   tag_op?: string | null; tag_value?: number | null; tag_expr?: string | null;
 }, tagName?: (id: number) => string): string {
@@ -64,6 +66,10 @@ export function humanizeTrigger(t: {
     if (t.tag_op && t.tag_value != null) return `When ${nm} ${t.tag_op} ${t.tag_value}`;
     const edge = t.tag_edge === "rising" ? "rises" : t.tag_edge === "any_change" ? "changes" : "becomes non-zero";
     return `When ${nm} ${edge}`;
+  }
+  if (t.run_at) {
+    const d = new Date(t.run_at);
+    return `Once at ${isNaN(d.getTime()) ? t.run_at : d.toLocaleString()}`;
   }
   const time = t.at_time_min != null ? minToHHMM(t.at_time_min) : "06:00";
   const p = (t.period || "").toLowerCase();
@@ -125,9 +131,10 @@ export function NewTriggerModal({
   const [scope, setScope] = useState<"global" | "custom">(
     editing ? (editing.owner_report_id != null ? "custom" : "global") : "global");
 
-  type Mode = "hourly" | "daily" | "weekly" | "monthly" | "yearly" | "every_n_minutes" | "cron";
+  type Mode = "hourly" | "daily" | "weekly" | "monthly" | "yearly" | "every_n_minutes" | "cron" | "once";
   const initMode: Mode = (() => {
     if (!editing) return "daily";
+    if (editing.run_at) return "once";
     if (editing.cron_expr) return "cron";
     if (editing.interval_minutes) return "every_n_minutes";
     if (editing.month_of_year) return "yearly";
@@ -150,6 +157,15 @@ export function NewTriggerModal({
   const [yearDom, setYearDom] = useState(editing?.day_of_month ?? 1);
   const [intervalMin, setIntervalMin] = useState(editing?.interval_minutes ?? 15);
   const [cron, setCron] = useState(editing?.cron_expr || "");
+  // one-shot: datetime-local string ("YYYY-MM-DDTHH:mm") in browser-local time.
+  const isoToLocalInput = (iso: string | null | undefined) => {
+    if (!iso) return "";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "";
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const [runAt, setRunAt] = useState<string>(isoToLocalInput(editing?.run_at));
   const [showCron, setShowCron] = useState(false);
 
   const [tagId, setTagId] = useState<number | null>(editing?.tag_id ?? null);
@@ -182,6 +198,7 @@ export function NewTriggerModal({
     const base: Record<string, unknown> = {
       name: name.trim() || preview, trigger_type: kind,
       owner_report_id: allowCustom && scope === "custom" ? reportId : null, enabled: true,
+      run_at: kind === "timed" && mode === "once" && runAt ? new Date(runAt).toISOString() : null,
     };
     if (kind === "tag") {
       if (tagMode === "formula") return { ...base, tag_id: tagId, tag_expr: tagExpr, tag_op: null, tag_value: null, tag_edge: null };
@@ -196,6 +213,7 @@ export function NewTriggerModal({
       case "yearly":          return { ...base, period: "yearly", month_of_year: moy, day_of_month: yearDom, at_time_min: atTimeMin };
       case "every_n_minutes": return { ...base, period: "every_n_minutes", interval_minutes: intervalMin };
       case "cron":            return { ...base, period: "cron", cron_expr: cron };
+      case "once":            return { ...base, period: "once" };
     }
     return base;
   };
@@ -204,6 +222,7 @@ export function NewTriggerModal({
   const preview = useMemo(() => humanizeTrigger({
     trigger_type: kind,
     period: kind === "timed" ? mode : null,
+    run_at: kind === "timed" && mode === "once" ? (runAt || null) : null,
     at_minute: atMinute, at_time_min: atTimeMin,
     days_of_week: days.join(","),
     day_of_month: mode === "monthly" ? 1 : (mode === "yearly" ? yearDom : null),
@@ -215,7 +234,7 @@ export function NewTriggerModal({
     tag_value: tagMode === "compare" ? parseFloat(cmpVal) : null,
     tag_expr: tagMode === "formula" ? tagExpr : null,
   }, (id) => allTags.find((t) => t.id === id)?.name ?? `tag ${id}`),
-  [kind, mode, atMinute, atTimeMin, days, yearDom, moy, intervalMin, cron, tagId, edge, tagMode, cmpOp, cmpVal, tagExpr, allTags]);
+  [kind, mode, atMinute, atTimeMin, days, yearDom, moy, intervalMin, cron, tagId, edge, tagMode, cmpOp, cmpVal, tagExpr, runAt, allTags]);
 
   const cronPreview = useMemo(() => cronOf({
     period: mode, at_minute: atMinute, at_time_min: atTimeMin,
@@ -232,6 +251,7 @@ export function NewTriggerModal({
     }
     if (kind === "timed" && mode === "weekly" && days.length === 0) { onError("Pick at least one weekday."); return; }
     if (kind === "timed" && mode === "cron" && !cron.trim()) { onError("Enter a cron expression."); return; }
+    if (kind === "timed" && mode === "once" && !runAt) { onError("Pick a date & time for a one-shot trigger."); return; }
     setSaving(true);
     try {
       if (isEdit && editing) {
@@ -266,8 +286,8 @@ export function NewTriggerModal({
         {kind === "timed" ? (
           <div className="flex flex-col gap-3">
             <Field label="Schedule">
-              <Select value={mode} options={["hourly", "daily", "weekly", "monthly", "yearly", "every_n_minutes", "cron"]}
-                labels={["Hourly", "Daily", "Weekly", "Monthly", "Yearly", "Every N minutes", "Cron (advanced)"]}
+              <Select value={mode} options={["hourly", "daily", "weekly", "monthly", "yearly", "every_n_minutes", "cron", "once"]}
+                labels={["Hourly", "Daily", "Weekly", "Monthly", "Yearly", "Every N minutes", "Cron (advanced)", "Run once"]}
                 onChange={(v) => setMode(v as Mode)} />
             </Field>
 
@@ -330,6 +350,16 @@ export function NewTriggerModal({
             {mode === "cron" && (
               <p className="text-[11px]" style={{ color: "var(--ios-orange,#9a5800)" }}>
                 Cron only fires if the server has the optional croniter package. All other schedules work without it.
+              </p>
+            )}
+            {mode === "once" && (
+              <Field label="Run once at (local time)">
+                <Input type="datetime-local" value={runAt} onChange={(e) => setRunAt(e.target.value)} />
+              </Field>
+            )}
+            {mode === "once" && (
+              <p className="text-[12px] rounded-lg px-3 py-2" style={{ backgroundColor: "var(--bg,#f2f2f7)", color: "var(--ios-gray-1)" }}>
+                Fires <b>exactly once</b> at this time, then never again. A time already in the past fires once on the next check.
               </p>
             )}
           </div>

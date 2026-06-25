@@ -143,6 +143,7 @@ class TriggerCreate(BaseModel):
     days_of_week: str | None = Field(None, max_length=32)   # "0,2,4" = Mon,Wed,Fri (multi-day weekly)
     interval_minutes: int | None = Field(None, ge=1)         # every-N-minutes
     cron_expr: str | None = Field(None, max_length=120)
+    run_at: datetime | None = None  # one-shot: fire once at this instant (tz-aware)
     # tag
     tag_id: int | None = None
     tag_edge: str = Field("to_nonzero", pattern="^(to_nonzero|rising|any_change)$")
@@ -164,6 +165,7 @@ class TriggerUpdate(BaseModel):
     days_of_week: str | None = Field(None, max_length=32)
     interval_minutes: int | None = Field(None, ge=1)
     cron_expr: str | None = Field(None, max_length=120)
+    run_at: datetime | None = None  # one-shot fire instant
     tag_id: int | None = None
     tag_edge: str | None = Field(None, pattern="^(to_nonzero|rising|any_change)$")
     tag_op: str | None = Field(None, pattern="^(=|==|!=|>|>=|<|<=)$")
@@ -187,6 +189,7 @@ class TriggerResponse(BaseModel):
     days_of_week: str | None
     interval_minutes: int | None
     cron_expr: str | None
+    run_at: datetime | None
     tag_id: int | None
     tag_edge: str | None
     tag_op: str | None
@@ -415,11 +418,11 @@ def create_trigger(body: TriggerCreate, request: Request,
             INSERT INTO report_triggers
                 (name, description, trigger_type, owner_report_id, period,
                  at_minute, at_time_min, day_of_month, month_of_year,
-                 day_of_week, days_of_week, interval_minutes, cron_expr,
+                 day_of_week, days_of_week, interval_minutes, cron_expr, run_at,
                  tag_id, tag_edge, tag_op, tag_value, tag_expr, enabled)
             VALUES (:name, :description, :trigger_type, :owner_report_id, :period,
                     :at_minute, :at_time_min, :day_of_month, :month_of_year,
-                    :day_of_week, :days_of_week, :interval_minutes, :cron_expr,
+                    :day_of_week, :days_of_week, :interval_minutes, :cron_expr, :run_at,
                     :tag_id, :tag_edge, :tag_op, :tag_value, :tag_expr, :enabled)
             RETURNING id
         """), body.model_dump()).scalar_one()

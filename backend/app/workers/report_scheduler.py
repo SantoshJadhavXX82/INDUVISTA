@@ -80,7 +80,7 @@ def _load_jobs(db) -> list[dict[str, Any]]:
         SELECT d.id AS report_id, d.name AS report_name, d.category,
                t.id AS trigger_id, t.trigger_type, t.period,
                t.at_minute, t.at_time_min, t.day_of_month, t.month_of_year,
-               t.day_of_week, t.interval_minutes, t.cron_expr,
+               t.day_of_week, t.interval_minutes, t.cron_expr, t.run_at,
                t.tag_id, t.tag_edge, t.tag_op, t.tag_value, t.tag_expr,
                s.last_fired_at, s.last_seen_value
         FROM report_definitions d
@@ -361,7 +361,7 @@ def _tick(db, tz: ZoneInfo) -> int:
                 if lfa is not None and due <= lfa:
                     continue  # already fired this instant
                 # optional stale-catchup guard
-                if MAX_CATCHUP_MIN > 0:
+                if MAX_CATCHUP_MIN > 0 and job.get("run_at") is None:
                     age_min = (now - due).total_seconds() / 60.0
                     if age_min > MAX_CATCHUP_MIN:
                         log.info("report '%s': skipping stale due instant %s (%.0fm old)",

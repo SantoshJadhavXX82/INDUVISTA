@@ -114,6 +114,13 @@ def due_instant(trigger: dict[str, Any], now: datetime,
     `period` name is only a hint and never required.
     """
     g = trigger.get
+    # 0. one-shot (run_at set): fire exactly once at run_at, then never
+    #    again. Returns run_at once it is at-or-before now; the worker
+    #    records last_fired_at = run_at after firing, so due (== run_at)
+    #    is no longer strictly newer than last_fired_at next tick.
+    run_at = g("run_at")
+    if run_at is not None:
+        return run_at if run_at <= now else None
     at_time_min = g("at_time_min")
     if at_time_min is None:
         at_time_min = 6 * 60  # sensible default contract hour 06:00
