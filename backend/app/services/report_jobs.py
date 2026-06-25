@@ -65,3 +65,33 @@ def list_jobs(db: Session, report_id: int | None = None, limit: int = 50) -> lis
         f"SELECT {_COLS} FROM report_jobs {where} ORDER BY id DESC LIMIT :lim"
     ), params).mappings().all()
     return [dict(r) for r in rows]
+
+
+# --- Per-stage generation telemetry (resolve -> data -> render -> deliver) --
+STAGE_NAMES = ("resolve", "data", "render", "deliver")
+
+
+def record_stages(db: Session, job_id: int, stages: list[dict[str, Any]]) -> int:
+    """Insert per-stage telemetry rows for a job. Does NOT commit (caller commits)."""
+    if not job_id or not stages:
+        return 0
+    for s in stages:
+        db.execute(text("""
+            INSERT INTO report_job_stages
+                (job_id, seq, stage, status, n, bytes, ms, detail, created_at)
+            VALUES (:jid, :seq, :stage, :status, :n, :bytes, :ms, :detail, NOW())
+        """), {
+            "jid": job_id, "seq": s.get("seq"), "stage": s.get("stage"),
+            "status": s.get("status"), "n": s.get("n"), "bytes": s.get("bytes"),
+            "ms": s.get("ms"), "detail": s.get("detail"),
+        })
+    return len(stages)
+
+
+def list_stages(db: Session, job_id: int) -> list[dict[str, Any]]:
+    """Per-stage telemetry for one job, in stage order."""
+    rows = db.execute(text("""
+        SELECT id, job_id, seq, stage, status, n, bytes, ms, detail, created_at
+        FROM report_job_stages WHERE job_id = :jid ORDER BY seq, id
+    """), {"jid": job_id}).mappings().all()
+    return [dict(r) for r in rows]

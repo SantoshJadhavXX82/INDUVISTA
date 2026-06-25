@@ -262,3 +262,109 @@ def tag_condition_fires(trigger: dict, last_value: Optional[float],
     # edge mode
     return tag_edge_fires(trigger.get("tag_edge") or "to_nonzero",
                           last_value, current_value)
+
+
+# --------------------------------------------------------------------------- #
+# Forward schedule — next due instant strictly AFTER now. Mirror of the        #
+# _last_* helpers; used by the /next-due endpoint to drive the countdown.      #
+# --------------------------------------------------------------------------- #
+def _next_daily(now: datetime, minute_of_day: int) -> datetime:
+    today = now.replace(hour=minute_of_day // 60, minute=minute_of_day % 60,
+                        second=0, microsecond=0)
+    return today if today > now else today + timedelta(days=1)
+
+
+def _next_hourly(now: datetime, at_minute: int) -> datetime:
+    this_hour = now.replace(minute=at_minute, second=0, microsecond=0)
+    return this_hour if this_hour > now else this_hour + timedelta(hours=1)
+
+
+def _next_weekly(now: datetime, day_of_week: int, minute_of_day: int) -> datetime:
+    target = now.replace(hour=minute_of_day // 60, minute=minute_of_day % 60,
+                         second=0, microsecond=0)
+    delta_days = (day_of_week - now.weekday()) % 7
+    candidate = target + timedelta(days=delta_days)
+    if candidate <= now:
+        candidate += timedelta(days=7)
+    return candidate
+
+
+def _next_weekly_multi(now: datetime, days: list, minute_of_day: int) -> datetime:
+    best = None
+    for d in days:
+        c = _next_weekly(now, d, minute_of_day)
+        if best is None or c < best:
+            best = c
+    return best
+
+
+def _next_monthly(now: datetime, day_of_month: int, minute_of_day: int) -> datetime:
+    def at(year: int, month: int) -> datetime:
+        dom = min(day_of_month, calendar.monthrange(year, month)[1])
+        return now.replace(year=year, month=month, day=dom,
+                           hour=minute_of_day // 60, minute=minute_of_day % 60,
+                           second=0, microsecond=0)
+    candidate = at(now.year, now.month)
+    if candidate > now:
+        return candidate
+    ny, nm = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+    return at(ny, nm)
+
+
+def _next_yearly(now: datetime, month_of_year: int, day_of_month: int,
+                 minute_of_day: int) -> datetime:
+    def at(year: int) -> datetime:
+        dom = min(day_of_month, calendar.monthrange(year, month_of_year)[1])
+        return now.replace(year=year, month=month_of_year, day=dom,
+                           hour=minute_of_day // 60, minute=minute_of_day % 60,
+                           second=0, microsecond=0)
+    candidate = at(now.year)
+    return candidate if candidate > now else at(now.year + 1)
+
+
+def next_instant(trigger: dict, now: datetime,
+                 last_fired_at: "Optional[datetime]" = None) -> "Optional[datetime]":
+    """Next due instant strictly AFTER `now`. Forward mirror of due_instant();
+    same field precedence. Returns a tz-aware datetime, or None (one-shot in the
+    past, or cron without croniter)."""
+    g = trigger.get
+    run_at = g("run_at")
+    if run_at is not None:
+        return run_at if run_at > now else None
+    at_time_min = g("at_time_min")
+    if at_time_min is None:
+        at_time_min = 6 * 60
+    iv = g("interval_minutes")
+    if iv:
+        iv = int(iv)
+        base = last_fired_at or now
+        nxt = base + timedelta(minutes=iv)
+        if nxt <= now:
+            steps = int((now - nxt).total_seconds() // (iv * 60)) + 1
+            nxt = nxt + timedelta(minutes=iv * steps)
+        return nxt
+    if g("month_of_year"):
+        return _next_yearly(now, int(g("month_of_year")),
+                            int(g("day_of_month") or 1), at_time_min)
+    if g("day_of_month"):
+        return _next_monthly(now, int(g("day_of_month")), at_time_min)
+    days = _parse_days(g("days_of_week"))
+    if days:
+        return _next_weekly_multi(now, days, at_time_min)
+    dow = g("day_of_week")
+    if dow is not None:
+        return _next_weekly(now, int(dow), at_time_min)
+    period = (g("period") or "").lower()
+    if period == "hourly" or (g("at_minute") is not None and period != "daily"):
+        return _next_hourly(now, int(g("at_minute") or 0))
+    if g("at_time_min") is not None or period == "daily":
+        return _next_daily(now, at_time_min)
+    cron = g("cron_expr")
+    if cron:
+        try:
+            from croniter import croniter  # optional dependency
+            it = croniter(cron, now)
+            return it.get_next(datetime)
+        except Exception:
+            return None
+    return None

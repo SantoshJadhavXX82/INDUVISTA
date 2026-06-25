@@ -1234,6 +1234,46 @@ def list_recent_jobs(db: Annotated[Session, Depends(get_session)],
     return list_jobs(db, None, limit)
 
 
+@router.get("/jobs/{job_id}/stages")
+def list_report_job_stages(job_id: int, db: Annotated[Session, Depends(get_session)]):
+    """Per-stage generation telemetry for one job (resolve/data/render/deliver)."""
+    from app.services.report_jobs import list_stages
+    return list_stages(db, job_id)
+
+
+@router.get("/next-due")
+def reports_next_due(db: Annotated[Session, Depends(get_session)]):
+    """Next scheduled fire per (report, timed trigger) — drives the countdown."""
+    import os
+    from app.workers.report_schedule import next_instant
+    tz = _ZoneInfo(os.getenv("APP_TIMEZONE", "UTC"))
+    now = _dt.now(tz)
+    rows = db.execute(text("""
+        SELECT t.id AS trigger_id, t.name AS trigger_name, t.trigger_type,
+               t.period, t.interval_minutes, t.day_of_week, t.days_of_week,
+               t.cron_expr, t.at_time_min, t.at_minute, t.day_of_month,
+               t.month_of_year, t.run_at,
+               s.report_id, d.name AS report_name, s.last_fired_at
+        FROM report_trigger_state s
+        JOIN report_triggers t ON t.id = s.trigger_id
+        JOIN report_definitions d ON d.id = s.report_id
+        WHERE t.trigger_type = 'timed'
+    """)).mappings().all()
+    out = []
+    for r in rows:
+        try:
+            nd = next_instant(dict(r), now, r.get("last_fired_at"))
+        except Exception:
+            nd = None
+        out.append({
+            "report_id": r["report_id"], "report_name": r["report_name"],
+            "trigger_id": r["trigger_id"], "trigger_name": r["trigger_name"],
+            "last_fired_at": r["last_fired_at"].isoformat() if r["last_fired_at"] else None,
+            "next_due": nd.isoformat() if nd else None,
+        })
+    return out
+
+
 # ===========================================================================
 # Batch runs (override) — manual batch start/stop so the 'batch' period type
 # can be exercised today with simulated tags. Later a tag-threshold worker can

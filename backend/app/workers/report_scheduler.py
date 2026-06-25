@@ -222,6 +222,13 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
     active_rev_id = None
     catastrophic = False
     cat_err: Optional[str] = None
+    # Per-stage telemetry (resolve/data/render/deliver). Collection is additive
+    # and the write (in finally) is wrapped so it can never break generation.
+    stages: list[dict[str, Any]] = []
+    _stage = "resolve"
+    rnd_n = rnd_bytes = rnd_ms = rnd_err = 0
+    dlv_n = dlv_bytes = dlv_ms = dlv_err = 0
+    _t_resolve = time.monotonic()
 
     try:
         # build the definition + context, render once, deliver to each dest.
@@ -232,7 +239,16 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
         active_rev_id = db.execute(text(
             "SELECT active_revision_id FROM report_definitions WHERE id = :rid"),
             {"rid": report_id}).scalar()
+        stages.append({"seq": 1, "stage": "resolve", "status": "ok", "n": 1,
+                       "bytes": None, "ms": int((time.monotonic() - _t_resolve) * 1000),
+                       "detail": (f"revision {active_rev_id}" if active_rev_id else "live")})
+        _stage = "data"
+        _t_data = time.monotonic()
         ctx, window = resolve_report_context(db, report_id, APP_TZ, snapshot_at, tag_ids)
+        stages.append({"seq": 2, "stage": "data", "status": "ok", "n": len(tag_ids),
+                       "bytes": None, "ms": int((time.monotonic() - _t_data) * 1000),
+                       "detail": f"{len(tag_ids)} tag(s)"})
+        _stage = "render"
         # Carry the computed window so _record persists it on every row.
         job["_period_start"] = window[0] if window else None
         job["_period_end"] = window[1] if window else None
@@ -262,7 +278,11 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
                 # Render each format at most once across all destinations.
                 try:
                     if fmt not in rendered:
+                        _tr = time.monotonic()
                         rendered[fmt] = _render_one(fmt, dm, ctx, get_default_style(db))
+                        rnd_ms += int((time.monotonic() - _tr) * 1000)
+                        rnd_n += 1
+                        rnd_bytes += len(rendered[fmt][0])
                     payload, ext = rendered[fmt]
                 except _UnsupportedFormat as exc:
                     # e.g. csv — no serializer yet. Log + skip without a record,
@@ -271,6 +291,7 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
                              report_name, exc, d.get("name"))
                     continue
                 except Exception as exc:
+                    rnd_err += 1
                     log.exception("report '%s': render %s failed", report_name, fmt)
                     _record(db, job, trigger_kind, snapshot_at, fmt=fmt,
                             status="error", error=str(exc)[:500])
@@ -278,6 +299,7 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
 
                 # Deliver with the format-correct file extension.
                 try:
+                    _td = time.monotonic()
                     out_dir = Path(d["target"]); out_dir.mkdir(parents=True, exist_ok=True)
                     out_path = out_dir / f"{safe}_{stamp}.{ext}"
                     dtype = d.get("dest_type")
@@ -292,7 +314,11 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
                         _record(db, job, trigger_kind, snapshot_at, fmt=fmt,
                                 status="error", error=f"unknown dest_type '{dtype}'")
                         continue
+                    dlv_ms += int((time.monotonic() - _td) * 1000)
+                    dlv_n += 1
+                    dlv_bytes += len(payload)
                 except Exception as exc:
+                    dlv_err += 1
                     log.exception("report '%s': deliver %s to '%s' failed",
                                   report_name, fmt, d.get("name"))
                     _record(db, job, trigger_kind, snapshot_at, fmt=fmt,
@@ -304,10 +330,22 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
                 log.info("report '%s' fired (%s) -> %s [%s] (%d bytes)",
                          report_name, trigger_kind, out_path, fmt, len(payload))
 
+        stages.append({"seq": 3, "stage": "render",
+                       "status": ("ok" if not rnd_err else ("partial" if rnd_n else "error")),
+                       "n": rnd_n, "bytes": (rnd_bytes or None), "ms": (rnd_ms or None),
+                       "detail": (f"{rnd_err} render error(s)" if rnd_err else None)})
+        stages.append({"seq": 4, "stage": "deliver",
+                       "status": ("ok" if not dlv_err else ("partial" if dlv_n else "error")),
+                       "n": dlv_n, "bytes": (dlv_bytes or None), "ms": (dlv_ms or None),
+                       "detail": (f"{dlv_err} deliver error(s)" if dlv_err else None)})
+
     except Exception as e:
         log.exception("report '%s' render/deliver failed", report_name)
         catastrophic = True
         cat_err = str(e)[:500]
+        _seq = {"resolve": 1, "data": 2, "render": 3, "deliver": 4}.get(_stage, 0)
+        stages.append({"seq": _seq, "stage": _stage, "status": "error",
+                       "n": 0, "bytes": None, "ms": None, "detail": cat_err})
         db.execute(text("""
             INSERT INTO report_records
                 (report_id, report_name, category, trigger_id, trigger_kind,
@@ -338,13 +376,18 @@ def _fire(db, job: dict[str, Any], tz: ZoneInfo, snapshot_at: datetime,
             "WHERE report_id = :rid AND snapshot_at = :snap"
         ), {"rid": report_id, "snap": snapshot_at}).all()
         fmts = ",".join(sorted(f[0] for f in fmt_rows if f[0])) or None
-        record_job(db, report_id=report_id, report_name=report_name,
+        job_id = record_job(db, report_id=report_id, report_name=report_name,
                    trigger_kind=trigger_kind, revision_id=active_rev_id, formats=fmts,
                    status=job_status, snapshot_at=snapshot_at,
                    period_start=job.get("_period_start"),
                    period_end=job.get("_period_end"),
                    error=(cat_err if catastrophic else None),
                    started_at=started_at, finished_at=datetime.now(tz))
+        try:
+            from app.services.report_jobs import record_stages
+            record_stages(db, job_id, stages)
+        except Exception:
+            log.exception("report '%s': failed to record stage telemetry", report_name)
 
 
 # ------------------------------------------------------------------------- loop
