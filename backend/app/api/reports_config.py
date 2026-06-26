@@ -1241,6 +1241,34 @@ def list_report_job_stages(job_id: int, db: Annotated[Session, Depends(get_sessi
     return list_stages(db, job_id)
 
 
+@router.get("/stage-summary")
+def report_stage_summary(
+    db: Annotated[Session, Depends(get_session)],
+    limit_runs: Annotated[int, Query(ge=1, le=2000)] = 300,
+):
+    """Per (report, stage) aggregate over the most recent runs — drives the
+    Reports x Stage heatmap. One GROUP BY; read-only."""
+    rows = db.execute(text("""
+        WITH recent AS (
+            SELECT id, report_id, report_name
+            FROM report_jobs ORDER BY id DESC LIMIT :lim
+        )
+        SELECT r.report_id, r.report_name, s.stage,
+               COUNT(*)                                       AS runs,
+               COALESCE(SUM((s.status = 'ok')::int), 0)       AS ok,
+               COALESCE(SUM((s.status = 'error')::int), 0)    AS err,
+               COALESCE(SUM((s.status = 'partial')::int), 0)  AS partial,
+               AVG(s.ms)::int                                 AS avg_ms,
+               MAX(s.ms)                                      AS max_ms,
+               COALESCE(SUM(s.bytes), 0)                      AS total_bytes
+        FROM report_job_stages s
+        JOIN recent r ON r.id = s.job_id
+        GROUP BY r.report_id, r.report_name, s.stage
+        ORDER BY r.report_name, s.stage
+    """), {"lim": limit_runs}).mappings().all()
+    return [dict(r) for r in rows]
+
+
 @router.get("/next-due")
 def reports_next_due(db: Annotated[Session, Depends(get_session)]):
     """Next scheduled fire per (report, timed trigger) — drives the countdown."""

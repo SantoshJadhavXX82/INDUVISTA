@@ -43,6 +43,7 @@ import { help } from "@/lib/help-text";
 import { PageHeader } from "@/components/ui/page-header";
 import { MetricStrip, type MetricItem } from "@/components/ui/metric-strip";
 import { QualityHeatmapCard } from "@/components/diagnostics/quality-heatmap";
+import { ReportHeatmapCard } from "@/components/diagnostics/report-heatmap";
 import { ReportHealthCard } from "@/components/diagnostics/report-health";
 
 const REFRESH_MS = 5_000;
@@ -187,6 +188,8 @@ export default function Diagnostics() {
           a horizontal red band = one chronically-broken tag; a vertical
           red column = a whole-system outage at that time. */}
       <QualityHeatmapCard />
+
+      <ReportHeatmapCard />
 
       <ReportHealthCard />
 
