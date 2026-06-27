@@ -47,6 +47,9 @@ const CalcDefinitionsAdmin = lazy(() => import("@/pages/CalcDefinitionsAdmin"));
 const AuditLog = lazy(() => import("@/pages/AuditLog"));
 // Phase OPC-web.3 — backend-managed OPC UA sources page
 const OpcSources = lazy(() => import("@/pages/OpcSources"));
+// Phase RM.1 - Report Manager
+const ReportManager = lazy(() => import("@/pages/ReportManager"));
+const ReportDiagnostics = lazy(() => import("@/pages/ReportDiagnostics"));
 
 export default function App() {
   return (
@@ -89,6 +92,8 @@ function AuthedRoutes() {
         <Route path="/reports" element={<Reports />} />
         <Route path="/explorer" element={<Explorer />} />
         <Route path="/reports/config" element={<ReportsConfig />} />
+        <Route path="/reports/manager" element={<ReportManager />} />
+        <Route path="/reports/diagnostics" element={<ReportDiagnostics />} />
         {/* Triggers + Destinations were consolidated into Report Config tabs.
             Keep the old paths working as redirects into the right tab. */}
         <Route path="/config/report-triggers" element={<Navigate to="/reports/config?tab=triggers" replace />} />

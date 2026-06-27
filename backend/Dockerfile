@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-liberation \
         fonts-crosextra-carlito \
         fonts-noto-core \
+        tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies first so this layer is cached when only

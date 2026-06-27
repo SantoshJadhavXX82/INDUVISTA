@@ -198,6 +198,14 @@ app.include_router(_users_admin.router)
 from app.api import signatures as _signatures
 app.include_router(_signatures.router)
 
+# Phase RM.1 - Report Manager (generated-file history + download/preview/archive)
+from app.api import report_manager as _report_manager
+app.include_router(_report_manager.router)
+
+# Phase RM.6 - per-report diagnostics (coverage / timing / tag health)
+from app.api import report_diagnostics as _report_diagnostics
+app.include_router(_report_diagnostics.router)
+
 @app.on_event("startup")
 def _audit_schema_startup() -> None:
     # Phase 16.0g: create audit_log table + hypertable + retention on

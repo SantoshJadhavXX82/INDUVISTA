@@ -128,11 +128,20 @@ def due_instant(trigger: dict[str, Any], now: datetime,
     # 1. interval-based (every N minutes) — highest specificity
     iv = g("interval_minutes")
     if iv:
+        step_min = max(1, int(iv))
         if last_fired_at is None:
-            # first run: due as of the most recent interval boundary <= now
+            # first run: due as of the current minute boundary
             return now.replace(second=0, microsecond=0)
-        nxt = last_fired_at + timedelta(minutes=int(iv))
-        return nxt if nxt <= now else None
+        # Skip straight to the LATEST due boundary instead of replaying every
+        # missed step one-per-tick. Without this, a stale last_fired_at (e.g.
+        # after the scheduler was down/rebuilt) caused a catch-up storm that
+        # back-filled ~one report per tick. Stale intermediate boundaries are
+        # intentionally NOT back-filled — same philosophy as MAX_CATCHUP_MIN.
+        step = timedelta(minutes=step_min)
+        n = int((now - last_fired_at) // step)
+        if n < 1:
+            return None  # not due yet
+        return last_fired_at + n * step
 
     # 2. yearly (month_of_year set)
     if g("month_of_year"):

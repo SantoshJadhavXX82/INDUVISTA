@@ -337,9 +337,28 @@ export function NewTriggerModal({
               </div>
             )}
             {mode === "every_n_minutes" && (
+              /* Phase RM.4 — free numeric entry (>= 1 min) + quick picks. */
               <Field label="Interval (minutes)">
-                <Select value={String(intervalMin)} options={["5", "10", "15", "30", "60"]}
-                  labels={["5 min", "10 min", "15 min", "30 min", "60 min"]} onChange={(v) => setIntervalMin(+v)} />
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="number" min={1} step={1} value={intervalMin}
+                    onChange={(e) => setIntervalMin(Math.max(1, Math.floor(Number(e.target.value) || 1)))}
+                    className="h-9 w-24 rounded-md border border-border bg-background px-2 text-sm outline-none focus:ring-2 focus:ring-ring"
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    minute{intervalMin === 1 ? "" : "s"}
+                  </span>
+                  <div className="flex gap-1">
+                    {[1, 5, 15, 30, 60].map((p) => (
+                      <button
+                        key={p} type="button" onClick={() => setIntervalMin(p)}
+                        className={`rounded-md border px-2 py-1 text-xs ${intervalMin === p ? "border-primary text-primary" : "border-border text-muted-foreground hover:bg-muted"}`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </Field>
             )}
             {mode === "cron" && (

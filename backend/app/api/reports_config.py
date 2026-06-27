@@ -826,17 +826,36 @@ def render_definition(
         status, err = "error", str(e)
 
     # Record the attempt either way (audit + history), with the actual fmt.
+    # Phase RM.3 — persist the rendered file to the archive so the report is
+    # viewable + downloadable later in Report Manager (mirrors the scheduler).
+    archive_fp = None
+    if status == "ok" and out_bytes:
+        try:
+            import os as _os
+            import logging as _logging
+            from pathlib import Path as _Path
+            _arch = _Path(_os.getenv("REPORT_ARCHIVE_DIR", "/var/lib/induvista/reports"))
+            _arch.mkdir(parents=True, exist_ok=True)
+            _safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in row["name"])
+            _fp = _arch / f"{_safe}_{snapshot_at.strftime('%Y%m%d_%H%M%S')}.{ext}"
+            _fp.write_bytes(out_bytes)
+            archive_fp = str(_fp)
+        except Exception as _e:  # archiving must never fail the render
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "report '%s': on-demand archive write failed: %s", row["name"], _e)
     db.execute(text("""
         INSERT INTO report_records
             (report_id, report_name, category, trigger_kind, snapshot_at,
-             period_start, period_end, fmt, byte_size, status, error)
-        VALUES (:rid, :name, :cat, 'manual', :snap, :ps, :pe, :fmt, :size, :status, :err)
+             period_start, period_end, fmt, file_path, byte_size, status, error)
+        VALUES (:rid, :name, :cat, 'manual', :snap, :ps, :pe, :fmt, :fp, :size, :status, :err)
     """), {
         "rid": def_id, "name": row["name"], "cat": row["category"],
         "snap": snapshot_at,
         "ps": (window[0] if window else None),
         "pe": (window[1] if window else None),
         "fmt": format,
+        "fp": archive_fp,
         "size": (len(out_bytes) if status == "ok" else None),
         "status": status, "err": err,
     })

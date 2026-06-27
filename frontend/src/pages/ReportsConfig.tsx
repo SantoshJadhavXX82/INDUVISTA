@@ -17,7 +17,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useSearchParams } from "react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Trash2, Save, FileDown, Clock, FolderOutput, Tags as TagsIcon,
+  Plus, Trash2, Save, FileDown, Clock, FolderOutput, Tags as TagsIcon, CalendarClock, Activity, Zap,
   Loader2, FileText, CheckCircle2, AlertCircle, LayoutGrid, Settings as SettingsIcon, Settings2, Boxes,
   History, Palette, X,
 } from "lucide-react";
@@ -131,6 +131,26 @@ const ORIENTATIONS = ["portrait", "landscape"];
 
 type TopTab = "definitions" | "triggers" | "destinations" | "batch" | "defaults";
 
+// RD2 — report-type icon + category tint (shared visual language with Report Diagnostics).
+function defType(d: { category: string; report_type: string | null; name: string }):
+  { Icon: typeof FileText; soft: string; on: string } {
+  const s = `${d.report_type ?? ""} ${d.name}`.toLowerCase();
+  let Icon: typeof FileText = FileText;
+  if (/hour/.test(s)) Icon = Clock;
+  else if (/dai|week|month|year|annual/.test(s)) Icon = CalendarClock;
+  else if (/current|live|status|snapshot|now/.test(s)) Icon = Activity;
+  else if (/event|alarm|trip/.test(s)) Icon = Zap;
+  else if (d.category === "periodic") Icon = CalendarClock;
+  else if (d.category === "event") Icon = Zap;
+  else if (d.category === "on_demand") Icon = Activity;
+  const tint =
+    d.category === "periodic" ? ["--ios-blue-soft", "--ios-blue-on-soft"]
+    : d.category === "event" ? ["--ios-purple-soft", "--ios-purple-on-soft"]
+    : d.category === "on_demand" ? ["--ios-teal-soft", "--ios-teal-on-soft"]
+    : ["--status-neutral-soft", "--status-neutral-on-soft"];
+  return { Icon, soft: tint[0], on: tint[1] };
+}
+
 export default function ReportsConfig() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -177,6 +197,20 @@ export default function ReportsConfig() {
     setToast({ kind, msg });
     setTimeout(() => setToast(null), 3500);
   };
+
+  // RD1 — confirmed delete shared by list rows + editor header.
+  const [pendingDelete, setPendingDelete] = useState<Definition | null>(null);
+  const deleteDef = useMutation({
+    mutationFn: (id: number) => api.delete(`/report-config/definitions/${id}`),
+    onSuccess: () => {
+      const goneId = pendingDelete?.id;
+      qc.invalidateQueries({ queryKey: ["report-defs"] });
+      if (goneId === selectedId) setSelectedId(null);
+      flash("ok", "Report deleted.");
+      setPendingDelete(null);
+    },
+    onError: (e: any) => { flash("err", e?.detail || "Delete failed."); setPendingDelete(null); },
+  });
 
   // ---- create definition ----
   const createDef = useMutation({
@@ -267,27 +301,45 @@ export default function ReportsConfig() {
               No reports yet. Click “New report”.
             </div>
           ) : (
-            <ul>
-              {defs.data.map((d) => (
-                <li key={d.id}>
+            <ul className="py-1">
+              {defs.data.map((d) => {
+                const t = defType(d);
+                const Icon = t.Icon;
+                const sel = d.id === selectedId;
+                return (
+                <li key={d.id} className="group relative px-1.5">
+                  {sel && <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full" style={{ backgroundColor: "var(--ios-blue,#007aff)" }} />}
                   <button
                     onClick={() => setSelectedId(d.id)}
-                    className="w-full text-left px-4 py-3 border-b transition-colors"
-                    style={{
-                      borderColor: "var(--separator, #eee)",
-                      backgroundColor: d.id === selectedId ? "var(--ios-blue-soft, #e6f0fe)" : "transparent",
-                    }}
+                    className="flex w-full items-center gap-3 rounded-[var(--radius-md-2,10px)] px-2.5 py-2.5 text-left transition-colors"
+                    style={{ backgroundColor: sel ? "var(--ios-blue-soft, #e6f0fe)" : "transparent" }}
                   >
-                    <div className="flex items-center gap-2">
-                      <FileText className="h-3.5 w-3.5 shrink-0" style={{ color: "var(--ios-blue, #007aff)" }} />
-                      <span className="text-[13.5px] font-medium truncate">{d.name}</span>
-                    </div>
-                    <div className="text-[11px] mt-0.5" style={{ color: "var(--ios-gray-1)" }}>
-                      {d.category}{d.report_type ? ` · ${d.report_type}` : ""}{d.enabled ? "" : " · disabled"}
-                    </div>
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--radius-md-2,10px)]"
+                      style={{ backgroundColor: `var(${t.soft})`, color: `var(${t.on})` }}>
+                      <Icon className="h-[18px] w-[18px]" />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13.5px] font-semibold leading-tight">{d.name}</span>
+                      <span className="mt-1 flex items-center gap-1.5">
+                        <span className="rounded-full px-1.5 py-[1px] text-[10px] font-semibold uppercase tracking-wide"
+                          style={{ backgroundColor: `var(${t.soft})`, color: `var(${t.on})` }}>{d.category}</span>
+                        {d.report_type && <span className="truncate text-[11px]" style={{ color: "var(--ios-gray-1)" }}>{d.report_type}</span>}
+                        {!d.enabled && <span className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>· disabled</span>}
+                      </span>
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    title={`Delete ${d.name}`}
+                    onClick={(e) => { e.stopPropagation(); setPendingDelete(d); }}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 rounded-md p-2 opacity-0 transition-opacity hover:bg-[var(--ios-red-soft,#fdecea)] hover:text-[var(--ios-red,#c0392b)] group-hover:opacity-100 focus:opacity-100"
+                    style={{ color: "var(--ios-gray-1)" }}
+                  >
+                    <Trash2 className="h-4 w-4" />
                   </button>
                 </li>
-              ))}
+                );
+              })}
             </ul>
           )}
         </SectionCard>
@@ -301,7 +353,7 @@ export default function ReportsConfig() {
             destinations={destinations.data ?? []}
             allTags={allTags.data ?? []}
             onSaved={() => { qc.invalidateQueries({ queryKey: ["report-defs"] }); flash("ok", "Saved."); }}
-            onDeleted={() => { qc.invalidateQueries({ queryKey: ["report-defs"] }); setSelectedId(null); flash("ok", "Deleted."); }}
+            onRequestDelete={() => setPendingDelete(selected)}
             onError={(m) => flash("err", m)}
             onGotoTriggers={() => switchTab("triggers")}
             onGotoDests={() => switchTab("destinations")}
@@ -316,13 +368,50 @@ export default function ReportsConfig() {
       {topTab === "destinations" && <ReportDestinations embedded />}
       {topTab === "batch" && <BatchControl />}
       {topTab === "defaults" && <ReportDefaultsTab />}
+
+      {pendingDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => { if (!deleteDef.isPending) setPendingDelete(null); }}
+        >
+          <div
+            className="w-full max-w-md rounded-[var(--radius-lg-2,14px)] p-5 shadow-xl"
+            style={{ backgroundColor: "var(--bg, #fff)" }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+                style={{ backgroundColor: "var(--ios-red-soft,#fdecea)", color: "var(--ios-red,#c0392b)" }}>
+                <Trash2 className="h-4 w-4" />
+              </span>
+              <div className="min-w-0">
+                <h3 className="text-[15px] font-semibold">Delete report?</h3>
+                <p className="mt-1 text-[13px]" style={{ color: "var(--ios-gray-1)" }}>
+                  This permanently deletes <span className="font-medium">{pendingDelete.name}</span> and its
+                  trigger links and destinations. Generated report history is kept. This can’t be undone.
+                </p>
+              </div>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setPendingDelete(null)} disabled={deleteDef.isPending}>
+                Cancel
+              </Button>
+              <Button size="sm" onClick={() => deleteDef.mutate(pendingDelete.id)} disabled={deleteDef.isPending}
+                style={{ backgroundColor: "var(--ios-red,#c0392b)", color: "#fff" }}>
+                {deleteDef.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                <span className="ml-1">Delete report</span>
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 // ===========================================================================
 function Editor({
-  def, triggers, destinations, allTags, onSaved, onDeleted, onError,
+  def, triggers, destinations, allTags, onSaved, onRequestDelete, onError,
   onGotoTriggers, onGotoDests,
 }: {
   def: Definition;
@@ -330,7 +419,7 @@ function Editor({
   destinations: Destination[];
   allTags: TagLite[];
   onSaved: () => void;
-  onDeleted: () => void;
+  onRequestDelete: () => void;
   onError: (m: string) => void;
   onGotoTriggers: () => void;
   onGotoDests: () => void;
@@ -401,12 +490,6 @@ function Editor({
 
   type Tab = "content" | "period" | "data" | "triggers" | "destinations" | "settings" | "revisions";
   const [tab, setTab] = useState<Tab>("content");
-
-  const del = useMutation({
-    mutationFn: () => api.delete(`/report-config/definitions/${def.id}`),
-    onSuccess: onDeleted,
-    onError: (e: any) => onError(e?.detail || "Delete failed."),
-  });
 
   // ---- render (download PDF) — uses saved tags via the render fallback ----
   const render = async () => {
@@ -484,27 +567,39 @@ function Editor({
     { id: "revisions", label: "Revisions", icon: <History className="h-3.5 w-3.5" /> },
   ];
 
+  const ht = defType(form);
+
   return (
     <div className="flex flex-col gap-3">
       {/* sticky header: identity + actions, always visible */}
-      <div className="sticky top-0 z-10 rounded-xl px-4 py-3 flex items-center justify-between"
+      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 rounded-[var(--radius-lg-2,14px)] px-4 py-3 shadow-[var(--card-shadow)]"
         style={{ backgroundColor: "var(--bg-elevated,#fff)", border: "0.5px solid var(--card-edge,#ddd)" }}>
-        <div className="min-w-0">
-          <input value={form.name} onChange={(e) => set("name", e.target.value)}
-            className="text-[15px] font-semibold bg-transparent border-0 p-0 w-full focus:outline-none" />
-          <div className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>
-            {form.category}{form.report_type ? ` · ${form.report_type}` : ""}{form.enabled ? "" : " · disabled"}
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[var(--radius-md-2,10px)]"
+            style={{ backgroundColor: `var(${ht.soft})`, color: `var(${ht.on})` }}>
+            <ht.Icon className="h-[22px] w-[22px]" />
+          </span>
+          <div className="min-w-0">
+            <input value={form.name} onChange={(e) => set("name", e.target.value)}
+              className="w-full truncate border-0 bg-transparent p-0 text-[17px] font-semibold leading-tight focus:outline-none" />
+            <div className="mt-1 flex items-center gap-1.5">
+              <span className="rounded-full px-1.5 py-[1px] text-[10px] font-semibold uppercase tracking-wide"
+                style={{ backgroundColor: `var(${ht.soft})`, color: `var(${ht.on})` }}>{form.category}</span>
+              {form.report_type && <span className="text-[11px]" style={{ color: "var(--ios-gray-1)" }}>{form.report_type}</span>}
+              {!form.enabled && <span className="rounded-full px-1.5 py-[1px] text-[10px] font-medium"
+                style={{ backgroundColor: "var(--status-neutral-soft)", color: "var(--status-neutral-on-soft)" }}>disabled</span>}
+            </div>
           </div>
         </div>
-        <div className="flex gap-2 shrink-0">
-          <div className="flex items-center gap-1 rounded-lg px-1.5 py-1"
-            style={{ border: "0.5px solid var(--card-edge,#ddd)", backgroundColor: "var(--bg,#fff)" }}
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="flex items-center gap-0.5 rounded-[var(--radius-md-2,10px)] p-0.5"
+            style={{ border: "0.5px solid var(--card-edge,#ddd)", backgroundColor: "var(--bg,#f2f2f7)" }}
             title="Select one or more output formats">
             {(["pdf", "html", "json", "xml"] as Fmt[]).map((f) => {
               const on = previewFormats.has(f);
               return (
                 <button key={f} onClick={() => toggleFmt(f)} type="button"
-                  className="rounded-md px-2 py-0.5 text-[11px] font-semibold transition-colors"
+                  className="rounded-[7px] px-2.5 py-1 text-[11px] font-semibold transition-colors"
                   style={{
                     backgroundColor: on ? "var(--ios-blue,#007aff)" : "transparent",
                     color: on ? "#fff" : "var(--ios-gray-1)",
@@ -518,6 +613,9 @@ function Editor({
             {rendering ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileDown className="h-3.5 w-3.5" />}
             <span className="ml-1">Download{previewFormats.size > 1 ? ` ${previewFormats.size} files` : previewFormats.size === 1 ? ` ${Array.from(previewFormats)[0].toUpperCase()}` : ""}</span>
           </Button>
+          <Button variant="outline" size="sm" onClick={onRequestDelete} style={{ color: "var(--ios-red,#c0392b)" }}>
+            <Trash2 className="h-3.5 w-3.5" /><span className="ml-1">Delete</span>
+          </Button>
           <Button size="sm" onClick={() => save.mutate()} disabled={save.isPending}>
             {save.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
             <span className="ml-1">Save</span>
@@ -527,16 +625,17 @@ function Editor({
 
       {/* tab bar */}
       <div className="flex gap-1 border-b" style={{ borderColor: "var(--separator,#eee)" }}>
-        {TABS.map((tb) => (
+        {TABS.map((tb) => {
+          const on = tab === tb.id;
+          return (
           <button key={tb.id} onClick={() => setTab(tb.id)}
-            className="flex items-center gap-1.5 px-3.5 py-2 text-[13px] font-medium transition-colors"
-            style={{
-              borderBottom: tab === tb.id ? "2px solid var(--ios-blue,#007aff)" : "2px solid transparent",
-              color: tab === tb.id ? "var(--ios-blue,#007aff)" : "var(--ios-gray-1)",
-            }}>
+            className="relative flex items-center gap-1.5 rounded-t-md px-3.5 py-2.5 text-[13px] font-medium transition-colors hover:bg-[var(--bg,#f2f2f7)]"
+            style={{ color: on ? "var(--ios-blue,#007aff)" : "var(--ios-gray-1)" }}>
             {tb.icon}{tb.label}
+            {on && <span className="absolute inset-x-1.5 -bottom-px h-[2.5px] rounded-full" style={{ backgroundColor: "var(--ios-blue,#007aff)" }} />}
           </button>
-        ))}
+          );
+        })}
       </div>
 
       {/* ---- SETTINGS tab (was "Details") ---- */}
@@ -544,7 +643,7 @@ function Editor({
       <SectionCard
         title="Settings"
         action={
-          <Button variant="outline" size="sm" onClick={() => del.mutate()} disabled={del.isPending}>
+          <Button variant="outline" size="sm" onClick={onRequestDelete}>
             <Trash2 className="h-3.5 w-3.5" /><span className="ml-1">Delete report</span>
           </Button>
         }

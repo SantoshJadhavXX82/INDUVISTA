@@ -100,6 +100,8 @@ function useEntries(alarmCount: number): Section[] {
         { kind: "leaf", to: "/reports",   label: "Reports",   icon: FileBarChart, matchPrefix: "/reports" },
         { kind: "leaf", to: "/explorer",  label: "Explorer",  icon: PieChart, matchPrefix: "/explorer" },
         { kind: "leaf", to: "/reports/config", label: "Report Config", icon: FileCog, matchPrefix: "/reports/config" },
+        { kind: "leaf", to: "/reports/manager", label: "Report Manager", icon: FileClock, matchPrefix: "/reports/manager" },
+        { kind: "leaf", to: "/reports/diagnostics", label: "Report Diagnostics", icon: HeartPulse, matchPrefix: "/reports/diagnostics" },
         {
           kind: "leaf", to: "/alarms", label: "Alarms",
           // When alarms are firing, swap the static Bell for the animated

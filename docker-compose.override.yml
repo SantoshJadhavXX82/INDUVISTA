@@ -1,17 +1,30 @@
 # docker-compose.override.yml — local dev overrides (auto-loaded by `docker compose`).
 #
-# valkey USED TO be defined here. It now lives in the base docker-compose.yml
-# so that `docker compose -f docker-compose.yml up` (base only, e.g. in CI or
-# prod) brings up a coherent stack. Do NOT redefine valkey here — that would
-# shadow the base definition.
+# Phase RM.5 — shared report archive volume.
 #
-# This file is intentionally minimal. Add machine-specific overrides below
-# (e.g. alternate host port bindings, extra mounts) without touching the base.
+# The report scheduler (svj_report_scheduler) writes generated PDFs to
+# /var/lib/induvista/reports inside ITS container; Report Manager's download/
+# preview runs in svj_backend and reads the same path. Without a shared volume
+# those are two separate filesystems, so every scheduled report shows as
+# MISSING in Report Manager (and is wiped on container restart).
 #
-# Example — expose backend on a different host port locally:
-#   services:
-#     backend:
-#       ports:
-#         - "127.0.0.1:8001:8000"
+# Mounting one named volume at that path in BOTH services makes scheduled
+# files visible to the viewer and persistent across restarts. Compose MERGES
+# these volume lists with the base file, so the existing ./backend/app mount
+# is preserved.
+#
+# NOTE: if you point a report at a *custom* folder Destination in Report
+# Config, set its target to a path under /var/lib/induvista/reports (or add
+# another shared mount) so Report Manager can read it too. The default archive
+# already lives on this volume.
 
-services: {}
+services:
+  backend:
+    volumes:
+      - svj_reports:/var/lib/induvista/reports
+  report_scheduler:
+    volumes:
+      - svj_reports:/var/lib/induvista/reports
+
+volumes:
+  svj_reports:
